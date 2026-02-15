@@ -1,4 +1,5 @@
 #include "OctreeTracer.h"
+#include "config.h"
 
 std::shared_ptr<OctreeTracer> OctreeTracer::Create(std::shared_ptr<VWrap::Allocator> allocator, std::shared_ptr<VWrap::Device> device, std::shared_ptr<VWrap::RenderPass> render_pass, std::shared_ptr<VWrap::CommandPool> graphics_pool, VkExtent2D extent, uint32_t num_frames) {
 	auto ret = std::make_shared<OctreeTracer>();
@@ -42,8 +43,8 @@ void OctreeTracer::CreateDescriptors(int max_sets)
 
 void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass)
 {
-	auto vert_shader_code = VWrap::readFile("../shaders/vert_tracer.spv");
-	auto frag_shader_code = VWrap::readFile("../shaders/frag_tracer.spv");
+	auto vert_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_tracer.vert.spv");
+	auto frag_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_tracer.frag.spv");
 
 
 	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};

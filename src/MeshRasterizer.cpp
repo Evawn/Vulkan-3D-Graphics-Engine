@@ -1,4 +1,5 @@
 #include "MeshRasterizer.h"
+#include "config.h"
 
 inline void MeshRasterizer::CreateVertexBuffer() {
 	VkDeviceSize bufferSize = sizeof(m_vertices[0]) * m_vertices.size();
@@ -161,8 +162,8 @@ std::shared_ptr<MeshRasterizer> MeshRasterizer::Create(std::shared_ptr<VWrap::Al
 
 void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass)
 {
-	auto vert_shader_code = VWrap::readFile("../shaders/vert_rast.spv");
-	auto frag_shader_code = VWrap::readFile("../shaders/frag_rast.spv");
+	auto vert_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_rast.vert.spv");
+	auto frag_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_rast.frag.spv");
 
 	auto bindingDescription = VWrap::Vertex::getBindingDescription();
 	auto attributeDescriptions = VWrap::Vertex::getAttributeDescriptions();

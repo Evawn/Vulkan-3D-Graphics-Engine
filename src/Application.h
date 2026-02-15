@@ -33,7 +33,6 @@
 #include "Allocator.h"
 
 // PROJECT INCLUDES ---------------------------------------------------------------------------------------------
-#include "MeshRasterizer.h"
 #include "GUIRenderer.h"
 #include "GPUProfiler.h"
 #include "Camera.h"
@@ -130,11 +129,6 @@ private:
 	std::vector<std::shared_ptr<VWrap::Framebuffer>> m_framebuffers;
 	std::shared_ptr<VWrap::ImageView> m_depth_image_view;
 	std::shared_ptr<VWrap::ImageView> m_color_image_view;
-
-	/// <summary>
-	/// Contains and manages the resources needed to render a mesh with rasterization.
-	/// </summary>
-	std::shared_ptr<MeshRasterizer> m_mesh_rasterizer;
 
 	/// <summary>
 	/// Contains and manages the resources needed to render GUI elements.

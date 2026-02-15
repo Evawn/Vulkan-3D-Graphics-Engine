@@ -14,6 +14,7 @@
 #include "ImageView.h"
 #include "Sampler.h"
 #include "Allocator.h"
+#include "config.h"
 
 #include "Camera.h"
 
@@ -31,12 +32,12 @@
 /// <summary>
 /// The path to the model to load.
 /// </summary>
-const std::string MODEL_PATH = "../models/viking_room.obj";
+const std::string MODEL_PATH = std::string(config::ASSET_DIR) + "/models/viking_room.obj";
 
 /// <summary>
 /// The path to the texture to load.
 /// </summary>
-const std::string TEXTURE_PATH = "../textures/viking_room.png";
+const std::string TEXTURE_PATH = std::string(config::ASSET_DIR) + "/textures/viking_room.png";
 
 /// <summary>
 /// Represents the contents of the uniform buffer.

@@ -11,14 +11,6 @@ void Application::Init() {
 	InitVulkan();
 	InitImGui();
 	VkExtent2D extent = m_frame_controller->GetSwapchain()->GetExtent();
-	m_mesh_rasterizer = MeshRasterizer::Create(
-		m_allocator,
-		m_device,
-		m_render_pass,
-		m_graphics_command_pool,
-		extent,
-		MAX_FRAMES_IN_FLIGHT);
-
 	m_octree_tracer = OctreeTracer::Create(
 		m_allocator,
 		m_device,
@@ -225,9 +217,6 @@ void Application::DrawFrame() {
 	command_buffer->CmdBeginRenderPass(m_render_pass, framebuffer);
 
 	// RECORD SCENE COMMANDS ------------------------------------------------
-	//m_mesh_rasterizer->UpdateUniformBuffer(frame_index, m_camera);
-	//m_mesh_rasterizer->CmdDraw(command_buffer, frame_index);
-
 	m_octree_tracer->CmdDraw(command_buffer, frame_index, m_camera);
 
 	// END PROFILING ------------------------------------------------
@@ -257,7 +246,6 @@ void Application::Resize() {
 	CreateFramebuffers();
 
 	VkExtent2D extent = m_frame_controller->GetSwapchain()->GetExtent();
-	m_mesh_rasterizer->Resize(extent);
 	m_octree_tracer->Resize(extent);
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
