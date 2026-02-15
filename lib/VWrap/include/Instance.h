@@ -25,7 +25,10 @@ namespace VWrap {
 	/// The device extensions to enable.
 	/// </summary>
 	const std::vector<const char*> DEVICE_EXTENSIONS = {
-		VK_KHR_SWAPCHAIN_EXTENSION_NAME
+		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#ifdef __APPLE__
+		"VK_KHR_portability_subset",
+#endif
 	};
 
 	/// <summary>
