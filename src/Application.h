@@ -90,7 +90,7 @@ static void check_vk_result(VkResult err)
 		abort();
 }
 
-static struct CameraMoveState {
+struct CameraMoveState {
 	bool up, down, left, right, forward, back = false;
 	double dx, dy = 0.0;
 };

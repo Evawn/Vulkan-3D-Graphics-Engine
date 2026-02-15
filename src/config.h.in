@@ -1,0 +1,8 @@
+#pragma once
+
+#include <string>
+
+namespace config {
+    constexpr const char* SHADER_DIR = "@CMAKE_BINARY_DIR@/shaders";
+    constexpr const char* ASSET_DIR  = "@CMAKE_SOURCE_DIR@";
+}

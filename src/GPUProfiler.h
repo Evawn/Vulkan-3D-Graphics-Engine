@@ -1,5 +1,5 @@
 #pragma once
-#include "Vulkan/vulkan.h"
+#include <vulkan/vulkan.h>
 #include <memory>
 #include <vector>
 #include "Device.h"

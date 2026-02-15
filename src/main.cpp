@@ -4,7 +4,10 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 #define VMA_IMPLEMENTATION
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
 #include "vk_mem_alloc.h"
+#pragma clang diagnostic pop
 
 /// <summary>
 /// Entry point of our application. Creates the app, and runs it while catching any exceptions.
