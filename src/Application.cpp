@@ -150,7 +150,6 @@ void Application::InitImGui() {
 	float dpi_scale;
 	glfwGetWindowContentScale(m_glfw_window.get()[0], &dpi_scale, nullptr);
 	m_gui_renderer->SetDpiScale(dpi_scale);
-	ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 }
 
 void Application::MainLoop() {
@@ -164,7 +163,14 @@ void Application::MainLoop() {
 		auto input_query = Input::Poll();
 		ParseInputQuery(input_query);
 
-		if(m_app_state.focused && m_viewport_panel.IsHovered()) {
+		// Click to capture viewport
+		if (!m_app_state.focused && m_viewport_panel.WasClicked()) {
+			m_app_state.focused = true;
+			Input::HideCursor(true);
+			Input::CenterCursor(true);
+		}
+
+		if (m_app_state.focused) {
 			ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 			MoveCamera(dt);
 		} else {
@@ -193,11 +199,13 @@ void Application::ParseInputQuery(InputQuery query)
 
 		switch (action) {
 		case Action::ESCAPE:
-			m_app_state.focused = !m_app_state.focused;
-			move_state.dx = 0;
-			move_state.dy = 0;
-			Input::HideCursor(m_app_state.focused);
-			Input::CenterCursor(m_app_state.focused);
+			if (m_app_state.focused) {
+				m_app_state.focused = false;
+				move_state.dx = 0;
+				move_state.dy = 0;
+				Input::HideCursor(false);
+				Input::CenterCursor(false);
+			}
 			break;
 		case Action::MOVE_UP:
 			move_state.up = true;

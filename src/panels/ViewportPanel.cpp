@@ -20,10 +20,19 @@ void ViewportPanel::Draw() {
 
 	if (m_texture_id != VK_NULL_HANDLE && contentSize.x > 0 && contentSize.y > 0) {
 		ImGui::Image((ImTextureID)m_texture_id, contentSize);
+		if (ImGui::IsItemClicked()) {
+			m_clicked = true;
+		}
 	}
 
 	ImGui::End();
 	ImGui::PopStyleVar();
+}
+
+bool ViewportPanel::WasClicked() {
+	bool c = m_clicked;
+	m_clicked = false;
+	return c;
 }
 
 bool ViewportPanel::WasResized() {

@@ -11,6 +11,7 @@ private:
 	bool m_focused = false;
 	bool m_hovered = false;
 	bool m_was_resized = false;
+	bool m_clicked = false;
 
 public:
 	void SetTextureID(VkDescriptorSet texID) { m_texture_id = texID; }
@@ -18,6 +19,7 @@ public:
 
 	bool IsFocused() const { return m_focused; }
 	bool IsHovered() const { return m_hovered; }
+	bool WasClicked();
 	bool WasResized();
 	VkExtent2D GetDesiredExtent() const;
 };

@@ -123,7 +123,7 @@ private:
 	};
 
 	struct AppState {
-		bool focused = true;
+		bool focused = false;
 		float sensitivity = 0.5f;
 		float speed = 5.0f;
 	};
