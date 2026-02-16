@@ -2,12 +2,7 @@
 #include "ShaderCompiler.h"
 #include "Log.h"
 #include "UIStyle.h"
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
-#include <ctime>
-#include <filesystem>
+#include "ScreenshotCapture.h"
 
 void Application::Run() {
 	Init();
@@ -23,19 +18,14 @@ void Application::Init() {
 	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
 
 	// Create offscreen target for scene rendering
-	m_offscreen_target = OffscreenTarget::Create(
+	m_offscreen_target = VWrap::OffscreenTarget::Create(
 		m_vk.device, m_vk.allocator, m_scene_render_pass,
 		extent, m_vk.msaaSamples,
 		m_vk.frameController->GetSwapchain()->GetFormat());
+	RegisterSceneTexture();
 
 	spdlog::get("App")->debug("Building render context...");
-	RenderContext render_ctx{};
-	render_ctx.device = m_vk.device;
-	render_ctx.allocator = m_vk.allocator;
-	render_ctx.graphicsPool = m_vk.graphicsCommandPool;
-	render_ctx.renderPass = m_scene_render_pass;
-	render_ctx.extent = extent;
-	render_ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+	auto render_ctx = BuildRenderContext();
 
 	spdlog::get("App")->debug("Initializing OctreeTracer...");
 	m_renderers.push_back(std::make_unique<OctreeTracer>());
@@ -49,15 +39,17 @@ void Application::Init() {
 
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
-	InitPanels();
-
+	// Camera controller owns input polling and camera movement
 	Input::Init(m_glfw_window.get()[0]);
-	Input::AddContext(m_main_context);
+	m_camera_controller = CameraController::Create(m_camera);
+	m_camera_controller->SetReloadCallback([this]() { HotReloadShaders(); });
+
+	InitPanels();
 }
 
 void Application::InitPanels() {
 	// Viewport panel
-	m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
+	m_viewport_panel.SetTextureID(m_scene_texture);
 	m_gui_renderer->RegisterPanel("Viewport", [this]() { m_viewport_panel.Draw(); });
 
 	// Metrics panel
@@ -67,13 +59,7 @@ void Application::InitPanels() {
 	m_metrics_panel.SetAllocator(m_vk.allocator->Get(), memProps.memoryHeapCount);
 	m_metrics_panel.SetWireframeCallback([this]() {
 		vkDeviceWaitIdle(m_vk.device->Get());
-		RenderContext ctx{};
-		ctx.device = m_vk.device;
-		ctx.allocator = m_vk.allocator;
-		ctx.graphicsPool = m_vk.graphicsCommandPool;
-		ctx.renderPass = m_scene_render_pass;
-		ctx.extent = m_offscreen_target->GetExtent();
-		ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+		auto ctx = BuildRenderContext();
 		m_renderers[m_active_renderer_index]->RecreatePipeline(ctx);
 	});
 	m_gui_renderer->RegisterPanel("Metrics", [this]() { m_metrics_panel.Draw(); });
@@ -87,7 +73,7 @@ void Application::InitPanels() {
 	m_inspector_panel.SetReloadCallback([this]() { HotReloadShaders(); });
 	m_inspector_panel.SetSwitchCallback([this](size_t idx) { SwitchRenderer(idx); });
 	m_inspector_panel.SetCamera(m_camera);
-	m_inspector_panel.SetAppControls(&m_app_state.sensitivity, &m_app_state.speed);
+	m_inspector_panel.SetAppControls(m_camera_controller->SensitivityPtr(), m_camera_controller->SpeedPtr());
 	m_inspector_panel.SetScreenshotCallback([this]() { CaptureScreenshot(); });
 	m_gui_renderer->RegisterPanel("Inspector", [this]() { m_inspector_panel.Draw(); });
 }
@@ -189,25 +175,20 @@ void Application::MainLoop() {
 		float dt = std::chrono::duration<float, std::chrono::seconds::period>(current_time - last_time).count();
 		last_time = current_time;
 
-		auto input_query = Input::Poll();
-		ParseInputQuery(input_query);
+		m_camera_controller->Update(dt);
 
 		// Click to capture viewport
-		if (!m_app_state.focused && m_viewport_panel.WasClicked()) {
-			m_app_state.focused = true;
-			Input::HideCursor(true);
-			Input::CenterCursor(true);
+		if (!m_camera_controller->IsFocused() && m_viewport_panel.WasClicked()) {
+			m_camera_controller->SetFocused(true);
 		}
 
-		if (m_app_state.focused) {
+		if (m_camera_controller->IsFocused()) {
 			ImGui::SetMouseCursor(ImGuiMouseCursor_None);
-			MoveCamera(dt);
 		} else {
 			ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
 		}
 
-		// Update viewport texture (may have changed after resize)
-		m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
+		m_viewport_panel.SetTextureID(m_scene_texture);
 
 		m_gui_renderer->BeginFrame();
 		DrawFrame();
@@ -215,52 +196,6 @@ void Application::MainLoop() {
 		m_metrics_panel.Update(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
 	}
 	vkDeviceWaitIdle(m_vk.device->Get());
-}
-
-void Application::ParseInputQuery(InputQuery query)
-{
-	move_state = { false, false, false, false, false, false, 0.0, 0.0 };
-	move_state.dx = query.dx;
-	move_state.dy = query.dy;
-
-	for (auto i : query.actions) {
-		Action action = static_cast<Action>(i);
-
-		switch (action) {
-		case Action::ESCAPE:
-			if (m_app_state.focused) {
-				m_app_state.focused = false;
-				move_state.dx = 0;
-				move_state.dy = 0;
-				Input::HideCursor(false);
-				Input::CenterCursor(false);
-			}
-			break;
-		case Action::MOVE_UP:
-			move_state.up = true;
-			break;
-		case Action::MOVE_DOWN:
-			move_state.down = true;
-			break;
-		case Action::MOVE_LEFT:
-			move_state.left = true;
-			break;
-		case Action::MOVE_RIGHT:
-			move_state.right = true;
-			break;
-		case Action::MOVE_FORWARD:
-			move_state.forward = true;
-			break;
-		case Action::MOVE_BACKWARD:
-			move_state.back = true;
-			break;
-		case Action::RELOAD_SHADERS:
-			HotReloadShaders();
-			break;
-		default:
-			return;
-		}
-	}
 }
 
 void Application::Cleanup() {
@@ -277,10 +212,14 @@ void Application::DrawFrame() {
 	if (m_viewport_panel.WasResized()) {
 		VkExtent2D desired = m_viewport_panel.GetDesiredExtent();
 		if (desired.width > 0 && desired.height > 0) {
+			if (m_scene_texture != VK_NULL_HANDLE) {
+				ImGui_ImplVulkan_RemoveTexture(m_scene_texture);
+			}
 			m_offscreen_target->Resize(desired);
+			RegisterSceneTexture();
 			m_renderers[m_active_renderer_index]->OnResize(desired);
 			m_camera->SetAspect((float)desired.width / (float)desired.height);
-			m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
+			m_viewport_panel.SetTextureID(m_scene_texture);
 		}
 	}
 
@@ -348,39 +287,6 @@ void Application::CreatePresentationFramebuffers() {
 	}
 }
 
-void Application::MoveCamera(float dt) {
-	float distance = m_app_state.speed * dt;
-	double mouse_sensitivity = (float)(-m_app_state.sensitivity/100.0);
-
-	if (move_state.up && !move_state.down) m_camera->MoveUp(distance);
-	if (move_state.down && !move_state.up) m_camera->MoveUp(-distance);
-	if (move_state.left && !move_state.right) m_camera->MoveRight(-distance);
-	if (move_state.right && !move_state.left) m_camera->MoveRight(distance);
-	if (move_state.forward && !move_state.back) m_camera->MoveForward(distance);
-	if (move_state.back && !move_state.forward) m_camera->MoveForward(-distance);
-
-	double dx = move_state.dx;
-	double dy = move_state.dy;
-
-	dx *= mouse_sensitivity;
-	dy *= mouse_sensitivity;
-
-	auto forward = m_camera->GetForward();
-	auto up = m_camera->GetUp();
-
-	auto dot = glm::dot(forward, up);
-	dot = glm::clamp(dot, -1.0f, 1.0f);
-	auto angle = glm::acos(dot);
-
-	if (angle - dy < 0.001f || angle - dy > glm::pi<float>() - 0.001f) dy = 0.0f;
-
-	auto x_rot = glm::rotate(glm::mat4(1.0f), (float)dx, up);
-	auto y_rot = glm::rotate(glm::mat4(1.0f), (float)dy, glm::cross(forward, up));
-	auto final_vec = x_rot * y_rot * glm::vec4(forward, 1.0f);
-
-	m_camera->SetForward(glm::normalize(final_vec));
-}
-
 void Application::HotReloadShaders() {
 	auto logger = spdlog::get("Render");
 	logger->info("Hot-reloading shaders...");
@@ -405,14 +311,7 @@ void Application::HotReloadShaders() {
 
 	vkDeviceWaitIdle(m_vk.device->Get());
 
-	RenderContext ctx{};
-	ctx.device = m_vk.device;
-	ctx.allocator = m_vk.allocator;
-	ctx.graphicsPool = m_vk.graphicsCommandPool;
-	ctx.renderPass = m_scene_render_pass;
-	ctx.extent = m_offscreen_target->GetExtent();
-	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
-
+	auto ctx = BuildRenderContext();
 	renderer->RecreatePipeline(ctx);
 	logger->info("Pipeline recreated successfully");
 }
@@ -425,15 +324,7 @@ void Application::SwitchRenderer(size_t index) {
 
 	vkDeviceWaitIdle(m_vk.device->Get());
 
-	// Initialize the new renderer if not already done
-	RenderContext ctx{};
-	ctx.device = m_vk.device;
-	ctx.allocator = m_vk.allocator;
-	ctx.graphicsPool = m_vk.graphicsCommandPool;
-	ctx.renderPass = m_scene_render_pass;
-	ctx.extent = m_offscreen_target->GetExtent();
-	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
-
+	auto ctx = BuildRenderContext();
 	m_renderers[index]->Init(ctx);
 	m_active_renderer_index = index;
 
@@ -441,76 +332,30 @@ void Application::SwitchRenderer(size_t index) {
 }
 
 void Application::CaptureScreenshot() {
-	auto logger = spdlog::get("App");
+	auto path = ScreenshotCapture::Capture(
+		m_vk.device, m_vk.allocator, m_vk.graphicsCommandPool,
+		m_offscreen_target->GetResolveImage(),
+		m_offscreen_target->GetColorFormat(),
+		m_offscreen_target->GetExtent());
+	if (!path.empty()) {
+		m_inspector_panel.SetLastScreenshotPath(path);
+	}
+}
 
-	vkDeviceWaitIdle(m_vk.device->Get());
+RenderContext Application::BuildRenderContext() const {
+	RenderContext ctx{};
+	ctx.device = m_vk.device;
+	ctx.allocator = m_vk.allocator;
+	ctx.graphicsPool = m_vk.graphicsCommandPool;
+	ctx.renderPass = m_scene_render_pass;
+	ctx.extent = m_offscreen_target->GetExtent();
+	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+	return ctx;
+}
 
-	auto resolveImage = m_offscreen_target->GetResolveImage();
-	VkFormat format = m_offscreen_target->GetColorFormat();
-	VkExtent2D extent = m_offscreen_target->GetExtent();
-
-	VkDeviceSize imageSize = extent.width * extent.height * 4; // RGBA
-	auto staging = VWrap::Buffer::CreateStaging(m_vk.allocator, imageSize);
-
-	// Record copy commands
-	auto cmd = VWrap::CommandBuffer::Create(m_vk.graphicsCommandPool);
-	cmd->BeginSingle();
-
-	// Transition resolve image: SHADER_READ_ONLY -> TRANSFER_SRC
-	cmd->CmdTransitionImageLayout(resolveImage, format,
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-	// Copy image to staging buffer
-	VkBufferImageCopy region{};
-	region.bufferOffset = 0;
-	region.bufferRowLength = 0;
-	region.bufferImageHeight = 0;
-	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.imageSubresource.mipLevel = 0;
-	region.imageSubresource.baseArrayLayer = 0;
-	region.imageSubresource.layerCount = 1;
-	region.imageOffset = { 0, 0, 0 };
-	region.imageExtent = { extent.width, extent.height, 1 };
-
-	vkCmdCopyImageToBuffer(cmd->Get(), resolveImage->Get(),
-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->Get(), 1, &region);
-
-	// Transition resolve image back: TRANSFER_SRC -> SHADER_READ_ONLY
-	cmd->CmdTransitionImageLayout(resolveImage, format,
-		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+void Application::RegisterSceneTexture() {
+	m_scene_texture = ImGui_ImplVulkan_AddTexture(
+		m_offscreen_target->GetSampler()->Get(),
+		m_offscreen_target->GetResolveView()->Get(),
 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-	cmd->EndAndSubmit();
-
-	// Map staging buffer and write PNG
-	void* data;
-	vmaMapMemory(m_vk.allocator->Get(), staging->GetAllocation(), &data);
-
-	// Generate filename with timestamp
-	std::filesystem::create_directories("screenshots");
-	std::time_t t = std::time(nullptr);
-	char timestr[64];
-	std::strftime(timestr, sizeof(timestr), "%Y%m%d_%H%M%S", std::localtime(&t));
-	std::string filename = std::string("screenshots/screenshot_") + timestr + ".png";
-
-	// Handle BGRA -> RGBA swizzle if needed
-	if (format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM) {
-		uint8_t* pixels = static_cast<uint8_t*>(data);
-		for (uint32_t i = 0; i < extent.width * extent.height; i++) {
-			std::swap(pixels[i * 4 + 0], pixels[i * 4 + 2]); // swap B and R
-		}
-	}
-
-	int result = stbi_write_png(filename.c_str(), extent.width, extent.height, 4,
-		data, extent.width * 4);
-
-	vmaUnmapMemory(m_vk.allocator->Get(), staging->GetAllocation());
-
-	if (result) {
-		logger->info("Screenshot saved: {}", filename);
-		m_inspector_panel.SetLastScreenshotPath(filename);
-	} else {
-		logger->error("Failed to save screenshot");
-	}
 }

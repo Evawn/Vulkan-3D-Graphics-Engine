@@ -1,10 +1,12 @@
 #include "OffscreenTarget.h"
 #include <spdlog/spdlog.h>
 
+namespace VWrap {
+
 std::shared_ptr<OffscreenTarget> OffscreenTarget::Create(
-	std::shared_ptr<VWrap::Device> device,
-	std::shared_ptr<VWrap::Allocator> allocator,
-	std::shared_ptr<VWrap::RenderPass> renderPass,
+	std::shared_ptr<Device> device,
+	std::shared_ptr<Allocator> allocator,
+	std::shared_ptr<RenderPass> renderPass,
 	VkExtent2D extent,
 	VkSampleCountFlagBits samples,
 	VkFormat colorFormat)
@@ -15,7 +17,7 @@ std::shared_ptr<OffscreenTarget> OffscreenTarget::Create(
 	ret->m_render_pass = renderPass;
 	ret->m_extent = extent;
 	ret->m_color_format = colorFormat;
-	ret->m_sampler = VWrap::Sampler::Create(device);
+	ret->m_sampler = Sampler::Create(device);
 
 	ret->CreateResources(samples);
 	return ret;
@@ -23,7 +25,7 @@ std::shared_ptr<OffscreenTarget> OffscreenTarget::Create(
 
 void OffscreenTarget::CreateResources(VkSampleCountFlagBits samples) {
 	// MSAA color attachment
-	VWrap::ImageCreateInfo colorInfo{};
+	ImageCreateInfo colorInfo{};
 	colorInfo.width = m_extent.width;
 	colorInfo.height = m_extent.height;
 	colorInfo.depth = 1;
@@ -35,12 +37,12 @@ void OffscreenTarget::CreateResources(VkSampleCountFlagBits samples) {
 	colorInfo.samples = samples;
 	colorInfo.image_type = VK_IMAGE_TYPE_2D;
 
-	auto colorImage = VWrap::Image::Create(m_allocator, colorInfo);
-	m_color_view = VWrap::ImageView::Create(m_device, colorImage, VK_IMAGE_ASPECT_COLOR_BIT);
+	auto colorImage = Image::Create(m_allocator, colorInfo);
+	m_color_view = ImageView::Create(m_device, colorImage, VK_IMAGE_ASPECT_COLOR_BIT);
 
 	// Depth attachment
-	VkFormat depthFormat = VWrap::FindDepthFormat(m_device->GetPhysicalDevice()->Get());
-	VWrap::ImageCreateInfo depthInfo{};
+	VkFormat depthFormat = FindDepthFormat(m_device->GetPhysicalDevice()->Get());
+	ImageCreateInfo depthInfo{};
 	depthInfo.width = m_extent.width;
 	depthInfo.height = m_extent.height;
 	depthInfo.depth = 1;
@@ -52,11 +54,11 @@ void OffscreenTarget::CreateResources(VkSampleCountFlagBits samples) {
 	depthInfo.samples = samples;
 	depthInfo.image_type = VK_IMAGE_TYPE_2D;
 
-	auto depthImage = VWrap::Image::Create(m_allocator, depthInfo);
-	m_depth_view = VWrap::ImageView::Create(m_device, depthImage, VK_IMAGE_ASPECT_DEPTH_BIT);
+	auto depthImage = Image::Create(m_allocator, depthInfo);
+	m_depth_view = ImageView::Create(m_device, depthImage, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-	// Resolve attachment (1x, sampled by ImGui)
-	VWrap::ImageCreateInfo resolveInfo{};
+	// Resolve attachment (1x, sampled)
+	ImageCreateInfo resolveInfo{};
 	resolveInfo.width = m_extent.width;
 	resolveInfo.height = m_extent.height;
 	resolveInfo.depth = 1;
@@ -68,22 +70,16 @@ void OffscreenTarget::CreateResources(VkSampleCountFlagBits samples) {
 	resolveInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	resolveInfo.image_type = VK_IMAGE_TYPE_2D;
 
-	m_resolve_image = VWrap::Image::Create(m_allocator, resolveInfo);
-	m_resolve_view = VWrap::ImageView::Create(m_device, m_resolve_image, VK_IMAGE_ASPECT_COLOR_BIT);
+	m_resolve_image = Image::Create(m_allocator, resolveInfo);
+	m_resolve_view = ImageView::Create(m_device, m_resolve_image, VK_IMAGE_ASPECT_COLOR_BIT);
 
 	// Framebuffer: [MSAA color, depth, resolve]
-	std::vector<std::shared_ptr<VWrap::ImageView>> attachments = {
+	std::vector<std::shared_ptr<ImageView>> attachments = {
 		m_color_view,
 		m_depth_view,
 		m_resolve_view
 	};
-	m_framebuffer = VWrap::Framebuffer::Create2D(m_device, m_render_pass, attachments, m_extent);
-
-	// Register with ImGui
-	m_imgui_texture = ImGui_ImplVulkan_AddTexture(
-		m_sampler->Get(),
-		m_resolve_view->Get(),
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	m_framebuffer = Framebuffer::Create2D(m_device, m_render_pass, attachments, m_extent);
 
 	spdlog::get("App")->info("Created offscreen target {}x{}", m_extent.width, m_extent.height);
 }
@@ -93,12 +89,6 @@ void OffscreenTarget::Resize(VkExtent2D newExtent) {
 	if (newExtent.width == m_extent.width && newExtent.height == m_extent.height) return;
 
 	vkDeviceWaitIdle(m_device->Get());
-
-	// Remove old ImGui texture
-	if (m_imgui_texture != VK_NULL_HANDLE) {
-		ImGui_ImplVulkan_RemoveTexture(m_imgui_texture);
-		m_imgui_texture = VK_NULL_HANDLE;
-	}
 
 	// Destroy old resources (RAII will handle cleanup when shared_ptrs are reassigned)
 	m_framebuffer.reset();
@@ -112,3 +102,5 @@ void OffscreenTarget::Resize(VkExtent2D newExtent) {
 
 	spdlog::get("App")->info("Resized offscreen target to {}x{}", m_extent.width, m_extent.height);
 }
+
+} // namespace VWrap

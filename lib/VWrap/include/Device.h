@@ -47,6 +47,11 @@ namespace VWrap {
 		}
 
 		/// <summary>
+		/// Blocks until all GPU operations on this device have completed
+		/// </summary>
+		void WaitIdle() { vkDeviceWaitIdle(m_device); }
+
+		/// <summary>
 		/// Destroys the underlying vulkan device
 		/// </summary>
 		~Device();

@@ -58,5 +58,12 @@ namespace VWrap
 		/// </summary>
 		bool checkDeviceExtensions();
 
+		/// <summary> Gets the memory properties of the physical device </summary>
+		VkPhysicalDeviceMemoryProperties GetMemoryProperties() const {
+			VkPhysicalDeviceMemoryProperties props;
+			vkGetPhysicalDeviceMemoryProperties(m_physical_device, &props);
+			return props;
+		}
+
 	};
 }

@@ -95,10 +95,9 @@ namespace VWrap {
 
 		auto staging_buffer = Buffer::CreateStaging(allocator, imageSize);
 
-		void* data;
-		vmaMapMemory(allocator->Get(), staging_buffer->GetAllocation(), &data);
+		void* data = staging_buffer->Map();
 		memcpy(data, pixels, static_cast<size_t>(imageSize));
-		vmaUnmapMemory(allocator->Get(), staging_buffer->GetAllocation());
+		staging_buffer->Unmap();
 		stbi_image_free(pixels);
 
 		VWrap::ImageCreateInfo info{};
@@ -237,6 +236,28 @@ namespace VWrap {
 		vkCmdCopyBuffer(m_command_buffer, src_buffer->Get(), dst_buffer->Get(), 1, &copyRegion);
 	}
 
+	void CommandBuffer::End() {
+		if (vkEndCommandBuffer(m_command_buffer) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to end command buffer recording!");
+		}
+	}
+
+	void CommandBuffer::CmdCopyImageToBuffer(std::shared_ptr<Image> src_image, std::shared_ptr<Buffer> dst_buffer, uint32_t width, uint32_t height) {
+		VkBufferImageCopy copy{};
+		copy.bufferOffset = 0;
+		copy.bufferRowLength = 0;
+		copy.bufferImageHeight = 0;
+
+		copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		copy.imageSubresource.mipLevel = 0;
+		copy.imageSubresource.baseArrayLayer = 0;
+		copy.imageSubresource.layerCount = 1;
+		copy.imageOffset = { 0, 0, 0 };
+		copy.imageExtent = { width, height, 1 };
+
+		vkCmdCopyImageToBuffer(m_command_buffer, src_image->Get(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->Get(), 1, &copy);
+	}
+
 	void CommandBuffer::CmdTransitionImageLayout( std::shared_ptr<Image> image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout)
 	{
 		VkImageMemoryBarrier barrier{};
@@ -282,6 +303,20 @@ namespace VWrap {
 
 			sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 			destinationStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		}
+		else if (old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+			barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+			sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		}
+		else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+			barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 		}
 		else {
 			throw std::invalid_argument("unsupported layout transition!");
@@ -346,10 +381,9 @@ namespace VWrap {
 		//	else voxels[i] = 0;
 		//}
 
-		void* data;
-		vmaMapMemory(allocator->Get(), staging_buffer->GetAllocation(), &data);
+		void* data = staging_buffer->Map();
 		memcpy(data, voxels.data(), static_cast<size_t>(imageSize));
-		vmaUnmapMemory(allocator->Get(), staging_buffer->GetAllocation());
+		staging_buffer->Unmap();
 
 		VWrap::ImageCreateInfo info{};
 		info.width = static_cast<uint32_t>(brick_size);

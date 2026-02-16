@@ -55,6 +55,21 @@ namespace VWrap {
 			void*& data);
 
 		/// <summary>
+		/// Creates a buffer with parameters suited for GPU-to-CPU readback
+		/// </summary>
+		static std::shared_ptr<Buffer> CreateReadback(std::shared_ptr<Allocator> allocator, VkDeviceSize size);
+
+		/// <summary>
+		/// Maps the buffer memory and returns a pointer to it
+		/// </summary>
+		void* Map();
+
+		/// <summary>
+		/// Unmaps the buffer memory
+		/// </summary>
+		void Unmap();
+
+		/// <summary>
 		/// Gets the underlying buffer handle.
 		/// </summary>
 		VkBuffer Get() const { return m_buffer; }

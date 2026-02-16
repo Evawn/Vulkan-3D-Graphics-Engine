@@ -88,7 +88,22 @@ namespace VWrap {
 		void CmdTransitionImageLayout(std::shared_ptr<Image> image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
 
 		static void CreateAndFillBrickTexture(std::shared_ptr<CommandPool> command_pool, std::shared_ptr<Allocator> allocator, std::shared_ptr<Image>& dst_image, int brick_size);
-		
+
+		/// <summary>
+		/// Copies the contents of the source image to the destination buffer
+		/// </summary>
+		void CmdCopyImageToBuffer(std::shared_ptr<Image> src_image, std::shared_ptr<Buffer> dst_buffer, uint32_t width, uint32_t height);
+
+		/// <summary>
+		/// Records a command to end the current render pass
+		/// </summary>
+		void CmdEndRenderPass() { vkCmdEndRenderPass(m_command_buffer); }
+
+		/// <summary>
+		/// Ends recording of the command buffer
+		/// </summary>
+		void End();
+
 		/// <summary>
 		/// Gets the underlying vulkan command buffer handle.
 		/// </summary>

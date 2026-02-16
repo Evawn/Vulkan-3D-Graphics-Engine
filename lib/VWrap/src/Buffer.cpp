@@ -86,6 +86,26 @@ namespace VWrap {
     }
 
 
+    std::shared_ptr<Buffer> Buffer::CreateReadback(std::shared_ptr<Allocator> allocator,
+        VkDeviceSize size) {
+        return Create(
+            allocator,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);
+    }
+
+    void* Buffer::Map() {
+        void* data;
+        vmaMapMemory(m_allocator->Get(), m_allocation, &data);
+        return data;
+    }
+
+    void Buffer::Unmap() {
+        vmaUnmapMemory(m_allocator->Get(), m_allocation);
+    }
+
 	Buffer::~Buffer() {
 		if (m_buffer != VK_NULL_HANDLE && m_allocation != nullptr)
             vmaDestroyBuffer(m_allocator->Get(), m_buffer, m_allocation);
