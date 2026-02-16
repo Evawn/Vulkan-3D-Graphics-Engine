@@ -35,14 +35,9 @@ public:
 	void CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer);
 
 	void BeginFrame();
+	void LoadFonts(float dpi_scale);
 
 	std::shared_ptr<VWrap::DescriptorPool> GetDescriptorPool() const {
 		return m_imgui_descriptor_pool;
-	}
-
-	void SetDpiScale(float dpi_scale) {
-		ImGuiIO& io = ImGui::GetIO();
-		m_dpi_scale = dpi_scale;
-		io.FontGlobalScale = dpi_scale;
 	}
 };

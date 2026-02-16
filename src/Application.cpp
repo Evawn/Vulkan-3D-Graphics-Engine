@@ -1,6 +1,7 @@
 #include "Application.h"
 #include "ShaderCompiler.h"
 #include "Log.h"
+#include "UIStyle.h"
 
 void Application::Run() {
 	Init();
@@ -147,9 +148,14 @@ void Application::InitImGui() {
 	init_info.CheckVkResultFn = check_vk_result;
 	ImGui_ImplVulkan_Init(&init_info, m_presentation_render_pass->Get());
 
+	// Load font at correct DPI-scaled size (fixes fuzzy text)
 	float dpi_scale;
 	glfwGetWindowContentScale(m_glfw_window.get()[0], &dpi_scale, nullptr);
-	m_gui_renderer->SetDpiScale(dpi_scale);
+	m_gui_renderer->LoadFonts(dpi_scale);
+	ImGui_ImplVulkan_DestroyFontsTexture();
+	ImGui_ImplVulkan_CreateFontsTexture();
+
+	UIStyle::Apply(dpi_scale);
 }
 
 void Application::MainLoop() {
@@ -284,7 +290,7 @@ void Application::DrawFrame() {
 
 	// ========== PASS 2: ImGui -> Swapchain ==========
 	std::vector<VkClearValue> presentClearValues(1);
-	presentClearValues[0].color = { { 0.1f, 0.1f, 0.1f, 1.0f } };
+	presentClearValues[0].color = { { 0.067f, 0.067f, 0.067f, 1.0f } };
 
 	command_buffer->CmdBeginRenderPass(m_presentation_render_pass, m_presentation_framebuffers[image_index], presentClearValues);
 
@@ -302,11 +308,6 @@ void Application::DrawFrame() {
 
 void Application::Resize() {
 	CreatePresentationFramebuffers();
-
-	float dpi_scale;
-	glfwGetWindowContentScale(m_glfw_window.get()[0], &dpi_scale, nullptr);
-	m_gui_renderer->SetDpiScale(dpi_scale);
-
 	// Offscreen target does NOT resize on swapchain resize.
 	// It resizes when the viewport panel detects a size change.
 }

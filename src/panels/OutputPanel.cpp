@@ -1,15 +1,8 @@
 #include "OutputPanel.h"
+#include "UIStyle.h"
 
 ImVec4 OutputPanel::GetColorForLevel(spdlog::level::level_enum level) const {
-	switch (level) {
-	case spdlog::level::trace:    return ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
-	case spdlog::level::debug:    return ImVec4(0.4f, 0.7f, 1.0f, 1.0f);
-	case spdlog::level::info:     return ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
-	case spdlog::level::warn:     return ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
-	case spdlog::level::err:      return ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
-	case spdlog::level::critical: return ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
-	default:                      return ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-	}
+	return UIStyle::GetLogLevelColor(level);
 }
 
 bool OutputPanel::ShouldShow(spdlog::level::level_enum level) const {
@@ -27,25 +20,40 @@ bool OutputPanel::ShouldShow(spdlog::level::level_enum level) const {
 void OutputPanel::Draw() {
 	ImGui::Begin("Output");
 
-	// Filter checkboxes
-	ImGui::Checkbox("Trace", &m_show_trace);
-	ImGui::SameLine();
-	ImGui::Checkbox("Debug", &m_show_debug);
-	ImGui::SameLine();
-	ImGui::Checkbox("Info", &m_show_info);
-	ImGui::SameLine();
-	ImGui::Checkbox("Warn", &m_show_warn);
-	ImGui::SameLine();
-	ImGui::Checkbox("Error", &m_show_error);
-	ImGui::SameLine();
+	// Compact toggle button helper
+	auto ToggleButton = [](const char* label, bool* value, ImVec4 activeColor) {
+		if (*value) {
+			ImGui::PushStyleColor(ImGuiCol_Button, UIStyle::Alpha(activeColor, 0.25f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UIStyle::Alpha(activeColor, 0.40f));
+			ImGui::PushStyleColor(ImGuiCol_Text, activeColor);
+		} else {
+			ImGui::PushStyleColor(ImGuiCol_Button, UIStyle::kBgLight);
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UIStyle::kBgLighter);
+			ImGui::PushStyleColor(ImGuiCol_Text, UIStyle::kTextDim);
+		}
+		if (ImGui::SmallButton(label)) *value = !*value;
+		ImGui::PopStyleColor(3);
+	};
 
-	if (ImGui::Button("Clear") && m_sink) {
+	// Filter toggles
+	ToggleButton("T", &m_show_trace,  UIStyle::GetLogLevelColor(spdlog::level::trace));
+	ImGui::SameLine(0, 2);
+	ToggleButton("D", &m_show_debug,  UIStyle::GetLogLevelColor(spdlog::level::debug));
+	ImGui::SameLine(0, 2);
+	ToggleButton("I", &m_show_info,   UIStyle::GetLogLevelColor(spdlog::level::info));
+	ImGui::SameLine(0, 2);
+	ToggleButton("W", &m_show_warn,   UIStyle::GetLogLevelColor(spdlog::level::warn));
+	ImGui::SameLine(0, 2);
+	ToggleButton("E", &m_show_error,  UIStyle::GetLogLevelColor(spdlog::level::err));
+
+	ImGui::SameLine(0, 8);
+	if (ImGui::SmallButton("Clear") && m_sink) {
 		m_sink->Clear();
 	}
-	ImGui::SameLine();
-	ImGui::Checkbox("Auto-scroll", &m_auto_scroll);
 
-	ImGui::Separator();
+	ImGui::SameLine(0, 8);
+	ImGui::Checkbox("##autoscroll", &m_auto_scroll);
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Auto-scroll");
 
 	ImGui::BeginChild("LogScrollRegion", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
 

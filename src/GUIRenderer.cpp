@@ -1,4 +1,7 @@
 #include "GUIRenderer.h"
+#include "config.h"
+#include <filesystem>
+#include <spdlog/spdlog.h>
 
 std::shared_ptr<GUIRenderer> GUIRenderer::Create(std::shared_ptr<VWrap::Device> device) {
 	auto ret = std::make_shared<GUIRenderer>();
@@ -15,9 +18,33 @@ std::shared_ptr<GUIRenderer> GUIRenderer::Create(std::shared_ptr<VWrap::Device> 
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-	ImGui::StyleColorsDark();
-
 	return ret;
+}
+
+void GUIRenderer::LoadFonts(float dpi_scale) {
+	ImGuiIO& io = ImGui::GetIO();
+	m_dpi_scale = dpi_scale;
+
+	io.Fonts->Clear();
+
+	const float base_size = 11.0f;
+	float font_size = base_size * dpi_scale;
+
+	std::string font_path = std::string(config::RESOURCE_DIR) + "/fonts/Inter-Regular.ttf";
+
+	if (std::filesystem::exists(font_path)) {
+		ImFontConfig font_cfg;
+		font_cfg.OversampleH = 3;
+		font_cfg.OversampleV = 2;
+		font_cfg.PixelSnapH = true;
+		io.Fonts->AddFontFromFileTTF(font_path.c_str(), font_size, &font_cfg);
+		spdlog::get("App")->debug("Loaded font: {} at {}px", font_path, font_size);
+	} else {
+		spdlog::get("App")->warn("Font not found: {} - using default", font_path);
+		io.Fonts->AddFontDefault();
+	}
+
+	io.FontGlobalScale = 1.0f;
 }
 
 void GUIRenderer::RegisterPanel(const std::string& name, std::function<void()> drawFn) {
