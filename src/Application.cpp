@@ -220,6 +220,7 @@ void Application::DrawFrame() {
 	if (m_viewport_panel.WasResized()) {
 		VkExtent2D desired = m_viewport_panel.GetDesiredExtent();
 		if (desired.width > 0 && desired.height > 0) {
+			vkDeviceWaitIdle(m_vk.device->Get());
 			if (m_scene_texture != VK_NULL_HANDLE) {
 				ImGui_ImplVulkan_RemoveTexture(m_scene_texture);
 			}

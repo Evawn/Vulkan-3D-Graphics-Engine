@@ -107,6 +107,11 @@ namespace VWrap {
 		/// </summary>
 		void CreateSyncObjects();
 
+		/// <summary>
+		/// Creates render-finished semaphores, one per swapchain image.
+		/// </summary>
+		void CreateRenderFinishedSemaphores();
+
 	public:
 
 		/// <summary>

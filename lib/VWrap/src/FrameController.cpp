@@ -49,7 +49,7 @@ namespace VWrap {
 		std::array<VkCommandBuffer, 1> commandBuffers = { m_command_buffers[m_current_frame]->Get() };
 		submitInfo.pCommandBuffers = commandBuffers.data();
 
-		VkSemaphore signalSemaphores[] = { m_render_finished_semaphores[m_current_frame]->Get() };
+		VkSemaphore signalSemaphores[] = { m_render_finished_semaphores[m_image_index]->Get() };
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -105,6 +105,7 @@ namespace VWrap {
 
 		m_swapchain = VWrap::Swapchain::Create(m_device, m_surface);
 		CreateImageViews();
+		CreateRenderFinishedSemaphores();
 
 		if (m_resize_callback)
 			m_resize_callback();
@@ -124,13 +125,21 @@ namespace VWrap {
 
 	void FrameController::CreateSyncObjects() {
 		m_image_available_semaphores.resize(frames);
-		m_render_finished_semaphores.resize(frames);
 		m_in_flight_fences.resize(frames);
 
 		for (size_t i = 0; i < frames; i++) {
 			m_image_available_semaphores[i] = VWrap::Semaphore::Create(m_device);
-			m_render_finished_semaphores[i] = VWrap::Semaphore::Create(m_device);
 			m_in_flight_fences[i] = VWrap::Fence::Create(m_device);
+		}
+
+		CreateRenderFinishedSemaphores();
+	}
+
+	void FrameController::CreateRenderFinishedSemaphores() {
+		uint32_t imageCount = m_swapchain->Size();
+		m_render_finished_semaphores.resize(imageCount);
+		for (uint32_t i = 0; i < imageCount; i++) {
+			m_render_finished_semaphores[i] = Semaphore::Create(m_device);
 		}
 	}
 }
