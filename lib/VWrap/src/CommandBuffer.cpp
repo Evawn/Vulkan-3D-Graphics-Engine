@@ -236,6 +236,38 @@ namespace VWrap {
 		vkCmdCopyBuffer(m_command_buffer, src_buffer->Get(), dst_buffer->Get(), 1, &copyRegion);
 	}
 
+	void CommandBuffer::CmdDispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+		vkCmdDispatch(m_command_buffer, groupCountX, groupCountY, groupCountZ);
+	}
+
+	void CommandBuffer::CmdBindComputePipeline(std::shared_ptr<ComputePipeline> pipeline) {
+		vkCmdBindPipeline(m_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->Get());
+	}
+
+	void CommandBuffer::CmdBindComputeDescriptorSets(VkPipelineLayout layout, const std::vector<VkDescriptorSet>& descriptor_sets, uint32_t first_set) {
+		vkCmdBindDescriptorSets(m_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+			layout, first_set,
+			static_cast<uint32_t>(descriptor_sets.size()),
+			descriptor_sets.data(), 0, nullptr);
+	}
+
+	void CommandBuffer::CmdPipelineBarrier(
+		VkPipelineStageFlags src_stage,
+		VkPipelineStageFlags dst_stage,
+		const std::vector<VkImageMemoryBarrier>& image_barriers,
+		const std::vector<VkBufferMemoryBarrier>& buffer_barriers) {
+		vkCmdPipelineBarrier(
+			m_command_buffer,
+			src_stage, dst_stage,
+			0,
+			0, nullptr,
+			static_cast<uint32_t>(buffer_barriers.size()),
+			buffer_barriers.empty() ? nullptr : buffer_barriers.data(),
+			static_cast<uint32_t>(image_barriers.size()),
+			image_barriers.empty() ? nullptr : image_barriers.data()
+		);
+	}
+
 	void CommandBuffer::End() {
 		if (vkEndCommandBuffer(m_command_buffer) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to end command buffer recording!");
@@ -282,6 +314,20 @@ namespace VWrap {
 
 			sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 			destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		}
+		else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_GENERAL) {
+			barrier.srcAccessMask = 0;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+			sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			destinationStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+		}
+		else if (old_layout == VK_IMAGE_LAYOUT_GENERAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+			barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			sourceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 		}
 		else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
 			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

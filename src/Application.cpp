@@ -33,6 +33,8 @@ void Application::Init() {
 	m_active_renderer_index = 0;
 	spdlog::get("App")->debug("DDATracer initialized");
 
+	m_renderers.push_back(std::make_unique<ComputeTest>());
+
 	spdlog::get("App")->debug("Creating GPU profiler...");
 	m_gpu_profiler = GPUProfiler::Create(m_vk.device, MAX_FRAMES_IN_FLIGHT);
 	spdlog::get("App")->debug("GPU profiler created");
@@ -118,8 +120,10 @@ void Application::InitVulkan() {
 	m_vk.graphicsQueue = VWrap::Queue::Create(m_vk.device, indices.graphicsFamily.value());
 	m_vk.presentQueue = VWrap::Queue::Create(m_vk.device, indices.presentFamily.value());
 	m_vk.transferQueue = VWrap::Queue::Create(m_vk.device, indices.transferFamily.value());
+	m_vk.computeQueue = VWrap::Queue::Create(m_vk.device, indices.computeFamily.value());
 	m_vk.graphicsCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.graphicsQueue);
 	m_vk.transferCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.transferQueue);
+	m_vk.computeCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.computeQueue);
 
 	m_vk.frameController = VWrap::FrameController::Create(m_vk.device, m_vk.surface, m_vk.graphicsCommandPool, m_vk.presentQueue, MAX_FRAMES_IN_FLIGHT);
 	m_vk.frameController->SetResizeCallback([this]() { Resize(); });
@@ -351,6 +355,7 @@ RenderContext Application::BuildRenderContext() const {
 	ctx.device = m_vk.device;
 	ctx.allocator = m_vk.allocator;
 	ctx.graphicsPool = m_vk.graphicsCommandPool;
+	ctx.computePool = m_vk.computeCommandPool;
 	ctx.renderPass = m_scene_render_pass;
 	ctx.extent = m_offscreen_target->GetExtent();
 	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;

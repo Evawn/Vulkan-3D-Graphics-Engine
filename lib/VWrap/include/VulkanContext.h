@@ -24,8 +24,10 @@ struct VulkanContext {
 	std::shared_ptr<Queue> graphicsQueue;
 	std::shared_ptr<Queue> presentQueue;
 	std::shared_ptr<Queue> transferQueue;
+	std::shared_ptr<Queue> computeQueue;
 	std::shared_ptr<CommandPool> graphicsCommandPool;
 	std::shared_ptr<CommandPool> transferCommandPool;
+	std::shared_ptr<CommandPool> computeCommandPool;
 
 	VkSampleCountFlagBits msaaSamples;
 };

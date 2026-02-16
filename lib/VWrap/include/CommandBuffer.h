@@ -8,6 +8,7 @@
 #include "Framebuffer.h"
 #include "Image.h"
 #include "Buffer.h"
+#include "ComputePipeline.h"
 #include "stb_image.h"
 
 namespace VWrap {
@@ -103,6 +104,22 @@ namespace VWrap {
 		/// Ends recording of the command buffer
 		/// </summary>
 		void End();
+
+		/// <summary> Dispatches compute workgroups. </summary>
+		void CmdDispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
+
+		/// <summary> Binds a compute pipeline. </summary>
+		void CmdBindComputePipeline(std::shared_ptr<ComputePipeline> pipeline);
+
+		/// <summary> Binds descriptor sets for a compute pipeline. </summary>
+		void CmdBindComputeDescriptorSets(VkPipelineLayout layout, const std::vector<VkDescriptorSet>& descriptor_sets, uint32_t first_set = 0);
+
+		/// <summary> Records a general pipeline barrier with image and buffer memory barriers. </summary>
+		void CmdPipelineBarrier(
+			VkPipelineStageFlags src_stage,
+			VkPipelineStageFlags dst_stage,
+			const std::vector<VkImageMemoryBarrier>& image_barriers,
+			const std::vector<VkBufferMemoryBarrier>& buffer_barriers = {});
 
 		/// <summary>
 		/// Gets the underlying vulkan command buffer handle.

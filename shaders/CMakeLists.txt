@@ -1,6 +1,7 @@
 file(GLOB SHADER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.vert"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.frag"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.comp"
 )
 
 set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")

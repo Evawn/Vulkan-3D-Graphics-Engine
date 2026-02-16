@@ -105,6 +105,12 @@ namespace VWrap
                 indices.transferFamily = i;
             }
 
+            // Prefer dedicated compute queue (COMPUTE but NOT GRAPHICS) for async compute
+            if ((queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT) &&
+                !(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                indices.computeFamily = i;
+            }
+
             VkBool32 presentSupport = false;
             vkGetPhysicalDeviceSurfaceSupportKHR(this->m_physical_device, i, this->m_surface->Get(), &presentSupport);
             if (presentSupport) {
@@ -119,6 +125,11 @@ namespace VWrap
 
         if (!indices.transferFamily.has_value()) {
             indices.transferFamily = indices.graphicsFamily;
+        }
+
+        // Fall back: if no dedicated compute queue, use graphics family (always has compute)
+        if (!indices.computeFamily.has_value()) {
+            indices.computeFamily = indices.graphicsFamily;
         }
 
         return indices;

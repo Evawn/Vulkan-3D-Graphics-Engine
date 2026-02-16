@@ -15,6 +15,7 @@ struct RenderContext {
     std::shared_ptr<VWrap::Device> device;
     std::shared_ptr<VWrap::Allocator> allocator;
     std::shared_ptr<VWrap::CommandPool> graphicsPool;
+    std::shared_ptr<VWrap::CommandPool> computePool;
     std::shared_ptr<VWrap::RenderPass> renderPass;
     VkExtent2D extent;
     uint32_t maxFramesInFlight;

@@ -17,6 +17,7 @@
 #include "RenderTechnique.h"
 #include "DDATracer.h"
 #include "MeshRasterizer.h"
+#include "ComputeTest.h"
 
 // PANELS
 #include "ViewportPanel.h"

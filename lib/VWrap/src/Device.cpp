@@ -12,7 +12,8 @@ namespace VWrap {
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
         std::set<uint32_t> uniqueQueueFamilies =
-        { indices.graphicsFamily.value(), indices.presentFamily.value(), indices.transferFamily.value() };
+        { indices.graphicsFamily.value(), indices.presentFamily.value(),
+          indices.transferFamily.value(), indices.computeFamily.value() };
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {

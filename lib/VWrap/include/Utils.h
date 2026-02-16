@@ -26,9 +26,13 @@ namespace VWrap {
 		/// <summary> The family for transfer operations. </summary>
 		std::optional<uint32_t> transferFamily;
 
+		/// <summary> The family for compute operations. </summary>
+		std::optional<uint32_t> computeFamily;
+
 		/// <summary> Gets whether or not the queue families are available. </summary>
 		bool isComplete() {
-			return graphicsFamily.has_value() && presentFamily.has_value() && transferFamily.has_value();
+			return graphicsFamily.has_value() && presentFamily.has_value()
+				&& transferFamily.has_value() && computeFamily.has_value();
 		}
 	};
 
