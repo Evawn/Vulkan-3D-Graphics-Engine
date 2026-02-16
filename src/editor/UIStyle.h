@@ -5,7 +5,7 @@
 
 namespace UIStyle {
 
-	// --- Palette helpers (constexpr, used to derive all theme colors) ---
+	// --- Palette helpers ---
 	constexpr ImVec4 Alpha(ImVec4 c, float a)
 		{ return {c.x, c.y, c.z, a}; }
 	constexpr ImVec4 Darken(ImVec4 c, float f)
@@ -15,16 +15,18 @@ namespace UIStyle {
 		          c.y * f < 1.f ? c.y * f : 1.f,
 		          c.z * f < 1.f ? c.z * f : 1.f, c.w}; }
 
-	// --- Base palette (true neutral dark — equal R=G=B, no blue cast) ---
-	constexpr ImVec4 kBg        = ImVec4(0.059f, 0.059f, 0.059f, 1.0f);  // #0F0F0F
-	constexpr ImVec4 kBgLight   = ImVec4(0.098f, 0.098f, 0.098f, 1.0f);  // #191919
-	constexpr ImVec4 kBgLighter = ImVec4(0.145f, 0.145f, 0.145f, 1.0f);  // #252525
-	constexpr ImVec4 kAccent    = ImVec4(0.259f, 0.588f, 0.980f, 1.0f);  // #4296FA
-	constexpr ImVec4 kText      = ImVec4(0.850f, 0.850f, 0.850f, 1.0f);  // #D9D9D9
-	constexpr ImVec4 kTextDim   = ImVec4(0.350f, 0.350f, 0.350f, 1.0f);  // #595959
-	constexpr ImVec4 kBorder    = ImVec4(0.110f, 0.110f, 0.110f, 1.0f);  // #1C1C1C
+	// --- Base palette (VSCode dark + matrix green) ---
+	constexpr ImVec4 kBg        = ImVec4(0.118f, 0.118f, 0.118f, 1.0f);  // #1E1E1E  editor bg
+	constexpr ImVec4 kBgLight   = ImVec4(0.145f, 0.145f, 0.149f, 1.0f);  // #252526  panels
+	constexpr ImVec4 kBgLighter = ImVec4(0.176f, 0.176f, 0.188f, 1.0f);  // #2D2D30  hover
+	constexpr ImVec4 kBgActive  = ImVec4(0.216f, 0.216f, 0.239f, 1.0f);  // #37373D  active/selected
+	constexpr ImVec4 kAccent    = ImVec4(0.000f, 1.000f, 0.251f, 1.0f);  // #00FF40  matrix green
+	constexpr ImVec4 kAccentDim = ImVec4(0.000f, 0.280f, 0.070f, 1.0f);  // #004712  dark green tint
+	constexpr ImVec4 kText      = ImVec4(0.800f, 0.800f, 0.800f, 1.0f);  // #CCCCCC
+	constexpr ImVec4 kTextDim   = ImVec4(0.500f, 0.500f, 0.500f, 1.0f);  // #808080
+	constexpr ImVec4 kBorder    = ImVec4(0.188f, 0.188f, 0.188f, 1.0f);  // #303030
 
-	constexpr float kRounding = 2.0f;
+	constexpr float kRounding = 3.0f;
 
 	void Apply(float dpi_scale);
 	ImVec4 GetLogLevelColor(spdlog::level::level_enum level);

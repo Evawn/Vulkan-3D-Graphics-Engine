@@ -27,7 +27,7 @@ void GUIRenderer::LoadFonts(float dpi_scale) {
 
 	io.Fonts->Clear();
 
-	const float base_size = 11.0f;
+	const float base_size = 9.0f;
 	float font_size = base_size * dpi_scale;
 
 	std::string font_path = std::string(config::RESOURCE_DIR) + "/fonts/Inter-Regular.ttf";
@@ -58,11 +58,11 @@ void GUIRenderer::SetupDefaultLayout(ImGuiID dockspace_id) {
 
 	// Split: left (viewport + output) | right (metrics + inspector)
 	ImGuiID left, right;
-	ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.7f, &left, &right);
+	ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.78f, &left, &right);
 
 	// Split left: top (viewport) | bottom (output)
 	ImGuiID left_top, left_bottom;
-	ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.7f, &left_top, &left_bottom);
+	ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.78f, &left_top, &left_bottom);
 
 	// Split right: top (metrics) | bottom (inspector)
 	ImGuiID right_top, right_bottom;

@@ -35,8 +35,6 @@
 
 // CONSTANTS -------------------------------------------------------------------------------------------------
 
-const uint32_t WIDTH = 1200;
-const uint32_t HEIGHT = 900;
 const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 #ifdef NDEBUG

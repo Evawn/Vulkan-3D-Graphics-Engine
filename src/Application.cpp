@@ -83,20 +83,19 @@ void Application::InitWindow() {
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-	float dpi_scale;
-	glfwGetMonitorContentScale(glfwGetPrimaryMonitor(), &dpi_scale, nullptr);
-	m_glfw_window = std::make_shared<GLFWwindow*>(glfwCreateWindow(WIDTH * dpi_scale, HEIGHT * dpi_scale, "Vulkan", nullptr, nullptr));
+	// Size window to 80% of the screen, centered
+	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+	const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+	int win_w = static_cast<int>(mode->width * 0.8f);
+	int win_h = static_cast<int>(mode->height * 0.8f);
+
+	m_glfw_window = std::make_shared<GLFWwindow*>(glfwCreateWindow(win_w, win_h, "Vulkan", nullptr, nullptr));
 
 	glfwSetWindowUserPointer(m_glfw_window.get()[0], this);
 	glfwSetFramebufferSizeCallback(m_glfw_window.get()[0], glfw_FramebufferResizeCallback);
 	glfwSetWindowFocusCallback(m_glfw_window.get()[0], glfw_WindowFocusCallback);
 
-	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-	const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-	int screen_width = mode->width;
-	int screen_height = mode->height;
-
-	glfwSetWindowPos(m_glfw_window.get()[0], (screen_width-WIDTH) / 2, (screen_height - HEIGHT) / 2);
+	glfwSetWindowPos(m_glfw_window.get()[0], (mode->width - win_w) / 2, (mode->height - win_h) / 2);
 }
 
 void Application::glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height) {
@@ -252,7 +251,7 @@ void Application::DrawFrame() {
 
 	// ========== PASS 2: ImGui -> Swapchain ==========
 	std::vector<VkClearValue> presentClearValues(1);
-	presentClearValues[0].color = { { 0.067f, 0.067f, 0.067f, 1.0f } };
+	presentClearValues[0].color = { { 0.059f, 0.059f, 0.059f, 1.0f } };
 
 	command_buffer->CmdBeginRenderPass(m_presentation_render_pass, m_presentation_framebuffers[image_index], presentClearValues);
 
