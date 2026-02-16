@@ -12,6 +12,7 @@
 #include "CameraController.h"
 #include "GUIRenderer.h"
 #include "GPUProfiler.h"
+#include <optional>
 #include "Camera.h"
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
@@ -100,6 +101,7 @@ private:
 	std::vector<std::unique_ptr<RenderTechnique>> m_renderers;
 	size_t m_active_renderer_index = 0;
 	bool m_pending_hot_reload = false;
+	std::optional<size_t> m_pending_renderer_switch;
 
 public:
 	void Run();

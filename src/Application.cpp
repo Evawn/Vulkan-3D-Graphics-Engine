@@ -69,7 +69,7 @@ void Application::InitPanels() {
 	// Inspector panel
 	m_inspector_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
 	m_inspector_panel.SetReloadCallback([this]() { m_pending_hot_reload = true; });
-	m_inspector_panel.SetSwitchCallback([this](size_t idx) { SwitchRenderer(idx); });
+	m_inspector_panel.SetSwitchCallback([this](size_t idx) { m_pending_renderer_switch = idx; });
 	m_inspector_panel.SetCamera(m_camera);
 	m_inspector_panel.SetAppControls(m_camera_controller->SensitivityPtr(), m_camera_controller->SpeedPtr());
 	m_inspector_panel.SetScreenshotCallback([this]() { CaptureScreenshot(); });
@@ -222,6 +222,11 @@ void Application::MainLoop() {
 		if (m_pending_hot_reload) {
 			m_pending_hot_reload = false;
 			HotReloadShaders();
+		}
+
+		if (m_pending_renderer_switch.has_value()) {
+			SwitchRenderer(m_pending_renderer_switch.value());
+			m_pending_renderer_switch.reset();
 		}
 
 		// Click to capture viewport

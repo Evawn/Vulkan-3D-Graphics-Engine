@@ -6,6 +6,7 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <unordered_map>
 
 #include "Device.h"
 #include "Allocator.h"
@@ -137,7 +138,8 @@ private:
 
 	// Created lazily by GetRenderPass / during Compile
 	std::shared_ptr<VWrap::RenderPass> m_renderPass;
-	std::shared_ptr<VWrap::Framebuffer> m_framebuffer;
+	std::unordered_map<VkImageView, std::shared_ptr<VWrap::Framebuffer>> m_framebufferCache;
+	std::shared_ptr<VWrap::Framebuffer> m_activeFramebuffer;
 
 	void CreateRenderPass(VkImageLayout colorFinalLayout, VkImageLayout resolveFinalLayout);
 	void CreateFramebuffer();

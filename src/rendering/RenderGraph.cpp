@@ -177,13 +177,16 @@ void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkIma
 	VkSubpassDependency startDep{};
 	startDep.srcSubpass = VK_SUBPASS_EXTERNAL;
 	startDep.dstSubpass = 0;
-	startDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-	                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	startDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-	                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	startDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	startDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	startDep.srcAccessMask = 0;
-	startDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-	                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	startDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+	if (m_hasDepth) {
+		startDep.srcStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		startDep.dstStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		startDep.dstAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	}
 	dependencies.push_back(startDep);
 
 	// Subpass 0 -> external (if the color/resolve is read downstream as sampled)
@@ -229,7 +232,9 @@ void GraphicsPassBuilder::CreateFramebuffer() {
 	}
 
 	VkExtent2D extent = { colorRes.desc.width, colorRes.desc.height };
-	m_framebuffer = VWrap::Framebuffer::Create2D(device, m_renderPass, views, extent);
+	auto fb = VWrap::Framebuffer::Create2D(device, m_renderPass, views, extent);
+	m_framebufferCache[colorRes.view->Get()] = fb;
+	m_activeFramebuffer = fb;
 }
 
 // =====================================================================
@@ -376,15 +381,21 @@ void RenderGraph::UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageV
 	assert(m_images[handle.id].imported);
 	m_images[handle.id].view = view;
 
-	// Recreate framebuffers that reference this image
+	// Update active framebuffer for passes that reference this image (cache lookup or create)
 	if (m_compiled) {
+		VkImageView newView = view->Get();
 		for (size_t i = 0; i < m_executionOrder.size(); i++) {
 			auto& ref = m_executionOrder[i];
 			if (ref.type == PassType::Graphics) {
 				auto& pass = *m_graphicsPasses[ref.index];
 				if (pass.m_colorTarget.id == handle.id ||
 				    (pass.m_hasResolve && pass.m_resolveTarget.id == handle.id)) {
-					pass.CreateFramebuffer();
+					auto it = pass.m_framebufferCache.find(newView);
+					if (it != pass.m_framebufferCache.end()) {
+						pass.m_activeFramebuffer = it->second;
+					} else {
+						pass.CreateFramebuffer();
+					}
 				}
 			}
 		}
@@ -736,7 +747,7 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 				clearValues.push_back(resolveClear);
 			}
 
-			cmd->CmdBeginRenderPass(pass.m_renderPass, pass.m_framebuffer, clearValues);
+			cmd->CmdBeginRenderPass(pass.m_renderPass, pass.m_activeFramebuffer, clearValues);
 
 			// Set viewport and scissor
 			VkViewport viewport{};
@@ -803,7 +814,8 @@ void RenderGraph::Resize(VkExtent2D newExtent) {
 
 	// Destroy framebuffers
 	for (auto& pass : m_graphicsPasses) {
-		pass->m_framebuffer.reset();
+		pass->m_framebufferCache.clear();
+		pass->m_activeFramebuffer.reset();
 		pass->m_renderPass.reset();
 	}
 
