@@ -1,5 +1,6 @@
 #pragma once
 #include "RenderTechnique.h"
+#include "RenderGraph.h"
 #include "Buffer.h"
 #include "DescriptorSet.h"
 #include "DescriptorSetLayout.h"
@@ -36,6 +37,7 @@ private:
 	std::shared_ptr<VWrap::Device> m_device;
 	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
 	std::shared_ptr<VWrap::Allocator> m_allocator;
+	std::shared_ptr<Camera> m_camera;
 
 	std::shared_ptr<VWrap::ImageView> m_texture_image_view;
 	std::shared_ptr<VWrap::Image> m_texture_image;
@@ -70,19 +72,20 @@ private:
 	void CreateUniformBuffers();
 	void WriteDescriptors();
 	void LoadModel();
-	void UpdateUniformBuffer(uint32_t frame, std::shared_ptr<Camera> camera);
+	void UpdateUniformBuffer(uint32_t frame);
 
 public:
 	std::string GetName() const override { return "Mesh Rasterizer"; }
 
-	void Init(const RenderContext& ctx) override;
-	void Shutdown() override {}
-	void OnResize(VkExtent2D newExtent) override { m_extent = newExtent; }
+	void RegisterPasses(
+		RenderGraph& graph,
+		const RenderContext& ctx,
+		ImageHandle colorTarget,
+		ImageHandle depthTarget,
+		ImageHandle resolveTarget) override;
 
-	void RecordCommands(
-		std::shared_ptr<VWrap::CommandBuffer> cmd,
-		uint32_t frameIndex,
-		std::shared_ptr<Camera> camera) override;
+	void Shutdown() override {}
+	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override { m_extent = newExtent; }
 
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipeline(const RenderContext& ctx) override;

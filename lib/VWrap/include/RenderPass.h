@@ -42,6 +42,12 @@ namespace VWrap {
 		/// </summary>
 		static std::shared_ptr<RenderPass> CreatePresentation(std::shared_ptr<Device> device, VkFormat swapchainFormat);
 
+		/// <summary>
+		/// Creates a render pass from a VkRenderPassCreateInfo. General-purpose factory
+		/// used by the render graph to create render passes from declarative attachment specs.
+		/// </summary>
+		static std::shared_ptr<RenderPass> Create(std::shared_ptr<Device> device, const VkRenderPassCreateInfo& createInfo, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
+
 		/// <summary> Gets the underlying Vulkan render pass </summary>
 		VkRenderPass Get() const { return m_render_pass; }
 

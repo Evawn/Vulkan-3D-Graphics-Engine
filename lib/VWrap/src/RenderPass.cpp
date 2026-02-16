@@ -246,6 +246,18 @@ namespace VWrap {
 		return ret;
 	}
 
+	std::shared_ptr<RenderPass> RenderPass::Create(std::shared_ptr<Device> device, const VkRenderPassCreateInfo& createInfo, VkSampleCountFlagBits samples) {
+		auto ret = std::make_shared<RenderPass>();
+		ret->m_device = device;
+		ret->m_samples = samples;
+
+		if (vkCreateRenderPass(device->Get(), &createInfo, nullptr, &ret->m_render_pass) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create render pass!");
+		}
+
+		return ret;
+	}
+
 	RenderPass::~RenderPass() {
 		if (m_render_pass != VK_NULL_HANDLE)
 			vkDestroyRenderPass(m_device->Get(), m_render_pass, nullptr);

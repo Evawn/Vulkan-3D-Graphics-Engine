@@ -3,15 +3,20 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
 
-void MeshRasterizer::Init(const RenderContext& ctx) {
+void MeshRasterizer::RegisterPasses(
+	RenderGraph& graph,
+	const RenderContext& ctx,
+	ImageHandle colorTarget,
+	ImageHandle depthTarget,
+	ImageHandle resolveTarget)
+{
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
 	m_extent = ctx.extent;
 	m_graphics_pool = ctx.graphicsPool;
-	m_render_pass = ctx.renderPass;
+	m_camera = ctx.camera;
 
 	CreateDescriptors(ctx.maxFramesInFlight);
-	CreatePipeline(ctx.renderPass);
 	m_sampler = VWrap::Sampler::Create(m_device);
 
 	VWrap::CommandBuffer::UploadTextureToImage(m_graphics_pool, m_allocator, m_texture_image, TEXTURE_PATH.c_str());
@@ -21,8 +26,30 @@ void MeshRasterizer::Init(const RenderContext& ctx) {
 	CreateVertexBuffer();
 	CreateIndexBuffer();
 	CreateUniformBuffers();
-
 	WriteDescriptors();
+
+	auto& pass = graph.AddGraphicsPass("Mesh Scene")
+		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
+		.SetResolveTarget(resolveTarget)
+		.SetRecord([this](PassContext& ctx) {
+			UpdateUniformBuffer(ctx.frameIndex);
+
+			auto vk_cmd = ctx.cmd->Get();
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
+
+			std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[ctx.frameIndex]->Get() };
+			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
+
+			VkBuffer vertexBuffers[] = { m_vertex_buffer->Get() };
+			VkDeviceSize offsets[] = { 0 };
+			vkCmdBindVertexBuffers(vk_cmd, 0, 1, vertexBuffers, offsets);
+			vkCmdBindIndexBuffer(vk_cmd, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
+		});
+
+	m_render_pass = pass.GetRenderPassPtr();
+	CreatePipeline(m_render_pass);
 }
 
 void MeshRasterizer::CreateVertexBuffer() {
@@ -246,44 +273,14 @@ void MeshRasterizer::CreateDescriptors(int max_sets)
 	m_descriptor_sets = VWrap::DescriptorSet::CreateMany(m_descriptor_pool, layouts);
 }
 
-void MeshRasterizer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera) {
-	UpdateUniformBuffer(frameIndex, camera);
-
-	auto vk_cmd = cmd->Get();
-	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
-
-	std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[frameIndex]->Get() };
-	vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
-
-	VkViewport viewport{};
-	viewport.height = (float)m_extent.height;
-	viewport.width = (float)m_extent.width;
-	viewport.minDepth = 0.0f;
-	viewport.maxDepth = 1.0f;
-	viewport.x = 0;
-	viewport.y = 0;
-	vkCmdSetViewport(vk_cmd, 0, 1, &viewport);
-
-	VkRect2D scissor{};
-	scissor.extent = m_extent;
-	scissor.offset = { 0, 0 };
-	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
-
-	VkBuffer vertexBuffers[] = { m_vertex_buffer->Get() };
-	VkDeviceSize offsets[] = { 0 };
-	vkCmdBindVertexBuffers(vk_cmd, 0, 1, vertexBuffers, offsets);
-	vkCmdBindIndexBuffer(vk_cmd, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
-	vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
-}
-
-void MeshRasterizer::UpdateUniformBuffer(uint32_t frame, std::shared_ptr<Camera> camera) {
+void MeshRasterizer::UpdateUniformBuffer(uint32_t frame) {
 	m_accumulated_rotation += m_rotation_speed * 0.016f;
 
 	UniformBufferObject ubo{};
 	ubo.model = glm::rotate(glm::mat4(1.0f), m_accumulated_rotation, glm::vec3(0.0f, 0.0f, 1.0f));
 	ubo.model = glm::scale(ubo.model, glm::vec3(m_model_scale));
-	ubo.view = camera->GetViewMatrix();
-	ubo.proj = camera->GetProjectionMatrix();
+	ubo.view = m_camera->GetViewMatrix();
+	ubo.proj = m_camera->GetProjectionMatrix();
 
 	memcpy(m_uniform_buffers_mapped[frame], &ubo, sizeof(ubo));
 }
@@ -297,7 +294,7 @@ std::vector<std::string> MeshRasterizer::GetShaderPaths() const {
 
 void MeshRasterizer::RecreatePipeline(const RenderContext& ctx) {
 	m_pipeline.reset();
-	CreatePipeline(ctx.renderPass);
+	CreatePipeline(m_render_pass);
 }
 
 std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {

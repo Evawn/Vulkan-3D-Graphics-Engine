@@ -10,37 +10,60 @@ struct TracerPushConstants {
 	int debugColor;
 };
 
-void DDATracer::Init(const RenderContext& ctx) {
+void DDATracer::RegisterPasses(
+	RenderGraph& graph,
+	const RenderContext& ctx,
+	ImageHandle colorTarget,
+	ImageHandle depthTarget,
+	ImageHandle resolveTarget)
+{
 	auto logger = spdlog::get("Render");
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
 	m_extent = ctx.extent;
 	m_graphics_pool = ctx.graphicsPool;
-	m_render_pass = ctx.renderPass;
+	m_camera = ctx.camera;
 
 	logger->debug("DDATracer: Creating descriptors...");
 	CreateDescriptors(ctx.maxFramesInFlight);
-	logger->debug("DDATracer: Descriptors created");
-
-	logger->debug("DDATracer: Creating pipeline...");
-	CreatePipeline(ctx.renderPass);
-	logger->debug("DDATracer: Pipeline created");
 
 	logger->debug("DDATracer: Creating sampler...");
 	m_sampler = VWrap::Sampler::Create(m_device);
-	logger->debug("DDATracer: Sampler created");
 
 	logger->debug("DDATracer: Creating brick texture...");
 	VWrap::CommandBuffer::CreateAndFillBrickTexture(m_graphics_pool, m_allocator, m_brick_texture, 32);
-	logger->debug("DDATracer: Brick texture created");
-
-	logger->debug("DDATracer: Creating brick texture view...");
 	m_brick_texture_view = VWrap::ImageView::Create(m_device, m_brick_texture);
-	logger->debug("DDATracer: Brick texture view created");
 
 	logger->debug("DDATracer: Writing descriptors...");
 	WriteDescriptors();
-	logger->debug("DDATracer: Descriptors written");
+
+	auto& pass = graph.AddGraphicsPass("DDA Scene")
+		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
+		.SetResolveTarget(resolveTarget)
+		.SetRecord([this](PassContext& ctx) {
+			auto vk_cmd = ctx.cmd->Get();
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
+
+			std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[ctx.frameIndex]->Get() };
+			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
+
+			TracerPushConstants pc{};
+			pc.NDCtoWorld = m_camera->GetNDCtoWorldMatrix();
+			pc.cameraPos = m_camera->GetPosition();
+			pc.maxIterations = m_max_iterations;
+			pc.skyColor = glm::vec3(m_sky_color[0], m_sky_color[1], m_sky_color[2]);
+			pc.debugColor = m_debug_color ? 1 : 0;
+			vkCmdPushConstants(vk_cmd, m_pipeline->GetLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TracerPushConstants), &pc);
+
+			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
+		});
+
+	m_render_pass = pass.GetRenderPassPtr();
+
+	logger->debug("DDATracer: Creating pipeline...");
+	CreatePipeline(m_render_pass);
+	logger->debug("DDATracer: Initialized via RegisterPasses");
 }
 
 void DDATracer::CreateDescriptors(int max_sets)
@@ -147,39 +170,6 @@ void DDATracer::WriteDescriptors()
 	}
 }
 
-void DDATracer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera)
-{
-	auto vk_cmd = cmd->Get();
-	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
-
-	std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[frameIndex]->Get() };
-	vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
-
-	VkViewport viewport{};
-	viewport.height = (float)m_extent.height;
-	viewport.width = (float)m_extent.width;
-	viewport.minDepth = 0.0f;
-	viewport.maxDepth = 1.0f;
-	viewport.x = 0;
-	viewport.y = 0;
-	vkCmdSetViewport(vk_cmd, 0, 1, &viewport);
-
-	VkRect2D scissor{};
-	scissor.extent = m_extent;
-	scissor.offset = { 0, 0 };
-	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
-
-	TracerPushConstants pc{};
-	pc.NDCtoWorld = camera->GetNDCtoWorldMatrix();
-	pc.cameraPos = camera->GetPosition();
-	pc.maxIterations = m_max_iterations;
-	pc.skyColor = glm::vec3(m_sky_color[0], m_sky_color[1], m_sky_color[2]);
-	pc.debugColor = m_debug_color ? 1 : 0;
-	vkCmdPushConstants(vk_cmd, m_pipeline->GetLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TracerPushConstants), &pc);
-
-	vkCmdDraw(vk_cmd, 4, 1, 0, 0);
-}
-
 std::vector<std::string> DDATracer::GetShaderPaths() const {
 	return {
 		std::string(config::SHADER_DIR) + "/shader_dda.vert.spv",
@@ -189,7 +179,7 @@ std::vector<std::string> DDATracer::GetShaderPaths() const {
 
 void DDATracer::RecreatePipeline(const RenderContext& ctx) {
 	m_pipeline.reset();
-	CreatePipeline(ctx.renderPass);
+	CreatePipeline(m_render_pass);
 }
 
 std::vector<TechniqueParameter>& DDATracer::GetParameters() {

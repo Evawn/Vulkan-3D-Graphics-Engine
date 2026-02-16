@@ -1,5 +1,6 @@
 #pragma once
 #include "RenderTechnique.h"
+#include "RenderGraph.h"
 #include "DescriptorSet.h"
 #include "DescriptorSetLayout.h"
 #include "DescriptorPool.h"
@@ -27,6 +28,7 @@ private:
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
 	std::shared_ptr<VWrap::RenderPass> m_render_pass;
+	std::shared_ptr<Camera> m_camera;
 
 	// Tunable parameters
 	int m_max_iterations = 250;
@@ -42,14 +44,15 @@ private:
 public:
 	std::string GetName() const override { return "DDA Tracer"; }
 
-	void Init(const RenderContext& ctx) override;
-	void Shutdown() override {}
-	void OnResize(VkExtent2D newExtent) override { m_extent = newExtent; }
+	void RegisterPasses(
+		RenderGraph& graph,
+		const RenderContext& ctx,
+		ImageHandle colorTarget,
+		ImageHandle depthTarget,
+		ImageHandle resolveTarget) override;
 
-	void RecordCommands(
-		std::shared_ptr<VWrap::CommandBuffer> cmd,
-		uint32_t frameIndex,
-		std::shared_ptr<Camera> camera) override;
+	void Shutdown() override {}
+	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override { m_extent = newExtent; }
 
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipeline(const RenderContext& ctx) override;

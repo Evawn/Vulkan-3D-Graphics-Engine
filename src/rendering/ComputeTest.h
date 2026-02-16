@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderTechnique.h"
+#include "RenderGraph.h"
 #include "ComputePipeline.h"
 #include "Pipeline.h"
 #include "DescriptorSet.h"
@@ -14,14 +15,12 @@ class ComputeTest : public RenderTechnique {
 private:
 	std::shared_ptr<VWrap::Device> m_device;
 	std::shared_ptr<VWrap::Allocator> m_allocator;
-	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
-	std::shared_ptr<VWrap::CommandPool> m_compute_pool;
 	std::shared_ptr<VWrap::RenderPass> m_render_pass;
 	VkExtent2D m_extent{};
 
-	// Storage image (written by compute, read by fragment)
-	std::shared_ptr<VWrap::Image> m_storage_image;
-	std::shared_ptr<VWrap::ImageView> m_storage_image_view;
+	// Storage image handle (graph-managed)
+	ImageHandle m_storage;
+
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
 	// Compute pipeline + descriptors
@@ -36,25 +35,25 @@ private:
 	std::shared_ptr<VWrap::DescriptorPool> m_graphics_descriptor_pool;
 	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_graphics_descriptor_sets;
 
-	void CreateStorageImage();
 	void CreateComputePipeline();
 	void CreateComputeDescriptors();
 	void CreateGraphicsPipeline();
 	void CreateGraphicsDescriptors(uint32_t max_sets);
-	void WriteDescriptors();
-	void DispatchCompute();
 
 public:
 	std::string GetName() const override { return "Compute Test"; }
 
-	void Init(const RenderContext& ctx) override;
-	void Shutdown() override {}
-	void OnResize(VkExtent2D newExtent) override;
+	void RegisterPasses(
+		RenderGraph& graph,
+		const RenderContext& ctx,
+		ImageHandle colorTarget,
+		ImageHandle depthTarget,
+		ImageHandle resolveTarget) override;
 
-	void RecordCommands(
-		std::shared_ptr<VWrap::CommandBuffer> cmd,
-		uint32_t frameIndex,
-		std::shared_ptr<Camera> camera) override;
+	void Shutdown() override {}
+	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override;
+
+	void WriteGraphDescriptors(RenderGraph& graph) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipeline(const RenderContext& ctx) override;

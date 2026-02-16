@@ -9,15 +9,16 @@
 
 // PROJECT INCLUDES ---------------------------------------------------------------------------------------------
 #include "VulkanContext.h"
-#include "OffscreenTarget.h"
 #include "CameraController.h"
 #include "GUIRenderer.h"
 #include "GPUProfiler.h"
 #include "Camera.h"
 #include "RenderTechnique.h"
+#include "RenderGraph.h"
 #include "DDATracer.h"
 #include "MeshRasterizer.h"
 #include "ComputeTest.h"
+#include "Sampler.h"
 
 // PANELS
 #include "ViewportPanel.h"
@@ -63,15 +64,19 @@ private:
 	// WINDOW
 	std::shared_ptr<GLFWwindow*> m_glfw_window;
 
-	// RENDER PASSES
-	std::shared_ptr<VWrap::RenderPass> m_scene_render_pass;
+	// RENDER PASS (kept for ImGui init compatibility)
 	std::shared_ptr<VWrap::RenderPass> m_presentation_render_pass;
 
-	// PRESENTATION FRAMEBUFFERS (one per swapchain image)
-	std::vector<std::shared_ptr<VWrap::Framebuffer>> m_presentation_framebuffers;
+	// RENDER GRAPH
+	RenderGraph m_render_graph;
+	ImageHandle m_scene_color;
+	ImageHandle m_scene_depth;
+	ImageHandle m_scene_resolve;
+	ImageHandle m_swapchain;
+	VkExtent2D m_offscreen_extent{};
 
-	// OFFSCREEN TARGET (scene renders here)
-	std::shared_ptr<VWrap::OffscreenTarget> m_offscreen_target;
+	// SCENE TEXTURE (for ImGui viewport)
+	std::shared_ptr<VWrap::Sampler> m_scene_sampler;
 	VkDescriptorSet m_scene_texture = VK_NULL_HANDLE;
 
 	// GUI
@@ -111,7 +116,7 @@ private:
 	void MainLoop();
 	void Cleanup();
 	void Resize();
-	void CreatePresentationFramebuffers();
+	void BuildRenderGraph();
 	void DrawFrame();
 	void HotReloadShaders();
 	void SwitchRenderer(size_t index);

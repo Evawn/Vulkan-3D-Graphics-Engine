@@ -16,30 +16,26 @@ void Application::Init() {
 	InitImGui();
 
 	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
+	m_offscreen_extent = extent;
 
-	// Create offscreen target for scene rendering
-	m_offscreen_target = VWrap::OffscreenTarget::Create(
-		m_vk.device, m_vk.allocator, m_scene_render_pass,
-		extent, m_vk.msaaSamples,
-		m_vk.frameController->GetSwapchain()->GetFormat());
-	RegisterSceneTexture();
+	// Create render graph
+	m_render_graph = RenderGraph(m_vk.device, m_vk.allocator);
+	m_scene_sampler = VWrap::Sampler::Create(m_vk.device);
 
-	spdlog::get("App")->debug("Building render context...");
-	auto render_ctx = BuildRenderContext();
+	spdlog::get("App")->debug("Creating camera...");
+	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
-	spdlog::get("App")->debug("Initializing DDATracer...");
+	spdlog::get("App")->debug("Initializing renderers...");
 	m_renderers.push_back(std::make_unique<DDATracer>());
-	m_renderers[0]->Init(render_ctx);
-	m_active_renderer_index = 0;
-	spdlog::get("App")->debug("DDATracer initialized");
-
 	m_renderers.push_back(std::make_unique<ComputeTest>());
+	m_renderers.push_back(std::make_unique<MeshRasterizer>());
+	m_active_renderer_index = 0;
+
+	BuildRenderGraph();
 
 	spdlog::get("App")->debug("Creating GPU profiler...");
 	m_gpu_profiler = GPUProfiler::Create(m_vk.device, MAX_FRAMES_IN_FLIGHT);
 	spdlog::get("App")->debug("GPU profiler created");
-
-	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
 	// Camera controller owns input polling and camera movement
 	Input::Init(m_glfw_window.get()[0]);
@@ -132,10 +128,8 @@ void Application::InitVulkan() {
 
 	VkFormat swapchainFormat = m_vk.frameController->GetSwapchain()->GetFormat();
 
-	m_scene_render_pass = VWrap::RenderPass::CreateOffscreen(m_vk.device, swapchainFormat, m_vk.msaaSamples);
+	// Keep presentation render pass for ImGui init compatibility
 	m_presentation_render_pass = VWrap::RenderPass::CreatePresentation(m_vk.device, swapchainFormat);
-
-	CreatePresentationFramebuffers();
 }
 
 void Application::InitImGui() {
@@ -168,6 +162,51 @@ void Application::InitImGui() {
 	ImGui_ImplVulkan_CreateFontsTexture();
 
 	UIStyle::Apply(dpi_scale);
+}
+
+void Application::BuildRenderGraph() {
+	m_render_graph.Clear();
+
+	VkFormat format = m_vk.frameController->GetSwapchain()->GetFormat();
+
+	// Scene images (MSAA color, depth, resolve)
+	m_scene_color = m_render_graph.CreateImage("scene_color", {
+		m_offscreen_extent.width, m_offscreen_extent.height, 1,
+		format, m_vk.msaaSamples });
+	m_scene_depth = m_render_graph.CreateImage("scene_depth", {
+		m_offscreen_extent.width, m_offscreen_extent.height, 1,
+		VWrap::FindDepthFormat(m_vk.physicalDevice->Get()),
+		m_vk.msaaSamples });
+	m_scene_resolve = m_render_graph.CreateImage("scene_resolve", {
+		m_offscreen_extent.width, m_offscreen_extent.height, 1,
+		format });
+
+	// Register technique passes
+	auto ctx = BuildRenderContext();
+	m_renderers[m_active_renderer_index]->RegisterPasses(
+		m_render_graph, ctx, m_scene_color, m_scene_depth, m_scene_resolve);
+
+	// Import swapchain image (updated per-frame)
+	m_swapchain = m_render_graph.ImportImage("swapchain",
+		m_vk.frameController->GetImageViews()[0],
+		format, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+		m_vk.frameController->GetSwapchain()->GetExtent());
+
+	// UI pass: renders ImGui to swapchain
+	m_render_graph.AddGraphicsPass("UI")
+		.SetColorAttachment(m_swapchain, LoadOp::Clear, StoreOp::Store,
+			0.059f, 0.059f, 0.059f, 1.0f)
+		.Read(m_scene_resolve)
+		.SetRecord([this](PassContext& ctx) {
+			m_gui_renderer->CmdDraw(ctx.cmd);
+		});
+
+	m_render_graph.Compile();
+
+	// Post-compile: techniques write descriptors for graph-allocated images
+	m_renderers[m_active_renderer_index]->WriteGraphDescriptors(m_render_graph);
+
+	RegisterSceneTexture();
 }
 
 void Application::MainLoop() {
@@ -223,11 +262,14 @@ void Application::DrawFrame() {
 			vkDeviceWaitIdle(m_vk.device->Get());
 			if (m_scene_texture != VK_NULL_HANDLE) {
 				ImGui_ImplVulkan_RemoveTexture(m_scene_texture);
+				m_scene_texture = VK_NULL_HANDLE;
 			}
-			m_offscreen_target->Resize(desired);
-			RegisterSceneTexture();
-			m_renderers[m_active_renderer_index]->OnResize(desired);
+			m_offscreen_extent = desired;
+			m_render_graph.Resize(desired);
+			m_renderers[m_active_renderer_index]->WriteGraphDescriptors(m_render_graph);
+			m_renderers[m_active_renderer_index]->OnResize(desired, m_render_graph);
 			m_camera->SetAspect((float)desired.width / (float)desired.height);
+			RegisterSceneTexture();
 			m_viewport_panel.SetTextureID(m_scene_texture);
 		}
 	}
@@ -241,33 +283,14 @@ void Application::DrawFrame() {
 	// Read metrics from previous cycle (fence wait in AcquireNext guarantees GPU work done)
 	m_last_metrics = m_gpu_profiler->GetMetrics(frame_index);
 
+	// Update swapchain import for current image
+	m_render_graph.UpdateImport(m_swapchain, m_vk.frameController->GetImageViews()[image_index]);
+
 	command_buffer->Begin();
 
-	// ========== PASS 1: Scene -> Offscreen ==========
 	m_gpu_profiler->CmdBegin(command_buffer, frame_index);
-
-	std::vector<VkClearValue> sceneClearValues(3);
-	sceneClearValues[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
-	sceneClearValues[1].depthStencil = { 1.0f, 0 };
-	sceneClearValues[2].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
-
-	command_buffer->CmdBeginRenderPass(m_scene_render_pass, m_offscreen_target->GetFramebuffer(), sceneClearValues);
-
-	m_renderers[m_active_renderer_index]->RecordCommands(command_buffer, frame_index, m_camera);
-
+	m_render_graph.Execute(command_buffer, frame_index);
 	m_gpu_profiler->CmdEnd(command_buffer, frame_index);
-
-	vkCmdEndRenderPass(command_buffer->Get());
-
-	// ========== PASS 2: ImGui -> Swapchain ==========
-	std::vector<VkClearValue> presentClearValues(1);
-	presentClearValues[0].color = { { 0.059f, 0.059f, 0.059f, 1.0f } };
-
-	command_buffer->CmdBeginRenderPass(m_presentation_render_pass, m_presentation_framebuffers[image_index], presentClearValues);
-
-	m_gui_renderer->CmdDraw(command_buffer);
-
-	vkCmdEndRenderPass(command_buffer->Get());
 
 	if (vkEndCommandBuffer(command_buffer->Get()) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to end command buffer recording!");
@@ -278,22 +301,9 @@ void Application::DrawFrame() {
 }
 
 void Application::Resize() {
-	CreatePresentationFramebuffers();
-	// Offscreen target does NOT resize on swapchain resize.
-	// It resizes when the viewport panel detects a size change.
-}
-
-void Application::CreatePresentationFramebuffers() {
-	auto swapchain = m_vk.frameController->GetSwapchain();
-	m_presentation_framebuffers.resize(swapchain->Size());
-
-	for (uint32_t i = 0; i < swapchain->Size(); i++) {
-		std::vector<std::shared_ptr<VWrap::ImageView>> attachments = {
-			m_vk.frameController->GetImageViews()[i]
-		};
-		m_presentation_framebuffers[i] = VWrap::Framebuffer::Create2D(
-			m_vk.device, m_presentation_render_pass, attachments, swapchain->GetExtent());
-	}
+	// Swapchain resized — rebuild the graph so the UI pass gets new swapchain framebuffers.
+	// Scene offscreen resources keep their current m_offscreen_extent.
+	BuildRenderGraph();
 }
 
 void Application::HotReloadShaders() {
@@ -333,19 +343,27 @@ void Application::SwitchRenderer(size_t index) {
 
 	vkDeviceWaitIdle(m_vk.device->Get());
 
-	auto ctx = BuildRenderContext();
-	m_renderers[index]->Init(ctx);
+	if (m_scene_texture != VK_NULL_HANDLE) {
+		ImGui_ImplVulkan_RemoveTexture(m_scene_texture);
+		m_scene_texture = VK_NULL_HANDLE;
+	}
+
 	m_active_renderer_index = index;
+	BuildRenderGraph();
+	m_viewport_panel.SetTextureID(m_scene_texture);
 
 	logger->info("Switched to: {}", m_renderers[index]->GetName());
 }
 
 void Application::CaptureScreenshot() {
+	auto resolveImage = m_render_graph.GetImage(m_scene_resolve);
+	auto resolveDesc = m_render_graph.GetImageDesc(m_scene_resolve);
+	VkFormat format = m_render_graph.GetImageFormat(m_scene_resolve);
+	VkExtent2D extent = { resolveDesc.width, resolveDesc.height };
+
 	auto path = ScreenshotCapture::Capture(
 		m_vk.device, m_vk.allocator, m_vk.graphicsCommandPool,
-		m_offscreen_target->GetResolveImage(),
-		m_offscreen_target->GetColorFormat(),
-		m_offscreen_target->GetExtent());
+		resolveImage, format, extent);
 	if (!path.empty()) {
 		m_inspector_panel.SetLastScreenshotPath(path);
 	}
@@ -357,15 +375,16 @@ RenderContext Application::BuildRenderContext() const {
 	ctx.allocator = m_vk.allocator;
 	ctx.graphicsPool = m_vk.graphicsCommandPool;
 	ctx.computePool = m_vk.computeCommandPool;
-	ctx.renderPass = m_scene_render_pass;
-	ctx.extent = m_offscreen_target->GetExtent();
+	ctx.extent = m_offscreen_extent;
 	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+	ctx.camera = m_camera;
 	return ctx;
 }
 
 void Application::RegisterSceneTexture() {
+	auto resolveView = m_render_graph.GetImageView(m_scene_resolve);
 	m_scene_texture = ImGui_ImplVulkan_AddTexture(
-		m_offscreen_target->GetSampler()->Get(),
-		m_offscreen_target->GetResolveView()->Get(),
+		m_scene_sampler->Get(),
+		resolveView->Get(),
 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }

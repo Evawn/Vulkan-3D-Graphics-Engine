@@ -7,18 +7,57 @@ struct ComputeTestPC {
 	float height;
 };
 
-void ComputeTest::Init(const RenderContext& ctx) {
+void ComputeTest::RegisterPasses(
+	RenderGraph& graph,
+	const RenderContext& ctx,
+	ImageHandle colorTarget,
+	ImageHandle depthTarget,
+	ImageHandle resolveTarget)
+{
 	auto logger = spdlog::get("Render");
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
 	m_extent = ctx.extent;
-	m_graphics_pool = ctx.graphicsPool;
-	m_compute_pool = ctx.computePool;
-	m_render_pass = ctx.renderPass;
 
-	logger->debug("ComputeTest: Creating storage image...");
-	CreateStorageImage();
+	// Transient storage image — graph allocates it
+	m_storage = graph.CreateImage("compute_output", {
+		ctx.extent.width, ctx.extent.height, 1,
+		VK_FORMAT_R8G8B8A8_UNORM
+	});
 
+	// Compute pass: write to storage image
+	graph.AddComputePass("Compute Generate")
+		.Write(m_storage)
+		.SetRecord([this](PassContext& ctx) {
+			ctx.cmd->CmdBindComputePipeline(m_compute_pipeline);
+			ctx.cmd->CmdBindComputeDescriptorSets(m_compute_pipeline->GetLayout(),
+				{ m_compute_descriptor_set->Get() });
+			ComputeTestPC pc{};
+			pc.width = static_cast<float>(ctx.extent.width);
+			pc.height = static_cast<float>(ctx.extent.height);
+			vkCmdPushConstants(ctx.cmd->Get(), m_compute_pipeline->GetLayout(),
+				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+			uint32_t gx = (ctx.extent.width + 15) / 16;
+			uint32_t gy = (ctx.extent.height + 15) / 16;
+			ctx.cmd->CmdDispatch(gx, gy, 1);
+		});
+
+	// Graphics pass: display the compute result
+	auto& gfx = graph.AddGraphicsPass("Compute Display")
+		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
+		.SetResolveTarget(resolveTarget)
+		.Read(m_storage)
+		.SetRecord([this](PassContext& ctx) {
+			auto vk_cmd = ctx.cmd->Get();
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphics_pipeline->Get());
+			VkDescriptorSet ds = m_graphics_descriptor_sets[ctx.frameIndex]->Get();
+			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				m_graphics_pipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
+			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
+		});
+
+	// Create pipelines and descriptors
 	logger->debug("ComputeTest: Creating compute descriptors...");
 	CreateComputeDescriptors();
 
@@ -28,36 +67,54 @@ void ComputeTest::Init(const RenderContext& ctx) {
 	logger->debug("ComputeTest: Creating graphics descriptors...");
 	CreateGraphicsDescriptors(ctx.maxFramesInFlight);
 
+	m_render_pass = gfx.GetRenderPassPtr();
+
 	logger->debug("ComputeTest: Creating graphics pipeline...");
 	CreateGraphicsPipeline();
 
 	logger->debug("ComputeTest: Creating sampler...");
 	m_sampler = VWrap::Sampler::Create(m_device);
 
-	logger->debug("ComputeTest: Writing descriptors...");
-	WriteDescriptors();
-
-	logger->debug("ComputeTest: Dispatching compute...");
-	DispatchCompute();
-
-	logger->debug("ComputeTest: Initialized");
+	// Note: descriptors referencing the storage image are written in WriteGraphDescriptors()
+	// after graph.Compile() allocates the actual image.
+	logger->debug("ComputeTest: Initialized via RegisterPasses");
 }
 
-void ComputeTest::CreateStorageImage() {
-	VWrap::ImageCreateInfo info{};
-	info.width = m_extent.width;
-	info.height = m_extent.height;
-	info.depth = 1;
-	info.format = VK_FORMAT_R8G8B8A8_UNORM;
-	info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	info.properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	info.mip_levels = 1;
-	info.samples = VK_SAMPLE_COUNT_1_BIT;
-	info.image_type = VK_IMAGE_TYPE_2D;
+void ComputeTest::WriteGraphDescriptors(RenderGraph& graph) {
+	auto storageView = graph.GetImageView(m_storage);
 
-	m_storage_image = VWrap::Image::Create(m_allocator, info);
-	m_storage_image_view = VWrap::ImageView::Create(m_device, m_storage_image);
+	// Compute descriptor: storage image in GENERAL layout
+	VkDescriptorImageInfo computeImageInfo{};
+	computeImageInfo.imageView = storageView->Get();
+	computeImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+	VkWriteDescriptorSet computeWrite{};
+	computeWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	computeWrite.dstSet = m_compute_descriptor_set->Get();
+	computeWrite.dstBinding = 0;
+	computeWrite.descriptorCount = 1;
+	computeWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	computeWrite.pImageInfo = &computeImageInfo;
+
+	vkUpdateDescriptorSets(m_device->Get(), 1, &computeWrite, 0, nullptr);
+
+	// Graphics descriptors: sampled image per frame
+	for (auto& ds : m_graphics_descriptor_sets) {
+		VkDescriptorImageInfo imageInfo{};
+		imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfo.imageView = storageView->Get();
+		imageInfo.sampler = m_sampler->Get();
+
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = ds->Get();
+		write.dstBinding = 0;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.pImageInfo = &imageInfo;
+
+		vkUpdateDescriptorSets(m_device->Get(), 1, &write, 0, nullptr);
+	}
 }
 
 void ComputeTest::CreateComputeDescriptors() {
@@ -159,104 +216,11 @@ void ComputeTest::CreateGraphicsPipeline() {
 	m_graphics_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_code, frag_code);
 }
 
-void ComputeTest::WriteDescriptors() {
-	// Compute descriptor: storage image in GENERAL layout
-	VkDescriptorImageInfo computeImageInfo{};
-	computeImageInfo.imageView = m_storage_image_view->Get();
-	computeImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-	VkWriteDescriptorSet computeWrite{};
-	computeWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	computeWrite.dstSet = m_compute_descriptor_set->Get();
-	computeWrite.dstBinding = 0;
-	computeWrite.descriptorCount = 1;
-	computeWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	computeWrite.pImageInfo = &computeImageInfo;
-
-	vkUpdateDescriptorSets(m_device->Get(), 1, &computeWrite, 0, nullptr);
-
-	// Graphics descriptors: sampled image per frame
-	for (auto& ds : m_graphics_descriptor_sets) {
-		VkDescriptorImageInfo imageInfo{};
-		imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		imageInfo.imageView = m_storage_image_view->Get();
-		imageInfo.sampler = m_sampler->Get();
-
-		VkWriteDescriptorSet write{};
-		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		write.dstSet = ds->Get();
-		write.dstBinding = 0;
-		write.descriptorCount = 1;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		write.pImageInfo = &imageInfo;
-
-		vkUpdateDescriptorSets(m_device->Get(), 1, &write, 0, nullptr);
-	}
-}
-
-void ComputeTest::DispatchCompute() {
-	auto cmd = VWrap::CommandBuffer::Create(m_compute_pool);
-	cmd->BeginSingle();
-
-	// Transition: UNDEFINED -> GENERAL (for compute write)
-	cmd->CmdTransitionImageLayout(m_storage_image, VK_FORMAT_R8G8B8A8_UNORM,
-		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-
-	// Bind compute pipeline and descriptor
-	cmd->CmdBindComputePipeline(m_compute_pipeline);
-	cmd->CmdBindComputeDescriptorSets(m_compute_pipeline->GetLayout(),
-		{ m_compute_descriptor_set->Get() });
-
-	// Push constants: image dimensions
-	ComputeTestPC pc{};
-	pc.width = static_cast<float>(m_extent.width);
-	pc.height = static_cast<float>(m_extent.height);
-	vkCmdPushConstants(cmd->Get(), m_compute_pipeline->GetLayout(),
-		VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-
-	// Dispatch: workgroup size 16x16, round up
-	uint32_t groupX = (m_extent.width + 15) / 16;
-	uint32_t groupY = (m_extent.height + 15) / 16;
-	cmd->CmdDispatch(groupX, groupY, 1);
-
-	// Transition: GENERAL -> SHADER_READ_ONLY (for fragment read)
-	cmd->CmdTransitionImageLayout(m_storage_image, VK_FORMAT_R8G8B8A8_UNORM,
-		VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-	cmd->EndAndSubmit();
-}
-
-void ComputeTest::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera) {
-	auto vk_cmd = cmd->Get();
-	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphics_pipeline->Get());
-
-	VkDescriptorSet ds = m_graphics_descriptor_sets[frameIndex]->Get();
-	vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		m_graphics_pipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
-
-	VkViewport viewport{};
-	viewport.width = static_cast<float>(m_extent.width);
-	viewport.height = static_cast<float>(m_extent.height);
-	viewport.minDepth = 0.0f;
-	viewport.maxDepth = 1.0f;
-	viewport.x = 0;
-	viewport.y = 0;
-	vkCmdSetViewport(vk_cmd, 0, 1, &viewport);
-
-	VkRect2D scissor{};
-	scissor.extent = m_extent;
-	scissor.offset = { 0, 0 };
-	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
-
-	vkCmdDraw(vk_cmd, 4, 1, 0, 0);
-}
-
-void ComputeTest::OnResize(VkExtent2D newExtent) {
+void ComputeTest::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
 	m_extent = newExtent;
-	m_device->WaitIdle();
-	CreateStorageImage();
-	WriteDescriptors();
-	DispatchCompute();
+	// The graph handles storage image reallocation via Resize()
+	// We just need to update descriptors after the graph resizes
+	WriteGraphDescriptors(graph);
 }
 
 std::vector<std::string> ComputeTest::GetShaderPaths() const {
@@ -272,7 +236,6 @@ void ComputeTest::RecreatePipeline(const RenderContext& ctx) {
 	m_compute_pipeline.reset();
 	CreateComputePipeline();
 	CreateGraphicsPipeline();
-	DispatchCompute();
 }
 
 FrameStats ComputeTest::GetFrameStats() const {
