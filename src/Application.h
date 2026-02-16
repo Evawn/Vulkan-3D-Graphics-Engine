@@ -93,6 +93,7 @@ private:
 	// RENDERERS
 	std::vector<std::unique_ptr<RenderTechnique>> m_renderers;
 	size_t m_active_renderer_index = 0;
+	bool m_pending_hot_reload = false;
 
 public:
 	void Run();
