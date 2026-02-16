@@ -19,9 +19,9 @@ vulkan-engine/
 │   ├── rendering/
 │   │   ├── RenderTechnique.h     # Abstract base class for renderers
 │   │   ├── MeshRasterizer.h/cpp  # Forward rasterization (OBJ + texture)
-│   │   └── octree/
-│   │       ├── OctreeTracer.h/cpp # Fullscreen DDA voxel ray-casting
-│   │       └── Octree.h/cpp       # Voxel data structure
+│   │   └── voxel/
+│   │       ├── DDATracer.h/cpp    # Fullscreen DDA voxel ray-casting
+│   │       └── BrickVolume.h/cpp  # Voxel data structure
 │   ├── editor/
 │   │   ├── GUIRenderer.h/cpp     # ImGui context + rendering
 │   │   ├── UIStyle.h/cpp         # Theme (dark + green accent)
@@ -62,7 +62,7 @@ vulkan-engine/
 │   └── tiny_obj_loader.h         # OBJ mesh loading
 ├── shaders/
 │   ├── shader_rast.vert/frag     # Mesh rasterization
-│   └── shader_tracer.vert/frag   # Voxel ray-casting (DDA)
+│   └── shader_dda.vert/frag      # Voxel ray-casting (DDA)
 ├── models/                        # OBJ meshes
 ├── textures/                      # PNG textures
 └── resources/fonts/               # ImGui fonts
@@ -103,7 +103,7 @@ main() → Log::Init() → Application::Run()
                     │  │ InitWindow()      — GLFW window (80% screen, centered)
                     │  │ InitVulkan()      — Full Vulkan setup → VulkanContext
                     │  │ InitImGui()       — Dear ImGui with Vulkan backend
-                    │  │ Create renderers  — OctreeTracer + MeshRasterizer
+                    │  │ Create renderers  — DDATracer + MeshRasterizer
                     │  │ InitPanels()      — Register 4 editor panels
                     │  └────────────┤
                     │   MainLoop()  │ ←── runs until window close
@@ -184,7 +184,7 @@ class RenderTechnique {
 
 **Current implementations:**
 - **MeshRasterizer** — Forward rasterization with OBJ loading (TinyObjLoader), texture sampling (stb_image), per-frame UBO (model/view/proj), wireframe toggle
-- **OctreeTracer** — Fullscreen fragment-shader ray-casting against a 32x32x32 3D voxel texture using DDA traversal, push constants for camera + parameters
+- **DDATracer** — Fullscreen fragment-shader ray-casting against a 32x32x32 3D voxel texture using DDA traversal, push constants for camera + parameters
 
 ### Pipeline
 
@@ -245,7 +245,7 @@ This separation lets ImGui display the scene as a texture within a dockable pane
 │  ┌──────▼─────────────────▼──────────────────────────────────┐ │
 │  │              RenderTechnique (active)                      │ │
 │  │  ┌────────────────┐  ┌──────────────────┐                 │ │
-│  │  │ MeshRasterizer │  │   OctreeTracer   │  ...extensible  │ │
+│  │  │ MeshRasterizer │  │    DDATracer     │  ...extensible  │ │
 │  │  └────────────────┘  └──────────────────┘                 │ │
 │  └───────────────────────────┬───────────────────────────────┘ │
 │                              │                                  │

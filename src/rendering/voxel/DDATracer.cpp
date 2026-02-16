@@ -1,4 +1,4 @@
-#include "OctreeTracer.h"
+#include "DDATracer.h"
 #include "config.h"
 #include <spdlog/spdlog.h>
 
@@ -10,7 +10,7 @@ struct TracerPushConstants {
 	int debugColor;
 };
 
-void OctreeTracer::Init(const RenderContext& ctx) {
+void DDATracer::Init(const RenderContext& ctx) {
 	auto logger = spdlog::get("Render");
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
@@ -18,32 +18,32 @@ void OctreeTracer::Init(const RenderContext& ctx) {
 	m_graphics_pool = ctx.graphicsPool;
 	m_render_pass = ctx.renderPass;
 
-	logger->debug("OctreeTracer: Creating descriptors...");
+	logger->debug("DDATracer: Creating descriptors...");
 	CreateDescriptors(ctx.maxFramesInFlight);
-	logger->debug("OctreeTracer: Descriptors created");
+	logger->debug("DDATracer: Descriptors created");
 
-	logger->debug("OctreeTracer: Creating pipeline...");
+	logger->debug("DDATracer: Creating pipeline...");
 	CreatePipeline(ctx.renderPass);
-	logger->debug("OctreeTracer: Pipeline created");
+	logger->debug("DDATracer: Pipeline created");
 
-	logger->debug("OctreeTracer: Creating sampler...");
+	logger->debug("DDATracer: Creating sampler...");
 	m_sampler = VWrap::Sampler::Create(m_device);
-	logger->debug("OctreeTracer: Sampler created");
+	logger->debug("DDATracer: Sampler created");
 
-	logger->debug("OctreeTracer: Creating brick texture...");
+	logger->debug("DDATracer: Creating brick texture...");
 	VWrap::CommandBuffer::CreateAndFillBrickTexture(m_graphics_pool, m_allocator, m_brick_texture, 32);
-	logger->debug("OctreeTracer: Brick texture created");
+	logger->debug("DDATracer: Brick texture created");
 
-	logger->debug("OctreeTracer: Creating brick texture view...");
+	logger->debug("DDATracer: Creating brick texture view...");
 	m_brick_texture_view = VWrap::ImageView::Create(m_device, m_brick_texture);
-	logger->debug("OctreeTracer: Brick texture view created");
+	logger->debug("DDATracer: Brick texture view created");
 
-	logger->debug("OctreeTracer: Writing descriptors...");
+	logger->debug("DDATracer: Writing descriptors...");
 	WriteDescriptors();
-	logger->debug("OctreeTracer: Descriptors written");
+	logger->debug("DDATracer: Descriptors written");
 }
 
-void OctreeTracer::CreateDescriptors(int max_sets)
+void DDATracer::CreateDescriptors(int max_sets)
 {
 	VkDescriptorSetLayoutBinding sampled_image_binding{};
 	sampled_image_binding.binding = 0;
@@ -64,10 +64,10 @@ void OctreeTracer::CreateDescriptors(int max_sets)
 	m_descriptor_sets = VWrap::DescriptorSet::CreateMany(m_descriptor_pool, layouts);
 }
 
-void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass)
+void DDATracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass)
 {
-	auto vert_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_tracer.vert.spv");
-	auto frag_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_tracer.frag.spv");
+	auto vert_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_dda.vert.spv");
+	auto frag_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_dda.frag.spv");
 
 	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -126,7 +126,7 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 	m_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_shader_code, frag_shader_code);
 }
 
-void OctreeTracer::WriteDescriptors()
+void DDATracer::WriteDescriptors()
 {
 	for (size_t i = 0; i < m_descriptor_sets.size(); i++) {
 		VkDescriptorImageInfo image_info{};
@@ -147,7 +147,7 @@ void OctreeTracer::WriteDescriptors()
 	}
 }
 
-void OctreeTracer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera)
+void DDATracer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera)
 {
 	auto vk_cmd = cmd->Get();
 	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
@@ -180,19 +180,19 @@ void OctreeTracer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uin
 	vkCmdDraw(vk_cmd, 4, 1, 0, 0);
 }
 
-std::vector<std::string> OctreeTracer::GetShaderPaths() const {
+std::vector<std::string> DDATracer::GetShaderPaths() const {
 	return {
-		std::string(config::SHADER_DIR) + "/shader_tracer.vert.spv",
-		std::string(config::SHADER_DIR) + "/shader_tracer.frag.spv"
+		std::string(config::SHADER_DIR) + "/shader_dda.vert.spv",
+		std::string(config::SHADER_DIR) + "/shader_dda.frag.spv"
 	};
 }
 
-void OctreeTracer::RecreatePipeline(const RenderContext& ctx) {
+void DDATracer::RecreatePipeline(const RenderContext& ctx) {
 	m_pipeline.reset();
 	CreatePipeline(ctx.renderPass);
 }
 
-std::vector<TechniqueParameter>& OctreeTracer::GetParameters() {
+std::vector<TechniqueParameter>& DDATracer::GetParameters() {
 	if (m_parameters.empty()) {
 		m_parameters = {
 			{ "Max Iterations", TechniqueParameter::Int, &m_max_iterations, 1.0f, 500.0f },
@@ -203,6 +203,6 @@ std::vector<TechniqueParameter>& OctreeTracer::GetParameters() {
 	return m_parameters;
 }
 
-FrameStats OctreeTracer::GetFrameStats() const {
+FrameStats DDATracer::GetFrameStats() const {
 	return { 1, 4, 0 };
 }

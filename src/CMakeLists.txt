@@ -8,7 +8,7 @@ target_include_directories(VulkanEngine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/utils"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering"
-    "${CMAKE_CURRENT_SOURCE_DIR}/rendering/octree"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rendering/voxel"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor/panels"
     "${CMAKE_SOURCE_DIR}/dep"

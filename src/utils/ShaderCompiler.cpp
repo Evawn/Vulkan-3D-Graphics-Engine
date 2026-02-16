@@ -8,10 +8,10 @@
 namespace ShaderCompiler {
 
 std::string SpvToSourcePath(const std::string& spvPath) {
-	// SPV path: <SHADER_DIR>/shader_tracer.frag.spv
-	// Source:   <SHADER_SRC_DIR>/shader_tracer.frag
+	// SPV path: <SHADER_DIR>/shader_dda.frag.spv
+	// Source:   <SHADER_SRC_DIR>/shader_dda.frag
 	std::filesystem::path p(spvPath);
-	std::string stem = p.stem().string(); // "shader_tracer.frag" (strips .spv)
+	std::string stem = p.stem().string(); // "shader_dda.frag" (strips .spv)
 	return std::string(config::SHADER_SRC_DIR) + "/" + stem;
 }
 

@@ -27,11 +27,11 @@ void Application::Init() {
 	spdlog::get("App")->debug("Building render context...");
 	auto render_ctx = BuildRenderContext();
 
-	spdlog::get("App")->debug("Initializing OctreeTracer...");
-	m_renderers.push_back(std::make_unique<OctreeTracer>());
+	spdlog::get("App")->debug("Initializing DDATracer...");
+	m_renderers.push_back(std::make_unique<DDATracer>());
 	m_renderers[0]->Init(render_ctx);
 	m_active_renderer_index = 0;
-	spdlog::get("App")->debug("OctreeTracer initialized");
+	spdlog::get("App")->debug("DDATracer initialized");
 
 	spdlog::get("App")->debug("Creating GPU profiler...");
 	m_gpu_profiler = GPUProfiler::Create(m_vk.device, MAX_FRAMES_IN_FLIGHT);

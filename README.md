@@ -6,7 +6,7 @@ A C++20 Vulkan rendering engine featuring an ImGui editor interface and multiple
 
 ## Features
 
-- **Multiple rendering techniques** — Octree voxel ray-casting (DDA traversal) and traditional mesh rasterization, switchable at runtime via the editor UI
+- **Multiple rendering techniques** — DDA voxel ray-casting and traditional mesh rasterization, switchable at runtime via the editor UI
 - **Editor UI** — Dear ImGui docking interface with viewport, metrics, output log, and inspector panels
 - **VWrap** — First-party RAII abstraction layer over the Vulkan API (25+ wrapper classes)
 - **GPU profiling** — Vulkan timestamp queries, memory statistics, and real-time performance graphs
@@ -57,7 +57,7 @@ Click the viewport panel to capture the cursor for camera control. Press Escape 
 ```
 vulkan-engine/
 ├── src/                 # Application layer
-│   ├── rendering/       #   Render techniques (MeshRasterizer, OctreeTracer)
+│   ├── rendering/       #   Render techniques (MeshRasterizer, DDATracer)
 │   ├── editor/          #   ImGui panels and UI rendering
 │   └── utils/           #   Logging, GPU profiling, shader compilation
 ├── lib/VWrap/           # First-party Vulkan RAII wrapper library
@@ -82,7 +82,7 @@ auto buffer = VWrap::Buffer::Create(allocator, size, usage, memoryFlags);
 
 Rendering is abstracted behind a `RenderTechnique` interface, allowing different renderers to be added and switched at runtime:
 
-- **OctreeTracer** — Fullscreen ray-casting against a 32x32x32 voxel grid using DDA traversal in a fragment shader
+- **DDATracer** — Fullscreen ray-casting against a 32x32x32 voxel grid using DDA traversal in a fragment shader
 - **MeshRasterizer** — Traditional vertex-based rasterization with OBJ model loading and texturing
 
 ### Editor Panels

@@ -15,7 +15,7 @@
 #include "GPUProfiler.h"
 #include "Camera.h"
 #include "RenderTechnique.h"
-#include "OctreeTracer.h"
+#include "DDATracer.h"
 #include "MeshRasterizer.h"
 
 // PANELS

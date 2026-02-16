@@ -8,7 +8,7 @@
 #include "Image.h"
 #include "ImageView.h"
 
-class OctreeTracer : public RenderTechnique
+class DDATracer : public RenderTechnique
 {
 private:
 	std::shared_ptr<VWrap::Device> m_device;
@@ -40,7 +40,7 @@ private:
 	void WriteDescriptors();
 
 public:
-	std::string GetName() const override { return "Octree Tracer"; }
+	std::string GetName() const override { return "DDA Tracer"; }
 
 	void Init(const RenderContext& ctx) override;
 	void Shutdown() override {}
