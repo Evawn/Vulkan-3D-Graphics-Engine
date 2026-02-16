@@ -2,6 +2,14 @@
 #include "config.h"
 #include <spdlog/spdlog.h>
 
+struct TracerPushConstants {
+	glm::mat4 NDCtoWorld;
+	glm::vec3 cameraPos;
+	int maxIterations;
+	glm::vec3 skyColor;
+	int debugColor;
+};
+
 void OctreeTracer::Init(const RenderContext& ctx) {
 	auto logger = spdlog::get("Render");
 	m_device = ctx.device;
@@ -92,7 +100,7 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 	VkPushConstantRange pushConstantRange = {};
 	pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
-	pushConstantRange.size = sizeof(VWrap::PushConstantBlock);
+	pushConstantRange.size = sizeof(TracerPushConstants);
 	std::vector<VkPushConstantRange> push_constant_ranges = { pushConstantRange };
 
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
@@ -161,10 +169,13 @@ void OctreeTracer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uin
 	scissor.offset = { 0, 0 };
 	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
 
-	VWrap::PushConstantBlock PCB;
-	PCB.NDCtoWorld = camera->GetNDCtoWorldMatrix();
-	PCB.cameraPos = camera->GetPosition();
-	vkCmdPushConstants(vk_cmd, m_pipeline->GetLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(VWrap::PushConstantBlock), &PCB);
+	TracerPushConstants pc{};
+	pc.NDCtoWorld = camera->GetNDCtoWorldMatrix();
+	pc.cameraPos = camera->GetPosition();
+	pc.maxIterations = m_max_iterations;
+	pc.skyColor = glm::vec3(m_sky_color[0], m_sky_color[1], m_sky_color[2]);
+	pc.debugColor = m_debug_color ? 1 : 0;
+	vkCmdPushConstants(vk_cmd, m_pipeline->GetLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TracerPushConstants), &pc);
 
 	vkCmdDraw(vk_cmd, 4, 1, 0, 0);
 }
@@ -179,4 +190,19 @@ std::vector<std::string> OctreeTracer::GetShaderPaths() const {
 void OctreeTracer::RecreatePipeline(const RenderContext& ctx) {
 	m_pipeline.reset();
 	CreatePipeline(ctx.renderPass);
+}
+
+std::vector<TechniqueParameter>& OctreeTracer::GetParameters() {
+	if (m_parameters.empty()) {
+		m_parameters = {
+			{ "Max Iterations", TechniqueParameter::Int, &m_max_iterations, 1.0f, 500.0f },
+			{ "Sky Color", TechniqueParameter::Color3, m_sky_color },
+			{ "Debug Coloring", TechniqueParameter::Bool, &m_debug_color },
+		};
+	}
+	return m_parameters;
+}
+
+FrameStats OctreeTracer::GetFrameStats() const {
+	return { 1, 4, 0 };
 }

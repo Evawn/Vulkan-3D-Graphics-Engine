@@ -87,7 +87,19 @@ public:
 		return m_up;
 	}
 
-glm::vec3 GetForward() {
+	glm::vec3 GetForward() {
 		return m_forward;
 	}
+
+	void SetPosition(glm::vec3 pos) { m_position = pos; }
+
+	float GetFOV() const { return m_fovy; }
+	void SetFOV(float fov) { m_fovy = fov; }
+
+	float GetNear() const { return m_znear; }
+	float GetFar() const { return m_zfar; }
+	void SetNearFar(float znear, float zfar) { m_znear = znear; m_zfar = zfar; }
+
+	float GetAspect() const { return m_aspect; }
+	void SetAspect(float aspect) { m_aspect = aspect; }
 };

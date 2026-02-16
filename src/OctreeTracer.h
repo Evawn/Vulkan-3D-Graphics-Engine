@@ -28,6 +28,13 @@ private:
 
 	std::shared_ptr<VWrap::RenderPass> m_render_pass;
 
+	// Tunable parameters
+	int m_max_iterations = 250;
+	float m_sky_color[3] = { 0.529f, 0.808f, 0.922f };
+	bool m_debug_color = true;
+
+	std::vector<TechniqueParameter> m_parameters;
+
 	void CreateDescriptors(int max_sets);
 	void CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass);
 	void WriteDescriptors();
@@ -46,4 +53,7 @@ public:
 
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipeline(const RenderContext& ctx) override;
+
+	std::vector<TechniqueParameter>& GetParameters() override;
+	FrameStats GetFrameStats() const override;
 };

@@ -1,0 +1,137 @@
+#include "InspectorPanel.h"
+#include "UIStyle.h"
+
+void InspectorPanel::SetRenderers(
+	std::vector<std::unique_ptr<RenderTechnique>>* renderers,
+	size_t* activeIndex)
+{
+	m_renderers = renderers;
+	m_active_index = activeIndex;
+}
+
+static void DrawTechniqueParameter(TechniqueParameter& param) {
+	switch (param.type) {
+	case TechniqueParameter::Float:
+		ImGui::SliderFloat(param.label.c_str(), static_cast<float*>(param.data), param.min, param.max);
+		break;
+	case TechniqueParameter::Int:
+		ImGui::SliderInt(param.label.c_str(), static_cast<int*>(param.data), (int)param.min, (int)param.max);
+		break;
+	case TechniqueParameter::Bool:
+		ImGui::Checkbox(param.label.c_str(), static_cast<bool*>(param.data));
+		break;
+	case TechniqueParameter::Color3:
+		ImGui::ColorEdit3(param.label.c_str(), static_cast<float*>(param.data));
+		break;
+	case TechniqueParameter::Color4:
+		ImGui::ColorEdit4(param.label.c_str(), static_cast<float*>(param.data));
+		break;
+	case TechniqueParameter::Enum: {
+		int* val = static_cast<int*>(param.data);
+		if (!param.enumLabels.empty()) {
+			ImGui::Combo(param.label.c_str(), val, param.enumLabels.data(), (int)param.enumLabels.size());
+		}
+		break;
+	}
+	}
+}
+
+void InspectorPanel::Draw() {
+	ImGui::Begin("Inspector");
+
+	// === Technique ===
+	if (ImGui::CollapsingHeader("Technique", ImGuiTreeNodeFlags_DefaultOpen)) {
+		if (m_renderers && m_active_index) {
+			std::string currentName = (*m_renderers)[*m_active_index]->GetName();
+			if (ImGui::BeginCombo("##technique", currentName.c_str())) {
+				for (size_t i = 0; i < m_renderers->size(); i++) {
+					bool selected = (i == *m_active_index);
+					std::string name = (*m_renderers)[i]->GetName();
+					if (ImGui::Selectable(name.c_str(), selected)) {
+						if (i != *m_active_index && m_switch_callback) {
+							m_switch_callback(i);
+						}
+					}
+					if (selected) ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+
+			auto paths = (*m_renderers)[*m_active_index]->GetShaderPaths();
+			for (const auto& path : paths) {
+				auto pos = path.find_last_of('/');
+				std::string name = (pos != std::string::npos) ? path.substr(pos + 1) : path;
+				ImGui::TextColored(UIStyle::kTextDim, "%s", name.c_str());
+			}
+
+			if (ImGui::Button("Reload Shaders (F5)")) {
+				if (m_reload_callback) m_reload_callback();
+			}
+		}
+	}
+
+	// === Parameters ===
+	if (ImGui::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+		if (m_renderers && m_active_index) {
+			auto& params = (*m_renderers)[*m_active_index]->GetParameters();
+			if (params.empty()) {
+				ImGui::TextColored(UIStyle::kTextDim, "No parameters");
+			} else {
+				for (auto& param : params) {
+					DrawTechniqueParameter(param);
+				}
+			}
+		}
+	}
+
+	// === Camera ===
+	if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+		if (m_camera) {
+			glm::vec3 pos = m_camera->GetPosition();
+			if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) {
+				m_camera->SetPosition(pos);
+			}
+
+			glm::vec3 fwd = m_camera->GetForward();
+			ImGui::TextColored(UIStyle::kTextDim, "Forward  %.2f, %.2f, %.2f", fwd.x, fwd.y, fwd.z);
+
+			float fov = m_camera->GetFOV();
+			if (ImGui::SliderFloat("FOV", &fov, 1.0f, 120.0f, "%.0f")) {
+				m_camera->SetFOV(fov);
+			}
+
+			float znear = m_camera->GetNear();
+			float zfar = m_camera->GetFar();
+			bool changed = false;
+			changed |= ImGui::DragFloat("Near", &znear, 0.01f, 0.001f, zfar - 0.001f, "%.3f");
+			changed |= ImGui::DragFloat("Far", &zfar, 1.0f, znear + 0.001f, 10000.0f, "%.1f");
+			if (changed) m_camera->SetNearFar(znear, zfar);
+		}
+
+		if (m_sensitivity) {
+			ImGui::SliderFloat("Sensitivity", m_sensitivity, 0.01f, 2.0f, "%.3f");
+		}
+		if (m_speed) {
+			ImGui::SliderFloat("Speed", m_speed, 0.1f, 10.0f, "%.1f");
+		}
+
+		if (m_camera && ImGui::Button("Reset Camera")) {
+			m_camera->SetPosition(glm::vec3(0.0f, -3.0f, 0.0f));
+			m_camera->SetForward(glm::vec3(0.0f, 1.0f, 0.0f));
+			m_camera->SetFOV(45.0f);
+			m_camera->SetNearFar(0.1f, 100.0f);
+		}
+	}
+
+	// === Screenshot ===
+	if (ImGui::CollapsingHeader("Screenshot")) {
+		if (ImGui::Button("Capture")) {
+			if (m_screenshot_callback) m_screenshot_callback();
+		}
+		if (!m_last_screenshot_path.empty()) {
+			ImGui::TextColored(UIStyle::kTextDim, "%s", m_last_screenshot_path.c_str());
+		}
+	}
+
+	ImGui::End();
+}

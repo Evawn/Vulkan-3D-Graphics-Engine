@@ -19,6 +19,7 @@ private:
 
 	std::shared_ptr<VWrap::ImageView> m_color_view;
 	std::shared_ptr<VWrap::ImageView> m_depth_view;
+	std::shared_ptr<VWrap::Image> m_resolve_image;
 	std::shared_ptr<VWrap::ImageView> m_resolve_view;
 	std::shared_ptr<VWrap::Framebuffer> m_framebuffer;
 	std::shared_ptr<VWrap::Sampler> m_sampler;
@@ -44,4 +45,6 @@ public:
 	std::shared_ptr<VWrap::Framebuffer> GetFramebuffer() const { return m_framebuffer; }
 	std::shared_ptr<VWrap::RenderPass> GetRenderPass() const { return m_render_pass; }
 	VkExtent2D GetExtent() const { return m_extent; }
+	std::shared_ptr<VWrap::Image> GetResolveImage() const { return m_resolve_image; }
+	VkFormat GetColorFormat() const { return m_color_format; }
 };

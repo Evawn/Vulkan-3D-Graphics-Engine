@@ -188,7 +188,7 @@ void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pa
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rasterizer.depthClampEnable = VK_FALSE;
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.polygonMode = m_wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
 	rasterizer.lineWidth = 1.0f;
 	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -277,8 +277,11 @@ void MeshRasterizer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, u
 }
 
 void MeshRasterizer::UpdateUniformBuffer(uint32_t frame, std::shared_ptr<Camera> camera) {
+	m_accumulated_rotation += m_rotation_speed * 0.016f;
+
 	UniformBufferObject ubo{};
-	ubo.model = glm::mat4(1.0f);
+	ubo.model = glm::rotate(glm::mat4(1.0f), m_accumulated_rotation, glm::vec3(0.0f, 0.0f, 1.0f));
+	ubo.model = glm::scale(ubo.model, glm::vec3(m_model_scale));
 	ubo.view = camera->GetViewMatrix();
 	ubo.proj = camera->GetProjectionMatrix();
 
@@ -295,4 +298,22 @@ std::vector<std::string> MeshRasterizer::GetShaderPaths() const {
 void MeshRasterizer::RecreatePipeline(const RenderContext& ctx) {
 	m_pipeline.reset();
 	CreatePipeline(ctx.renderPass);
+}
+
+std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {
+	if (m_parameters.empty()) {
+		m_parameters = {
+			{ "Rotation Speed", TechniqueParameter::Float, &m_rotation_speed, 0.0f, 10.0f },
+			{ "Model Scale", TechniqueParameter::Float, &m_model_scale, 0.1f, 5.0f },
+		};
+	}
+	return m_parameters;
+}
+
+FrameStats MeshRasterizer::GetFrameStats() const {
+	return { 1, static_cast<uint32_t>(m_vertices.size()), static_cast<uint32_t>(m_indices.size()) };
+}
+
+void MeshRasterizer::SetWireframe(bool enabled) {
+	m_wireframe = enabled;
 }

@@ -21,9 +21,9 @@
 
 // PANELS
 #include "ViewportPanel.h"
-#include "PerformancePanel.h"
+#include "MetricsPanel.h"
 #include "OutputPanel.h"
-#include "RendererManagerPanel.h"
+#include "InspectorPanel.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <iostream>
@@ -92,9 +92,9 @@ private:
 
 	// PANELS
 	ViewportPanel m_viewport_panel;
-	PerformancePanel m_performance_panel;
+	MetricsPanel m_metrics_panel;
 	OutputPanel m_output_panel;
-	RendererManagerPanel m_renderer_manager_panel;
+	InspectorPanel m_inspector_panel;
 
 	// GPU PROFILER
 	std::shared_ptr<GPUProfiler> m_gpu_profiler;
@@ -151,4 +151,5 @@ private:
 	void DrawFrame();
 	void HotReloadShaders();
 	void SwitchRenderer(size_t index);
+	void CaptureScreenshot();
 };

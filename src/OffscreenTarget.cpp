@@ -62,14 +62,14 @@ void OffscreenTarget::CreateResources(VkSampleCountFlagBits samples) {
 	resolveInfo.depth = 1;
 	resolveInfo.format = m_color_format;
 	resolveInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	resolveInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	resolveInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	resolveInfo.properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	resolveInfo.mip_levels = 1;
 	resolveInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	resolveInfo.image_type = VK_IMAGE_TYPE_2D;
 
-	auto resolveImage = VWrap::Image::Create(m_allocator, resolveInfo);
-	m_resolve_view = VWrap::ImageView::Create(m_device, resolveImage, VK_IMAGE_ASPECT_COLOR_BIT);
+	m_resolve_image = VWrap::Image::Create(m_allocator, resolveInfo);
+	m_resolve_view = VWrap::ImageView::Create(m_device, m_resolve_image, VK_IMAGE_ASPECT_COLOR_BIT);
 
 	// Framebuffer: [MSAA color, depth, resolve]
 	std::vector<std::shared_ptr<VWrap::ImageView>> attachments = {
@@ -103,6 +103,7 @@ void OffscreenTarget::Resize(VkExtent2D newExtent) {
 	// Destroy old resources (RAII will handle cleanup when shared_ptrs are reassigned)
 	m_framebuffer.reset();
 	m_resolve_view.reset();
+	m_resolve_image.reset();
 	m_depth_view.reset();
 	m_color_view.reset();
 

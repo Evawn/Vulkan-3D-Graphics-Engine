@@ -56,7 +56,7 @@ void GUIRenderer::SetupDefaultLayout(ImGuiID dockspace_id) {
 	ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
 	ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
 
-	// Split: left (viewport + output) | right (performance + renderer manager)
+	// Split: left (viewport + output) | right (metrics + inspector)
 	ImGuiID left, right;
 	ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.7f, &left, &right);
 
@@ -64,14 +64,14 @@ void GUIRenderer::SetupDefaultLayout(ImGuiID dockspace_id) {
 	ImGuiID left_top, left_bottom;
 	ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.7f, &left_top, &left_bottom);
 
-	// Split right: top (performance) | bottom (renderer manager)
+	// Split right: top (metrics) | bottom (inspector)
 	ImGuiID right_top, right_bottom;
-	ImGui::DockBuilderSplitNode(right, ImGuiDir_Up, 0.5f, &right_top, &right_bottom);
+	ImGui::DockBuilderSplitNode(right, ImGuiDir_Up, 0.4f, &right_top, &right_bottom);
 
 	ImGui::DockBuilderDockWindow("Viewport", left_top);
 	ImGui::DockBuilderDockWindow("Output", left_bottom);
-	ImGui::DockBuilderDockWindow("Performance", right_top);
-	ImGui::DockBuilderDockWindow("Renderer", right_bottom);
+	ImGui::DockBuilderDockWindow("Metrics", right_top);
+	ImGui::DockBuilderDockWindow("Inspector", right_bottom);
 
 	ImGui::DockBuilderFinish(dockspace_id);
 }

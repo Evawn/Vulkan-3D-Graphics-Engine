@@ -3,6 +3,12 @@
 #include "Log.h"
 #include "UIStyle.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#include <ctime>
+#include <filesystem>
+
 void Application::Run() {
 	Init();
 	MainLoop();
@@ -54,19 +60,36 @@ void Application::InitPanels() {
 	m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
 	m_gui_renderer->RegisterPanel("Viewport", [this]() { m_viewport_panel.Draw(); });
 
-	// Performance panel
-	m_gui_renderer->RegisterPanel("Performance", [this]() { m_performance_panel.Draw(); });
+	// Metrics panel
+	m_metrics_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
+	VkPhysicalDeviceMemoryProperties memProps;
+	vkGetPhysicalDeviceMemoryProperties(m_vk.physicalDevice->Get(), &memProps);
+	m_metrics_panel.SetAllocator(m_vk.allocator->Get(), memProps.memoryHeapCount);
+	m_metrics_panel.SetWireframeCallback([this]() {
+		vkDeviceWaitIdle(m_vk.device->Get());
+		RenderContext ctx{};
+		ctx.device = m_vk.device;
+		ctx.allocator = m_vk.allocator;
+		ctx.graphicsPool = m_vk.graphicsCommandPool;
+		ctx.renderPass = m_scene_render_pass;
+		ctx.extent = m_offscreen_target->GetExtent();
+		ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+		m_renderers[m_active_renderer_index]->RecreatePipeline(ctx);
+	});
+	m_gui_renderer->RegisterPanel("Metrics", [this]() { m_metrics_panel.Draw(); });
 
 	// Output panel
 	m_output_panel.SetSink(Log::GetImGuiSink());
 	m_gui_renderer->RegisterPanel("Output", [this]() { m_output_panel.Draw(); });
 
-	// Renderer manager panel
-	m_renderer_manager_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
-	m_renderer_manager_panel.SetReloadCallback([this]() { HotReloadShaders(); });
-	m_renderer_manager_panel.SetSwitchCallback([this](size_t idx) { SwitchRenderer(idx); });
-	m_renderer_manager_panel.SetAppControls(&m_app_state.sensitivity, &m_app_state.speed);
-	m_gui_renderer->RegisterPanel("Renderer", [this]() { m_renderer_manager_panel.Draw(); });
+	// Inspector panel
+	m_inspector_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
+	m_inspector_panel.SetReloadCallback([this]() { HotReloadShaders(); });
+	m_inspector_panel.SetSwitchCallback([this](size_t idx) { SwitchRenderer(idx); });
+	m_inspector_panel.SetCamera(m_camera);
+	m_inspector_panel.SetAppControls(&m_app_state.sensitivity, &m_app_state.speed);
+	m_inspector_panel.SetScreenshotCallback([this]() { CaptureScreenshot(); });
+	m_gui_renderer->RegisterPanel("Inspector", [this]() { m_inspector_panel.Draw(); });
 }
 
 void Application::InitWindow() {
@@ -189,7 +212,7 @@ void Application::MainLoop() {
 		m_gui_renderer->BeginFrame();
 		DrawFrame();
 
-		m_performance_panel.Update(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
+		m_metrics_panel.Update(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
 	}
 	vkDeviceWaitIdle(m_vk.device->Get());
 }
@@ -256,7 +279,7 @@ void Application::DrawFrame() {
 		if (desired.width > 0 && desired.height > 0) {
 			m_offscreen_target->Resize(desired);
 			m_renderers[m_active_renderer_index]->OnResize(desired);
-			m_camera = Camera::Create(45, ((float)desired.width / (float)desired.height), 0.1f, 10.0f);
+			m_camera->SetAspect((float)desired.width / (float)desired.height);
 			m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
 		}
 	}
@@ -415,4 +438,79 @@ void Application::SwitchRenderer(size_t index) {
 	m_active_renderer_index = index;
 
 	logger->info("Switched to: {}", m_renderers[index]->GetName());
+}
+
+void Application::CaptureScreenshot() {
+	auto logger = spdlog::get("App");
+
+	vkDeviceWaitIdle(m_vk.device->Get());
+
+	auto resolveImage = m_offscreen_target->GetResolveImage();
+	VkFormat format = m_offscreen_target->GetColorFormat();
+	VkExtent2D extent = m_offscreen_target->GetExtent();
+
+	VkDeviceSize imageSize = extent.width * extent.height * 4; // RGBA
+	auto staging = VWrap::Buffer::CreateStaging(m_vk.allocator, imageSize);
+
+	// Record copy commands
+	auto cmd = VWrap::CommandBuffer::Create(m_vk.graphicsCommandPool);
+	cmd->BeginSingle();
+
+	// Transition resolve image: SHADER_READ_ONLY -> TRANSFER_SRC
+	cmd->CmdTransitionImageLayout(resolveImage, format,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+	// Copy image to staging buffer
+	VkBufferImageCopy region{};
+	region.bufferOffset = 0;
+	region.bufferRowLength = 0;
+	region.bufferImageHeight = 0;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.mipLevel = 0;
+	region.imageSubresource.baseArrayLayer = 0;
+	region.imageSubresource.layerCount = 1;
+	region.imageOffset = { 0, 0, 0 };
+	region.imageExtent = { extent.width, extent.height, 1 };
+
+	vkCmdCopyImageToBuffer(cmd->Get(), resolveImage->Get(),
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->Get(), 1, &region);
+
+	// Transition resolve image back: TRANSFER_SRC -> SHADER_READ_ONLY
+	cmd->CmdTransitionImageLayout(resolveImage, format,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	cmd->EndAndSubmit();
+
+	// Map staging buffer and write PNG
+	void* data;
+	vmaMapMemory(m_vk.allocator->Get(), staging->GetAllocation(), &data);
+
+	// Generate filename with timestamp
+	std::filesystem::create_directories("screenshots");
+	std::time_t t = std::time(nullptr);
+	char timestr[64];
+	std::strftime(timestr, sizeof(timestr), "%Y%m%d_%H%M%S", std::localtime(&t));
+	std::string filename = std::string("screenshots/screenshot_") + timestr + ".png";
+
+	// Handle BGRA -> RGBA swizzle if needed
+	if (format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM) {
+		uint8_t* pixels = static_cast<uint8_t*>(data);
+		for (uint32_t i = 0; i < extent.width * extent.height; i++) {
+			std::swap(pixels[i * 4 + 0], pixels[i * 4 + 2]); // swap B and R
+		}
+	}
+
+	int result = stbi_write_png(filename.c_str(), extent.width, extent.height, 4,
+		data, extent.width * 4);
+
+	vmaUnmapMemory(m_vk.allocator->Get(), staging->GetAllocation());
+
+	if (result) {
+		logger->info("Screenshot saved: {}", filename);
+		m_inspector_panel.SetLastScreenshotPath(filename);
+	} else {
+		logger->error("Failed to save screenshot");
+	}
 }

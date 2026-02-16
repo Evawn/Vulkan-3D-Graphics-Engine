@@ -55,6 +55,14 @@ private:
 
 	std::shared_ptr<VWrap::RenderPass> m_render_pass;
 
+	// Tunable parameters
+	float m_rotation_speed = 0.0f;
+	float m_model_scale = 1.0f;
+	bool m_wireframe = false;
+	float m_accumulated_rotation = 0.0f;
+
+	std::vector<TechniqueParameter> m_parameters;
+
 	void CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass);
 	void CreateDescriptors(int max_sets);
 	void CreateVertexBuffer();
@@ -78,4 +86,9 @@ public:
 
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipeline(const RenderContext& ctx) override;
+
+	std::vector<TechniqueParameter>& GetParameters() override;
+	FrameStats GetFrameStats() const override;
+	void SetWireframe(bool enabled) override;
+	bool GetWireframe() const override { return m_wireframe; }
 };
