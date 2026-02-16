@@ -1,7 +1,31 @@
 #include "MeshRasterizer.h"
 #include "config.h"
+#include <spdlog/spdlog.h>
+#include <chrono>
 
-inline void MeshRasterizer::CreateVertexBuffer() {
+void MeshRasterizer::Init(const RenderContext& ctx) {
+	m_device = ctx.device;
+	m_allocator = ctx.allocator;
+	m_extent = ctx.extent;
+	m_graphics_pool = ctx.graphicsPool;
+	m_render_pass = ctx.renderPass;
+
+	CreateDescriptors(ctx.maxFramesInFlight);
+	CreatePipeline(ctx.renderPass);
+	m_sampler = VWrap::Sampler::Create(m_device);
+
+	VWrap::CommandBuffer::UploadTextureToImage(m_graphics_pool, m_allocator, m_texture_image, TEXTURE_PATH.c_str());
+	m_texture_image_view = VWrap::ImageView::Create(m_device, m_texture_image);
+
+	LoadModel();
+	CreateVertexBuffer();
+	CreateIndexBuffer();
+	CreateUniformBuffers();
+
+	WriteDescriptors();
+}
+
+void MeshRasterizer::CreateVertexBuffer() {
 	VkDeviceSize bufferSize = sizeof(m_vertices[0]) * m_vertices.size();
 
 	auto staging_buffer = VWrap::Buffer::CreateStaging(m_allocator, bufferSize);
@@ -23,7 +47,7 @@ inline void MeshRasterizer::CreateVertexBuffer() {
 	command_buffer->EndAndSubmit();
 }
 
-inline void MeshRasterizer::CreateIndexBuffer() {
+void MeshRasterizer::CreateIndexBuffer() {
 	VkDeviceSize bufferSize = sizeof(m_indices[0]) * m_indices.size();
 
 	auto staging_buffer = VWrap::Buffer::CreateStaging(m_allocator, bufferSize);
@@ -45,14 +69,13 @@ inline void MeshRasterizer::CreateIndexBuffer() {
 	command_buffer->EndAndSubmit();
 }
 
-inline void MeshRasterizer::CreateUniformBuffers() {
+void MeshRasterizer::CreateUniformBuffers() {
 	VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 	auto frames = m_descriptor_sets.size();
 	m_uniform_buffers.resize(frames);
 	m_uniform_buffers_mapped.resize(frames);
 
 	for (size_t i = 0; i < frames; i++) {
-		//VmaAllocationInfo alloc_info{};
 		m_uniform_buffers[i] = VWrap::Buffer::CreateMapped(
 			m_allocator,
 			bufferSize,
@@ -62,7 +85,7 @@ inline void MeshRasterizer::CreateUniformBuffers() {
 	}
 }
 
-inline void MeshRasterizer::WriteDescriptors() {
+void MeshRasterizer::WriteDescriptors() {
 	for (size_t i = 0; i < m_descriptor_sets.size(); i++) {
 		VkDescriptorBufferInfo bufferInfo{};
 		bufferInfo.buffer = m_uniform_buffers[i]->Get();
@@ -74,7 +97,6 @@ inline void MeshRasterizer::WriteDescriptors() {
 		imageInfo.imageView = m_texture_image_view->Get();
 		imageInfo.sampler = m_sampler->Get();
 
-		// array of descriptor writes:
 		std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
 		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		descriptorWrites[0].descriptorCount = 1;
@@ -96,7 +118,7 @@ inline void MeshRasterizer::WriteDescriptors() {
 	}
 }
 
-inline void MeshRasterizer::LoadModel() {
+void MeshRasterizer::LoadModel() {
 	tinyobj::attrib_t attrib;
 	std::vector<tinyobj::shape_t> shapes;
 	std::vector<tinyobj::material_t> materials;
@@ -133,31 +155,7 @@ inline void MeshRasterizer::LoadModel() {
 			m_indices.push_back(uniqueVertices[vertex]);
 		}
 	}
-	std::cout << "Finished loading" << std::endl;
-}
-
-std::shared_ptr<MeshRasterizer> MeshRasterizer::Create(std::shared_ptr<VWrap::Allocator> allocator, std::shared_ptr<VWrap::Device> device, std::shared_ptr<VWrap::RenderPass> render_pass, std::shared_ptr<VWrap::CommandPool> graphics_pool, VkExtent2D extent, uint32_t num_frames) {
-	auto ret = std::make_shared<MeshRasterizer>();
-	ret->m_device = device;
-	ret->m_allocator = allocator;
-	ret->m_extent = extent;
-	ret->m_graphics_pool = graphics_pool;
-
-	ret->CreateDescriptors(num_frames);
-	ret->CreatePipeline(render_pass);
-	ret->m_sampler = VWrap::Sampler::Create(device);
-
-	VWrap::CommandBuffer::UploadTextureToImage(graphics_pool, allocator, ret->m_texture_image, TEXTURE_PATH.c_str());
-	ret->m_texture_image_view = VWrap::ImageView::Create(device, ret->m_texture_image);
-
-	ret->LoadModel();
-	ret->CreateVertexBuffer();
-	ret->CreateIndexBuffer();
-	ret->CreateUniformBuffers();
-
-	ret->WriteDescriptors();
-
-	return ret;
+	spdlog::get("Render")->info("Finished loading model: {}", MODEL_PATH);
 }
 
 void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass)
@@ -195,9 +193,6 @@ void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pa
 	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.depthBiasEnable = VK_FALSE;
-	rasterizer.depthBiasConstantFactor = 0.0f; // Optional
-	rasterizer.depthBiasClamp = 0.0f; // Optional
-	rasterizer.depthBiasSlopeFactor = 0.0f; // Optional
 
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
 	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -205,11 +200,7 @@ void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pa
 	depthStencil.depthWriteEnable = VK_TRUE;
 	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
 	depthStencil.depthBoundsTestEnable = VK_FALSE;
-	depthStencil.minDepthBounds = 0.0f; // Optional
-	depthStencil.maxDepthBounds = 1.0f; // Optional
 	depthStencil.stencilTestEnable = VK_FALSE;
-	depthStencil.front = {}; // Optional
-	depthStencil.back = {}; // Optional
 
 	VWrap::PipelineCreateInfo create_info{};
 	create_info.extent = m_extent;
@@ -228,25 +219,21 @@ void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pa
 
 void MeshRasterizer::CreateDescriptors(int max_sets)
 {
-	// Create the descriptor set layout
 	VkDescriptorSetLayoutBinding uboLayoutBinding{};
 	uboLayoutBinding.binding = 0;
 	uboLayoutBinding.descriptorCount = 1;
 	uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-	uboLayoutBinding.pImmutableSamplers = nullptr; // Optional - relevant for image sampling descriptors
 
 	VkDescriptorSetLayoutBinding samplerLayoutBinding{};
 	samplerLayoutBinding.binding = 1;
 	samplerLayoutBinding.descriptorCount = 1;
 	samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	samplerLayoutBinding.pImmutableSamplers = nullptr; // Optional - relevant for image sampling descriptors
 
 	std::vector<VkDescriptorSetLayoutBinding> bindings = { uboLayoutBinding, samplerLayoutBinding };
 	m_descriptor_set_layout = VWrap::DescriptorSetLayout::Create(m_device, bindings);
 
-	// Create the descriptor pool
 	std::vector<VkDescriptorPoolSize> poolSizes(2);
 	poolSizes[0].descriptorCount = max_sets;
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -255,17 +242,18 @@ void MeshRasterizer::CreateDescriptors(int max_sets)
 
 	m_descriptor_pool = VWrap::DescriptorPool::Create(m_device, poolSizes, max_sets, 0);
 
-	// Create the descriptor sets
 	std::vector<std::shared_ptr<VWrap::DescriptorSetLayout>> layouts(static_cast<size_t>(max_sets), m_descriptor_set_layout);
 	m_descriptor_sets = VWrap::DescriptorSet::CreateMany(m_descriptor_pool, layouts);
 }
 
-void MeshRasterizer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer, uint32_t frame) {
-	auto vk_command_buffer = command_buffer->Get();
-	vkCmdBindPipeline(vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
+void MeshRasterizer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera) {
+	UpdateUniformBuffer(frameIndex, camera);
 
-	std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[frame]->Get() };
-	vkCmdBindDescriptorSets(vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
+	auto vk_cmd = cmd->Get();
+	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
+
+	std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[frameIndex]->Get() };
+	vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
 
 	VkViewport viewport{};
 	viewport.height = (float)m_extent.height;
@@ -274,32 +262,37 @@ void MeshRasterizer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffe
 	viewport.maxDepth = 1.0f;
 	viewport.x = 0;
 	viewport.y = 0;
-
-	vkCmdSetViewport(vk_command_buffer, 0, 1, &viewport);
+	vkCmdSetViewport(vk_cmd, 0, 1, &viewport);
 
 	VkRect2D scissor{};
 	scissor.extent = m_extent;
-	scissor.offset = { 0,0 };
-
-	vkCmdSetScissor(vk_command_buffer, 0, 1, &scissor);
+	scissor.offset = { 0, 0 };
+	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
 
 	VkBuffer vertexBuffers[] = { m_vertex_buffer->Get() };
 	VkDeviceSize offsets[] = { 0 };
-	vkCmdBindVertexBuffers(vk_command_buffer, 0, 1, vertexBuffers, offsets);
-	vkCmdBindIndexBuffer(vk_command_buffer, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
-	vkCmdDrawIndexed(vk_command_buffer, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
+	vkCmdBindVertexBuffers(vk_cmd, 0, 1, vertexBuffers, offsets);
+	vkCmdBindIndexBuffer(vk_cmd, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
+	vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
 }
 
 void MeshRasterizer::UpdateUniformBuffer(uint32_t frame, std::shared_ptr<Camera> camera) {
-	static auto startTime = std::chrono::high_resolution_clock::now();
-
-	auto currentTime = std::chrono::high_resolution_clock::now();
-	float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
-
 	UniformBufferObject ubo{};
 	ubo.model = glm::mat4(1.0f);
 	ubo.view = camera->GetViewMatrix();
 	ubo.proj = camera->GetProjectionMatrix();
 
 	memcpy(m_uniform_buffers_mapped[frame], &ubo, sizeof(ubo));
+}
+
+std::vector<std::string> MeshRasterizer::GetShaderPaths() const {
+	return {
+		std::string(config::SHADER_DIR) + "/shader_rast.vert.spv",
+		std::string(config::SHADER_DIR) + "/shader_rast.frag.spv"
+	};
+}
+
+void MeshRasterizer::RecreatePipeline(const RenderContext& ctx) {
+	m_pipeline.reset();
+	CreatePipeline(ctx.renderPass);
 }

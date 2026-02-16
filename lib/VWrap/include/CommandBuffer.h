@@ -1,6 +1,7 @@
 #pragma once
 #include "vulkan/vulkan.h"
 #include <memory>
+#include <vector>
 #include "Device.h"
 #include "CommandPool.h"
 #include "RenderPass.h"
@@ -52,9 +53,14 @@ namespace VWrap {
 		void Begin(VkCommandBufferUsageFlags usage = 0);
 
 		/// <summary>
-		/// Records a command to begin the given render pass and framebuffer
+		/// Records a command to begin the given render pass and framebuffer (2 clear values: color + depth)
 		/// </summary>
 		void CmdBeginRenderPass(std::shared_ptr<RenderPass> render_pass, std::shared_ptr<Framebuffer> framebuffer);
+
+		/// <summary>
+		/// Records a command to begin the given render pass with custom clear values
+		/// </summary>
+		void CmdBeginRenderPass(std::shared_ptr<RenderPass> render_pass, std::shared_ptr<Framebuffer> framebuffer, const std::vector<VkClearValue>& clearValues);
 
 		/// <summary>
 		/// Creates an image at the dst_image handle, and uploads the given texture to it.

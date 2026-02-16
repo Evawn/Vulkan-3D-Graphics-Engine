@@ -5,12 +5,14 @@
 #include "Device.h"
 #include "CommandBuffer.h"
 #include <chrono>
+#include <spdlog/spdlog.h>
 
 class GPUProfiler
 {
 private:
 
 	std::vector<VkQueryPool> m_query_pools;
+	std::vector<bool> m_pool_ready;
 	std::shared_ptr<VWrap::Device> m_device;
 	float m_timestamp_period = 1.0f;
 
@@ -24,14 +26,16 @@ public:
 		auto ret = std::make_shared<GPUProfiler>();
 		ret->m_device = device;
 		ret->m_query_pools.resize(num_frames);
+		ret->m_pool_ready.resize(num_frames, false);
 
 		VkQueryPoolCreateInfo queryPoolInfo = {};
 		queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 		queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
 		queryPoolInfo.queryCount = 2;
 
-		for (auto& pool : ret->m_query_pools)
+		for (auto& pool : ret->m_query_pools) {
 			vkCreateQueryPool(device->Get(), &queryPoolInfo, nullptr, &pool);
+		}
 
 		VkPhysicalDeviceProperties deviceProperties;
 		vkGetPhysicalDeviceProperties(device->GetPhysicalDevice()->Get(), &deviceProperties);
@@ -58,6 +62,7 @@ public:
 
 	void CmdEnd(std::shared_ptr<VWrap::CommandBuffer> buffer, uint32_t frame) {
 		vkCmdWriteTimestamp(buffer->Get(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_query_pools[frame], 1);
+		m_pool_ready[frame] = true;
 	}
 
 	struct PerformanceMetrics {
@@ -65,16 +70,23 @@ public:
 	};
 
 	PerformanceMetrics GetMetrics(uint32_t frame) {
-		uint64_t timestamps[2];
-		vkGetQueryPoolResults(m_device->Get(), 
-			m_query_pools[frame], 
-			0, 2, 
-			sizeof(timestamps), 
-			timestamps, sizeof(uint64_t), 
-			VK_QUERY_RESULT_64_BIT);
+		if (!m_pool_ready[frame]) {
+			return PerformanceMetrics(m_fps, 0.0f);
+		}
 
-		uint64_t timeTakenNanoseconds = timestamps[1] - timestamps[0];
-		float timeTakenMilliseconds = timeTakenNanoseconds * m_timestamp_period * 1e-6f;
+		uint64_t data[4]; // [timestamp0, avail0, timestamp1, avail1]
+		vkGetQueryPoolResults(m_device->Get(),
+			m_query_pools[frame],
+			0, 2,
+			sizeof(data),
+			data, sizeof(uint64_t) * 2,
+			VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+
+		float timeTakenMilliseconds = 0.0f;
+		if (data[1] && data[3]) {
+			uint64_t timeTakenNanoseconds = data[2] - data[0];
+			timeTakenMilliseconds = timeTakenNanoseconds * m_timestamp_period * 1e-6f;
+		}
 
 		return PerformanceMetrics(m_fps, timeTakenMilliseconds);
 	}

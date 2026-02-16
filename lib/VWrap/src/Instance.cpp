@@ -1,4 +1,5 @@
 #include "Instance.h"
+#include <spdlog/spdlog.h>
 namespace VWrap
 {
     VkResult CreateDebugUtilsMessengerEXT(VkInstance instance,
@@ -35,7 +36,15 @@ namespace VWrap
         const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
         void* pUserData) {
 
-        std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
+        auto logger = spdlog::get("VWrap");
+        if (logger) {
+            if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+                logger->error("[validation] {}", pCallbackData->pMessage);
+            else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+                logger->warn("[validation] {}", pCallbackData->pMessage);
+            else
+                logger->trace("[validation] {}", pCallbackData->pMessage);
+        }
 
         return VK_FALSE;
     }
@@ -72,17 +81,17 @@ namespace VWrap
         std::vector<VkExtensionProperties> availableExtensions(availableExtensionCount);
         vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, availableExtensions.data());
 
-        // Output available extensions and store in set
-        std::cout << "Available Extensions:\n";
+        // Check available extensions
+        auto logger = spdlog::get("VWrap");
         std::unordered_set<std::string> availExtStrings;
         for (const auto& ext : availableExtensions) {
             availExtStrings.insert(ext.extensionName);
-            std::cout << "\t" << ext.extensionName << "\n";
+            if (logger) logger->debug("Available extension: {}", ext.extensionName);
         }
         // Iterate through the required extensions and make sure they are available
-        for (const auto str : glfwExtStrings) {
-            if (availExtStrings.count(str) < 0) {
-                std::cout << "Required Extension not Available: " << str << "\n";
+        for (const auto& str : glfwExtStrings) {
+            if (availExtStrings.count(str) == 0) {
+                if (logger) logger->warn("Required extension not available: {}", str);
             }
         }
 

@@ -8,66 +8,38 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_vulkan.h"
 
-// VWRAP INCLUDES ---------------------------------------------------------------------------------------------
-#include "Instance.h"
-#include "Surface.h"
-#include "PhysicalDevice.h"
-#include "Device.h"
-#include "Swapchain.h"
-#include "ImageView.h"
-#include "Image.h"
-#include "RenderPass.h"
-#include "DescriptorSetLayout.h"
-#include "Framebuffer.h"
-#include "Pipeline.h"
-#include "CommandPool.h"
-#include "CommandBuffer.h"
-#include "Fence.h"
-#include "Semaphore.h"
-#include "Sampler.h"
-#include "Buffer.h"
-#include "DescriptorPool.h"
-#include "DescriptorSet.h"
-#include "Queue.h"
-#include "FrameController.h"
-#include "Allocator.h"
-
 // PROJECT INCLUDES ---------------------------------------------------------------------------------------------
+#include "VulkanContext.h"
+#include "OffscreenTarget.h"
 #include "GUIRenderer.h"
 #include "GPUProfiler.h"
 #include "Camera.h"
 #include "Input.h"
+#include "RenderTechnique.h"
 #include "OctreeTracer.h"
+#include "MeshRasterizer.h"
+
+// PANELS
+#include "ViewportPanel.h"
+#include "PerformancePanel.h"
+#include "OutputPanel.h"
+#include "RendererManagerPanel.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 #include <vector>
-#include <unordered_set>
-#include <optional>
-#include <set>
-#include <algorithm>
-#include <fstream>
 #include <array>
 #include <chrono>
+#include <spdlog/spdlog.h>
 
 // CONSTANTS -------------------------------------------------------------------------------------------------
 
-/// <summary>
-/// The width and height of the viewport. (In screen coordinates.)
-/// </summary>
 const uint32_t WIDTH = 1200;
 const uint32_t HEIGHT = 900;
-
-/// <summary>
-/// The maximum number of frames that can be in flight at once.
-/// </summary>
 const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
-/// <summary>
-/// Whether or not to enable validation layers. (Debugging only.)
-/// </summary>
 #ifdef NDEBUG
 const bool ENABLE_VALIDATION_LAYERS = false;
 #else
@@ -75,16 +47,15 @@ const bool ENABLE_VALIDATION_LAYERS = true;
 #endif
 
 enum class Action {
-	ESCAPE, MOVE_FORWARD, MOVE_BACKWARD, MOVE_LEFT, MOVE_RIGHT, MOVE_UP, MOVE_DOWN
+	ESCAPE, MOVE_FORWARD, MOVE_BACKWARD, MOVE_LEFT, MOVE_RIGHT, MOVE_UP, MOVE_DOWN,
+	RELOAD_SHADERS
 };
-
-
 
 static void check_vk_result(VkResult err)
 {
 	if (err == 0)
 		return;
-	fprintf(stderr, "[vulkan] Error: VkResult = %d\n", err);
+	spdlog::get("App")->error("VkResult = {}", (int)err);
 	if (err < 0)
 		abort();
 }
@@ -96,57 +67,47 @@ struct CameraMoveState {
 
 static CameraMoveState move_state{ false, false, false, false, false, false };
 
-/// <summary>
-/// This class is the main application class. It contains all the vulkan objects
-/// and the main loop. 
-/// </summary>
 class Application {
 
 private:
 
-	// VWRAP OBJECTS ---------------------------------------------------------------------------------------------
-	// VULKAN BASE
-	std::shared_ptr<VWrap::Instance> m_instance;
-	std::shared_ptr<VWrap::PhysicalDevice> m_physical_device;
-	std::shared_ptr<VWrap::Device> m_device;
-	std::shared_ptr<VWrap::Allocator> m_allocator;
+	// VULKAN CONTEXT
+	VulkanContext m_vk;
 
-
-	// WINDOW PRESENTATION
+	// WINDOW
 	std::shared_ptr<GLFWwindow*> m_glfw_window;
-	std::shared_ptr<VWrap::Surface> m_surface;
-	std::shared_ptr<VWrap::FrameController> m_frame_controller;
 
-	// COMMANDS
-	std::shared_ptr<VWrap::CommandPool> m_graphics_command_pool;
-	std::shared_ptr<VWrap::CommandPool> m_transfer_command_pool;
-	std::shared_ptr<VWrap::Queue> m_graphics_queue;
-	std::shared_ptr<VWrap::Queue> m_present_queue;
-	std::shared_ptr<VWrap::Queue> m_transfer_queue;
+	// RENDER PASSES
+	std::shared_ptr<VWrap::RenderPass> m_scene_render_pass;
+	std::shared_ptr<VWrap::RenderPass> m_presentation_render_pass;
 
-	// RENDER PASS
-	std::shared_ptr<VWrap::RenderPass> m_render_pass;
-	std::vector<std::shared_ptr<VWrap::Framebuffer>> m_framebuffers;
-	std::shared_ptr<VWrap::ImageView> m_depth_image_view;
-	std::shared_ptr<VWrap::ImageView> m_color_image_view;
+	// PRESENTATION FRAMEBUFFERS (one per swapchain image)
+	std::vector<std::shared_ptr<VWrap::Framebuffer>> m_presentation_framebuffers;
 
-	/// <summary>
-	/// Contains and manages the resources needed to render GUI elements.
-	/// </summary>
+	// OFFSCREEN TARGET (scene renders here)
+	std::shared_ptr<OffscreenTarget> m_offscreen_target;
+
+	// GUI
 	std::shared_ptr<GUIRenderer> m_gui_renderer;
 
-	/// <summary>
-	/// Contains and manages the resources needed to profile the GPU.
-	/// </summary>
-	std::shared_ptr<GPUProfiler> m_gpu_profiler;
+	// PANELS
+	ViewportPanel m_viewport_panel;
+	PerformancePanel m_performance_panel;
+	OutputPanel m_output_panel;
+	RendererManagerPanel m_renderer_manager_panel;
 
-	/// <summary>
-	/// The camera used to view the scene.
-	/// </summary>
+	// GPU PROFILER
+	std::shared_ptr<GPUProfiler> m_gpu_profiler;
+	GPUProfiler::PerformanceMetrics m_last_metrics{0.0f, 0.0f};
+
+	// CAMERA
 	std::shared_ptr<Camera> m_camera;
 
-	std::shared_ptr<OctreeTracer> m_octree_tracer;
+	// RENDERERS
+	std::vector<std::unique_ptr<RenderTechnique>> m_renderers;
+	size_t m_active_renderer_index = 0;
 
+	// INPUT
 	Context m_main_context = {
 		"Main",
 		{
@@ -156,7 +117,8 @@ private:
 			{{GLFW_KEY_A, KeyState::DOWN}, (int)Action::MOVE_LEFT},
 			{{GLFW_KEY_D, KeyState::DOWN}, (int)Action::MOVE_RIGHT},
 			{{GLFW_KEY_SPACE, KeyState::DOWN}, (int)Action::MOVE_UP},
-			{{GLFW_KEY_LEFT_SHIFT, KeyState::DOWN}, (int)Action::MOVE_DOWN}
+			{{GLFW_KEY_LEFT_SHIFT, KeyState::DOWN}, (int)Action::MOVE_DOWN},
+			{{GLFW_KEY_F5, KeyState::PRESSED}, (int)Action::RELOAD_SHADERS}
 		}
 	};
 
@@ -167,77 +129,26 @@ private:
 	};
 	AppState m_app_state;
 
-	//std::shared_ptr<Input<Action>> m_input;
-
-	// CLASS FUNCTIONS -------------------------------------------------------------------------------------------
 public:
-
-	/// <summary>
-	/// Entrypoint to the application. Creates all resources and runs the main loop. Handles cleanup.
-	/// </summary>
 	void Run();
 
 private:
-	/// <summary>
-	/// Callback function for when the window is resized. Notifies the frame controller to resize.
-	/// </summary>
 	static void glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height);
-
 	static void glfw_WindowFocusCallback(GLFWwindow* window, int focused);
 
 	void MoveCamera(float dt);
 
 	void Init();
-
-	/// <summary>
-	/// Initializes the window and sets references in GLFW to the app and resize callback.
-	/// </summary>
 	void InitWindow();
-
-	/// <summary>
-	/// Initializes the vulkan objects.
-	/// </summary>
 	void InitVulkan();
-
-	/// <summary>
-	/// Initializes ImGUI.
-	/// </summary>
 	void InitImGui();
-
-	/// <summary>
-	/// Contains the main loop of the application, which polls for events and draws frames.
-	/// </summary>
+	void InitPanels();
 	void MainLoop();
-
 	void ParseInputQuery(InputQuery actions);
-
-	/// <summary>
-	/// Cleans up any resources that need to be explicitly destroyed.
-	/// </summary>
 	void Cleanup();
-
-	/// <summary>
-	/// Called by the frame controller when the window is resized. Resizes all necessary resources.
-	/// </summary>
 	void Resize();
-
-	/// <summary>
-	/// Creates a framebuffer for each swapchain image.
-	/// </summary>
-	void CreateFramebuffers();
-
-	/// <summary>
-	/// Creates the depth image and image view.
-	/// </summary>
-	void CreateDepthResources(VkSampleCountFlagBits samples);
-
-	/// <summary>
-	/// Creates the color image and image view.
-	/// </summary>
-	void CreateColorResources(VkSampleCountFlagBits samples);
-
-	/// <summary>
-	/// Performs the main rendering operations.
-	/// </summary>
+	void CreatePresentationFramebuffers();
 	void DrawFrame();
+	void HotReloadShaders();
+	void SwitchRenderer(size_t index);
 };

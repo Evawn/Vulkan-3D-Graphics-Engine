@@ -1,4 +1,6 @@
 #include "Application.h"
+#include "ShaderCompiler.h"
+#include "Log.h"
 
 void Application::Run() {
 	Init();
@@ -10,22 +12,60 @@ void Application::Init() {
 	InitWindow();
 	InitVulkan();
 	InitImGui();
-	VkExtent2D extent = m_frame_controller->GetSwapchain()->GetExtent();
-	m_octree_tracer = OctreeTracer::Create(
-		m_allocator,
-		m_device,
-		m_render_pass,
-		m_graphics_command_pool,
-		extent,
-		MAX_FRAMES_IN_FLIGHT);
 
-	m_gpu_profiler = GPUProfiler::Create(m_device, MAX_FRAMES_IN_FLIGHT);
+	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
+
+	// Create offscreen target for scene rendering
+	m_offscreen_target = OffscreenTarget::Create(
+		m_vk.device, m_vk.allocator, m_scene_render_pass,
+		extent, m_vk.msaaSamples,
+		m_vk.frameController->GetSwapchain()->GetFormat());
+
+	spdlog::get("App")->debug("Building render context...");
+	RenderContext render_ctx{};
+	render_ctx.device = m_vk.device;
+	render_ctx.allocator = m_vk.allocator;
+	render_ctx.graphicsPool = m_vk.graphicsCommandPool;
+	render_ctx.renderPass = m_scene_render_pass;
+	render_ctx.extent = extent;
+	render_ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+
+	spdlog::get("App")->debug("Initializing OctreeTracer...");
+	m_renderers.push_back(std::make_unique<OctreeTracer>());
+	m_renderers[0]->Init(render_ctx);
+	m_active_renderer_index = 0;
+	spdlog::get("App")->debug("OctreeTracer initialized");
+
+	spdlog::get("App")->debug("Creating GPU profiler...");
+	m_gpu_profiler = GPUProfiler::Create(m_vk.device, MAX_FRAMES_IN_FLIGHT);
+	spdlog::get("App")->debug("GPU profiler created");
 
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
+	InitPanels();
+
 	Input::Init(m_glfw_window.get()[0]);
-	Input::AddContext(m_main_context); // :3c
-	
+	Input::AddContext(m_main_context);
+}
+
+void Application::InitPanels() {
+	// Viewport panel
+	m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
+	m_gui_renderer->RegisterPanel("Viewport", [this]() { m_viewport_panel.Draw(); });
+
+	// Performance panel
+	m_gui_renderer->RegisterPanel("Performance", [this]() { m_performance_panel.Draw(); });
+
+	// Output panel
+	m_output_panel.SetSink(Log::GetImGuiSink());
+	m_gui_renderer->RegisterPanel("Output", [this]() { m_output_panel.Draw(); });
+
+	// Renderer manager panel
+	m_renderer_manager_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
+	m_renderer_manager_panel.SetReloadCallback([this]() { HotReloadShaders(); });
+	m_renderer_manager_panel.SetSwitchCallback([this](size_t idx) { SwitchRenderer(idx); });
+	m_renderer_manager_panel.SetAppControls(&m_app_state.sensitivity, &m_app_state.speed);
+	m_gui_renderer->RegisterPanel("Renderer", [this]() { m_renderer_manager_panel.Draw(); });
 }
 
 void Application::InitWindow() {
@@ -41,78 +81,71 @@ void Application::InitWindow() {
 	glfwSetFramebufferSizeCallback(m_glfw_window.get()[0], glfw_FramebufferResizeCallback);
 	glfwSetWindowFocusCallback(m_glfw_window.get()[0], glfw_WindowFocusCallback);
 
-	// Defining a monitor
 	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
 	const GLFWvidmode* mode = glfwGetVideoMode(monitor);
 	int screen_width = mode->width;
 	int screen_height = mode->height;
 
-	// Putting it in the centre
 	glfwSetWindowPos(m_glfw_window.get()[0], (screen_width-WIDTH) / 2, (screen_height - HEIGHT) / 2);
 }
 
 void Application::glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height) {
 	auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
-	app->m_frame_controller->SetResized(true);
+	app->m_vk.frameController->SetResized(true);
 }
 
 void Application::glfw_WindowFocusCallback(GLFWwindow* window, int focused) {
-	//auto mode = glfwGetInputMode(window, GLFW_CURSOR);
-	//if (mode != GLFW_CURSOR_HIDDEN) {
-	//	// The window gained input focus, hide the cursor without capturing it.
-	//	glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
-	//}
-
 }
 
 void Application::InitVulkan() {
-	m_instance = VWrap::Instance::Create(ENABLE_VALIDATION_LAYERS);
-	m_surface = VWrap::Surface::Create(m_instance, m_glfw_window);
-	m_physical_device = VWrap::PhysicalDevice::Pick(m_instance, m_surface);
-	m_device = VWrap::Device::Create(m_physical_device, ENABLE_VALIDATION_LAYERS);
-	m_allocator = VWrap::Allocator::Create(m_instance, m_physical_device, m_device);
+	m_vk.instance = VWrap::Instance::Create(ENABLE_VALIDATION_LAYERS);
+	m_vk.surface = VWrap::Surface::Create(m_vk.instance, m_glfw_window);
+	m_vk.physicalDevice = VWrap::PhysicalDevice::Pick(m_vk.instance, m_vk.surface);
+	m_vk.device = VWrap::Device::Create(m_vk.physicalDevice, ENABLE_VALIDATION_LAYERS);
+	m_vk.allocator = VWrap::Allocator::Create(m_vk.instance, m_vk.physicalDevice, m_vk.device);
 
-	VWrap::QueueFamilyIndices indices = m_physical_device->FindQueueFamilies();
+	VWrap::QueueFamilyIndices indices = m_vk.physicalDevice->FindQueueFamilies();
 
-	m_graphics_queue = VWrap::Queue::Create(m_device, indices.graphicsFamily.value());
-	m_present_queue = VWrap::Queue::Create(m_device, indices.presentFamily.value());
-	m_transfer_queue = VWrap::Queue::Create(m_device, indices.transferFamily.value());
-	m_graphics_command_pool = VWrap::CommandPool::Create(m_device, m_graphics_queue);
-	m_transfer_command_pool = VWrap::CommandPool::Create(m_device, m_transfer_queue);
+	m_vk.graphicsQueue = VWrap::Queue::Create(m_vk.device, indices.graphicsFamily.value());
+	m_vk.presentQueue = VWrap::Queue::Create(m_vk.device, indices.presentFamily.value());
+	m_vk.transferQueue = VWrap::Queue::Create(m_vk.device, indices.transferFamily.value());
+	m_vk.graphicsCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.graphicsQueue);
+	m_vk.transferCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.transferQueue);
 
-	m_frame_controller = VWrap::FrameController::Create(m_device, m_surface, m_graphics_command_pool, m_present_queue, MAX_FRAMES_IN_FLIGHT);
-	m_frame_controller->SetResizeCallback([this]() { Resize(); });
+	m_vk.frameController = VWrap::FrameController::Create(m_vk.device, m_vk.surface, m_vk.graphicsCommandPool, m_vk.presentQueue, MAX_FRAMES_IN_FLIGHT);
+	m_vk.frameController->SetResizeCallback([this]() { Resize(); });
 
-	VkSampleCountFlagBits sample_count = m_physical_device->GetMaxUsableSampleCount();
+	m_vk.msaaSamples = m_vk.physicalDevice->GetMaxUsableSampleCount();
 
-	m_render_pass = VWrap::RenderPass::CreateImGUI(m_device, m_frame_controller->GetSwapchain()->GetFormat(), sample_count);
+	VkFormat swapchainFormat = m_vk.frameController->GetSwapchain()->GetFormat();
 
-	CreateColorResources(sample_count);
-	CreateDepthResources(sample_count);
-	CreateFramebuffers();
+	m_scene_render_pass = VWrap::RenderPass::CreateOffscreen(m_vk.device, swapchainFormat, m_vk.msaaSamples);
+	m_presentation_render_pass = VWrap::RenderPass::CreatePresentation(m_vk.device, swapchainFormat);
+
+	CreatePresentationFramebuffers();
 }
 
 void Application::InitImGui() {
-	m_gui_renderer = GUIRenderer::Create(m_device);
+	m_gui_renderer = GUIRenderer::Create(m_vk.device);
 
-	VWrap::QueueFamilyIndices indices = m_physical_device->FindQueueFamilies();
+	VWrap::QueueFamilyIndices indices = m_vk.physicalDevice->FindQueueFamilies();
 	ImGui_ImplGlfw_InitForVulkan(m_glfw_window.get()[0], true);
 
 	ImGui_ImplVulkan_InitInfo init_info{};
-	init_info.Instance = m_instance->Get();
-	init_info.PhysicalDevice = m_physical_device->Get();
-	init_info.Device = m_device->Get();
+	init_info.Instance = m_vk.instance->Get();
+	init_info.PhysicalDevice = m_vk.physicalDevice->Get();
+	init_info.Device = m_vk.device->Get();
 	init_info.QueueFamily = indices.graphicsFamily.value();
-	init_info.Queue = m_graphics_queue->Get();
+	init_info.Queue = m_vk.graphicsQueue->Get();
 	init_info.PipelineCache = VK_NULL_HANDLE;
 	init_info.DescriptorPool = m_gui_renderer->GetDescriptorPool()->Get();
-	init_info.Subpass = 1;
-	init_info.MinImageCount = m_frame_controller->GetSwapchain()->Size();
-	init_info.ImageCount = m_frame_controller->GetSwapchain()->Size();
+	init_info.Subpass = 0;
+	init_info.MinImageCount = m_vk.frameController->GetSwapchain()->Size();
+	init_info.ImageCount = m_vk.frameController->GetSwapchain()->Size();
 	init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 	init_info.Allocator = VK_NULL_HANDLE;
 	init_info.CheckVkResultFn = check_vk_result;
-	ImGui_ImplVulkan_Init(&init_info, m_render_pass->Get());
+	ImGui_ImplVulkan_Init(&init_info, m_presentation_render_pass->Get());
 
 	float dpi_scale;
 	glfwGetWindowContentScale(m_glfw_window.get()[0], &dpi_scale, nullptr);
@@ -130,22 +163,23 @@ void Application::MainLoop() {
 
 		auto input_query = Input::Poll();
 		ParseInputQuery(input_query);
-		
-		if(m_app_state.focused) {
-			
+
+		if(m_app_state.focused && m_viewport_panel.IsHovered()) {
 			ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 			MoveCamera(dt);
-			
 		} else {
-			
 			ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
 		}
 
+		// Update viewport texture (may have changed after resize)
+		m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
 
 		m_gui_renderer->BeginFrame();
 		DrawFrame();
+
+		m_performance_panel.Update(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
 	}
-	vkDeviceWaitIdle(m_device->Get());
+	vkDeviceWaitIdle(m_vk.device->Get());
 }
 
 void Application::ParseInputQuery(InputQuery query)
@@ -157,7 +191,6 @@ void Application::ParseInputQuery(InputQuery query)
 	for (auto i : query.actions) {
 		Action action = static_cast<Action>(i);
 
-		int mode = -1;
 		switch (action) {
 		case Action::ESCAPE:
 			m_app_state.focused = !m_app_state.focused;
@@ -184,6 +217,9 @@ void Application::ParseInputQuery(InputQuery query)
 		case Action::MOVE_BACKWARD:
 			move_state.back = true;
 			break;
+		case Action::RELOAD_SHADERS:
+			HotReloadShaders();
+			break;
 		default:
 			return;
 		}
@@ -200,107 +236,84 @@ void Application::Cleanup() {
 
 void Application::DrawFrame() {
 
-	// ACQUIRE FRAME ------------------------------------------------
-	m_frame_controller->AcquireNext();
-	uint32_t image_index = m_frame_controller->GetImageIndex();
-	uint32_t frame_index = m_frame_controller->GetCurrentFrame();
-	auto command_buffer = m_frame_controller->GetCurrentCommandBuffer();
+	// Handle viewport resize from panel
+	if (m_viewport_panel.WasResized()) {
+		VkExtent2D desired = m_viewport_panel.GetDesiredExtent();
+		if (desired.width > 0 && desired.height > 0) {
+			m_offscreen_target->Resize(desired);
+			m_renderers[m_active_renderer_index]->OnResize(desired);
+			m_camera = Camera::Create(45, ((float)desired.width / (float)desired.height), 0.1f, 10.0f);
+			m_viewport_panel.SetTextureID(m_offscreen_target->GetImGuiTextureID());
+		}
+	}
 
-	// BEGIN RECORDING ------------------------------------------------
-	std::shared_ptr<VWrap::Framebuffer> framebuffer = m_framebuffers[image_index];
+	// ACQUIRE FRAME ------------------------------------------------
+	m_vk.frameController->AcquireNext();
+	uint32_t image_index = m_vk.frameController->GetImageIndex();
+	uint32_t frame_index = m_vk.frameController->GetCurrentFrame();
+	auto command_buffer = m_vk.frameController->GetCurrentCommandBuffer();
+
+	// Read metrics from previous cycle (fence wait in AcquireNext guarantees GPU work done)
+	m_last_metrics = m_gpu_profiler->GetMetrics(frame_index);
+
 	command_buffer->Begin();
 
-	// BEGIN PROFILING ------------------------------------------------
+	// ========== PASS 1: Scene -> Offscreen ==========
 	m_gpu_profiler->CmdBegin(command_buffer, frame_index);
 
-	// BEGIN RENDER PASS ------------------------------------------------
-	command_buffer->CmdBeginRenderPass(m_render_pass, framebuffer);
+	std::vector<VkClearValue> sceneClearValues(3);
+	sceneClearValues[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+	sceneClearValues[1].depthStencil = { 1.0f, 0 };
+	sceneClearValues[2].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
 
-	// RECORD SCENE COMMANDS ------------------------------------------------
-	m_octree_tracer->CmdDraw(command_buffer, frame_index, m_camera);
+	command_buffer->CmdBeginRenderPass(m_scene_render_pass, m_offscreen_target->GetFramebuffer(), sceneClearValues);
 
-	// END PROFILING ------------------------------------------------
+	m_renderers[m_active_renderer_index]->RecordCommands(command_buffer, frame_index, m_camera);
+
 	m_gpu_profiler->CmdEnd(command_buffer, frame_index);
 
-	// NEXT SUBPASS ------------------------------------------------
-	vkCmdNextSubpass(command_buffer->Get(), VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdEndRenderPass(command_buffer->Get());
 
-	// RECORD GUI COMMANDS ------------------------------------------------
-	GPUProfiler::PerformanceMetrics metrics = m_gpu_profiler->GetMetrics(frame_index);
-	m_gui_renderer->CmdDraw(command_buffer, metrics.render_time, metrics.fps, m_app_state.sensitivity, m_app_state.speed);
+	// ========== PASS 2: ImGui -> Swapchain ==========
+	std::vector<VkClearValue> presentClearValues(1);
+	presentClearValues[0].color = { { 0.1f, 0.1f, 0.1f, 1.0f } };
 
-	// END RENDER PASS - TODO: ABSTRACT ------------------------------------------------
+	command_buffer->CmdBeginRenderPass(m_presentation_render_pass, m_presentation_framebuffers[image_index], presentClearValues);
+
+	m_gui_renderer->CmdDraw(command_buffer);
+
 	vkCmdEndRenderPass(command_buffer->Get());
 
 	if (vkEndCommandBuffer(command_buffer->Get()) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to end command buffer recording!");
 	}
 
-	// RENDER -----------------------------------
-	m_frame_controller->Render();
+	// PRESENT ------------------------------------------------
+	m_vk.frameController->Render();
 }
 
 void Application::Resize() {
-	CreateColorResources(m_render_pass->GetSamples());
-	CreateDepthResources(m_render_pass->GetSamples());
-	CreateFramebuffers();
-
-	VkExtent2D extent = m_frame_controller->GetSwapchain()->GetExtent();
-	m_octree_tracer->Resize(extent);
-	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
+	CreatePresentationFramebuffers();
 
 	float dpi_scale;
 	glfwGetWindowContentScale(m_glfw_window.get()[0], &dpi_scale, nullptr);
 	m_gui_renderer->SetDpiScale(dpi_scale);
+
+	// Offscreen target does NOT resize on swapchain resize.
+	// It resizes when the viewport panel detects a size change.
 }
 
-void Application::CreateFramebuffers() {
-	m_framebuffers.resize(m_frame_controller->GetSwapchain()->Size());
-	for (uint32_t i = 0; i < m_frame_controller->GetSwapchain()->Size(); i++) {
+void Application::CreatePresentationFramebuffers() {
+	auto swapchain = m_vk.frameController->GetSwapchain();
+	m_presentation_framebuffers.resize(swapchain->Size());
+
+	for (uint32_t i = 0; i < swapchain->Size(); i++) {
 		std::vector<std::shared_ptr<VWrap::ImageView>> attachments = {
-			m_color_image_view,
-			m_depth_image_view,
-			m_frame_controller->GetImageViews()[i]
+			m_vk.frameController->GetImageViews()[i]
 		};
-
-		m_framebuffers[i] = VWrap::Framebuffer::Create2D(m_device, m_render_pass, attachments, m_frame_controller->GetSwapchain()->GetExtent());
+		m_presentation_framebuffers[i] = VWrap::Framebuffer::Create2D(
+			m_vk.device, m_presentation_render_pass, attachments, swapchain->GetExtent());
 	}
-}
-
-void Application::CreateDepthResources(VkSampleCountFlagBits samples)
-{
-	VkFormat depthFormat = VWrap::FindDepthFormat(m_physical_device->Get());
-
-	VWrap::ImageCreateInfo info{};
-	info.format = depthFormat;
-	info.height = m_frame_controller->GetSwapchain()->GetExtent().height;
-	info.width = m_frame_controller->GetSwapchain()->GetExtent().width;
-	info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-	info.properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	info.mip_levels = 1;
-	info.samples = samples;
-	info.image_type = VK_IMAGE_TYPE_2D;
-
-	auto im = VWrap::Image::Create(m_allocator, info);
-	m_depth_image_view = VWrap::ImageView::Create(m_device, im, VK_IMAGE_ASPECT_DEPTH_BIT);
-}
-
-void Application::CreateColorResources(VkSampleCountFlagBits samples)
-{
-	VWrap::ImageCreateInfo info{};
-	info.format = m_frame_controller->GetSwapchain()->GetFormat();
-	info.height = m_frame_controller->GetSwapchain()->GetExtent().height;
-	info.width = m_frame_controller->GetSwapchain()->GetExtent().width;
-	info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
-	info.mip_levels = 1;
-	info.properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	info.samples = samples;
-	info.image_type = VK_IMAGE_TYPE_2D;
-
-	auto im = VWrap::Image::Create(m_allocator, info);
-	m_color_image_view = VWrap::ImageView::Create(m_device, im, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 void Application::MoveCamera(float dt) {
@@ -327,8 +340,6 @@ void Application::MoveCamera(float dt) {
 	dot = glm::clamp(dot, -1.0f, 1.0f);
 	auto angle = glm::acos(dot);
 
-	//if(angle - dy < 0.001f) dy = 0.001f - angle;
-	//else if(angle - dy > glm::pi<float>() - 0.001f) dy = glm::pi<float>() - 0.001f - angle;
 	if (angle - dy < 0.001f || angle - dy > glm::pi<float>() - 0.001f) dy = 0.0f;
 
 	auto x_rot = glm::rotate(glm::mat4(1.0f), (float)dx, up);
@@ -336,4 +347,63 @@ void Application::MoveCamera(float dt) {
 	auto final_vec = x_rot * y_rot * glm::vec4(forward, 1.0f);
 
 	m_camera->SetForward(glm::normalize(final_vec));
+}
+
+void Application::HotReloadShaders() {
+	auto logger = spdlog::get("Render");
+	logger->info("Hot-reloading shaders...");
+
+	auto& renderer = m_renderers[m_active_renderer_index];
+	auto spvPaths = renderer->GetShaderPaths();
+
+	auto results = ShaderCompiler::CompileAll(spvPaths);
+
+	bool allSuccess = true;
+	for (const auto& r : results) {
+		if (!r.success) {
+			allSuccess = false;
+			break;
+		}
+	}
+
+	if (!allSuccess) {
+		logger->warn("Shader compilation failed - keeping old pipeline");
+		return;
+	}
+
+	vkDeviceWaitIdle(m_vk.device->Get());
+
+	RenderContext ctx{};
+	ctx.device = m_vk.device;
+	ctx.allocator = m_vk.allocator;
+	ctx.graphicsPool = m_vk.graphicsCommandPool;
+	ctx.renderPass = m_scene_render_pass;
+	ctx.extent = m_offscreen_target->GetExtent();
+	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+
+	renderer->RecreatePipeline(ctx);
+	logger->info("Pipeline recreated successfully");
+}
+
+void Application::SwitchRenderer(size_t index) {
+	if (index >= m_renderers.size() || index == m_active_renderer_index) return;
+
+	auto logger = spdlog::get("App");
+	logger->info("Switching renderer to: {}", m_renderers[index]->GetName());
+
+	vkDeviceWaitIdle(m_vk.device->Get());
+
+	// Initialize the new renderer if not already done
+	RenderContext ctx{};
+	ctx.device = m_vk.device;
+	ctx.allocator = m_vk.allocator;
+	ctx.graphicsPool = m_vk.graphicsCommandPool;
+	ctx.renderPass = m_scene_render_pass;
+	ctx.extent = m_offscreen_target->GetExtent();
+	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+
+	m_renderers[index]->Init(ctx);
+	m_active_renderer_index = index;
+
+	logger->info("Switched to: {}", m_renderers[index]->GetName());
 }

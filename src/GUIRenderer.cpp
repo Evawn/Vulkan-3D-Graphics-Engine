@@ -3,12 +3,11 @@
 std::shared_ptr<GUIRenderer> GUIRenderer::Create(std::shared_ptr<VWrap::Device> device) {
 	auto ret = std::make_shared<GUIRenderer>();
 
-	// Setup Dear ImGui context
 	std::vector<VkDescriptorPoolSize> pool_sizes =
 	{
-		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10 },
 	};
-	ret->m_imgui_descriptor_pool = VWrap::DescriptorPool::Create(device, pool_sizes, 1, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
+	ret->m_imgui_descriptor_pool = VWrap::DescriptorPool::Create(device, pool_sizes, 10, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
@@ -21,48 +20,52 @@ std::shared_ptr<GUIRenderer> GUIRenderer::Create(std::shared_ptr<VWrap::Device> 
 	return ret;
 }
 
-void GUIRenderer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer, float time, float fps, float& sensitivity, float& speed) {
+void GUIRenderer::RegisterPanel(const std::string& name, std::function<void()> drawFn) {
+	m_panels.push_back({ name, std::move(drawFn) });
+}
 
-	//ImGui::ShowDemoWindow();
-	// Variables to manage simulation state and render time
-	bool isSimulationPaused = false;
+void GUIRenderer::SetupDefaultLayout(ImGuiID dockspace_id) {
+	ImGui::DockBuilderRemoveNode(dockspace_id);
+	ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+	ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
 
-	// Create a window
-	ImGui::Begin("Simulation Control");
+	// Split: left (viewport + output) | right (performance + renderer manager)
+	ImGuiID left, right;
+	ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.7f, &left, &right);
 
-	// Display the render time
-	ImGui::Text("Render Time: %.3f ms", time);
-	ImGui::Text("FPS: %.3f ms", fps);
+	// Split left: top (viewport) | bottom (output)
+	ImGuiID left_top, left_bottom;
+	ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.7f, &left_top, &left_bottom);
 
-	// Button to pause the simulation
-	if (ImGui::Button("Pause")) {
-		isSimulationPaused = true;
-		// Additional code to pause the simulation
+	// Split right: top (performance) | bottom (renderer manager)
+	ImGuiID right_top, right_bottom;
+	ImGui::DockBuilderSplitNode(right, ImGuiDir_Up, 0.5f, &right_top, &right_bottom);
+
+	ImGui::DockBuilderDockWindow("Viewport", left_top);
+	ImGui::DockBuilderDockWindow("Output", left_bottom);
+	ImGui::DockBuilderDockWindow("Performance", right_top);
+	ImGui::DockBuilderDockWindow("Renderer", right_bottom);
+
+	ImGui::DockBuilderFinish(dockspace_id);
+}
+
+void GUIRenderer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer) {
+	// Create fullscreen dockspace
+	ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());
+
+	// Setup default layout on first frame
+	if (m_first_frame) {
+		SetupDefaultLayout(dockspace_id);
+		m_first_frame = false;
 	}
 
-	// Small space between buttons
-	ImGui::SameLine();
-
-	// Button to resume the simulation
-	if (ImGui::Button("Resume")) {
-		isSimulationPaused = false;
-		// Additional code to resume the simulation
+	// Draw all registered panels
+	for (auto& panel : m_panels) {
+		panel.drawFn();
 	}
 
-	// Slider for mouse sensitivity
-	ImGui::SliderFloat("Mouse Sensitivity", &sensitivity, 0.01f, 2.0f, "%.3f");
-
-	// Slider for movement speed
-	ImGui::SliderFloat("Movement Speed", &speed, 0.1f, 10.0f, "%.3f");
-
-
-	// End the ImGUI window
-	ImGui::End();
 	ImGui::EndFrame();
-
 	ImGui::Render();
-	ImDrawData* draw_data = ImGui::GetDrawData();
-
 	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), command_buffer->Get());
 }
 

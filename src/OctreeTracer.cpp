@@ -1,23 +1,38 @@
 #include "OctreeTracer.h"
 #include "config.h"
+#include <spdlog/spdlog.h>
 
-std::shared_ptr<OctreeTracer> OctreeTracer::Create(std::shared_ptr<VWrap::Allocator> allocator, std::shared_ptr<VWrap::Device> device, std::shared_ptr<VWrap::RenderPass> render_pass, std::shared_ptr<VWrap::CommandPool> graphics_pool, VkExtent2D extent, uint32_t num_frames) {
-	auto ret = std::make_shared<OctreeTracer>();
-	ret->m_device = device;
-	ret->m_allocator = allocator;
-	ret->m_extent = extent;
-	ret->m_graphics_pool = graphics_pool;
+void OctreeTracer::Init(const RenderContext& ctx) {
+	auto logger = spdlog::get("Render");
+	m_device = ctx.device;
+	m_allocator = ctx.allocator;
+	m_extent = ctx.extent;
+	m_graphics_pool = ctx.graphicsPool;
+	m_render_pass = ctx.renderPass;
 
-	ret->CreateDescriptors(num_frames);
-	ret->CreatePipeline(render_pass);
+	logger->debug("OctreeTracer: Creating descriptors...");
+	CreateDescriptors(ctx.maxFramesInFlight);
+	logger->debug("OctreeTracer: Descriptors created");
 
-	ret->m_sampler = VWrap::Sampler::Create(device);
-	VWrap::CommandBuffer::CreateAndFillBrickTexture(graphics_pool, allocator, ret->m_brick_texture, 32);
-	ret->m_brick_texture_view = VWrap::ImageView::Create(device, ret->m_brick_texture);
+	logger->debug("OctreeTracer: Creating pipeline...");
+	CreatePipeline(ctx.renderPass);
+	logger->debug("OctreeTracer: Pipeline created");
 
-	ret->WriteDescriptors();
+	logger->debug("OctreeTracer: Creating sampler...");
+	m_sampler = VWrap::Sampler::Create(m_device);
+	logger->debug("OctreeTracer: Sampler created");
 
-	return ret;
+	logger->debug("OctreeTracer: Creating brick texture...");
+	VWrap::CommandBuffer::CreateAndFillBrickTexture(m_graphics_pool, m_allocator, m_brick_texture, 32);
+	logger->debug("OctreeTracer: Brick texture created");
+
+	logger->debug("OctreeTracer: Creating brick texture view...");
+	m_brick_texture_view = VWrap::ImageView::Create(m_device, m_brick_texture);
+	logger->debug("OctreeTracer: Brick texture view created");
+
+	logger->debug("OctreeTracer: Writing descriptors...");
+	WriteDescriptors();
+	logger->debug("OctreeTracer: Descriptors written");
 }
 
 void OctreeTracer::CreateDescriptors(int max_sets)
@@ -46,7 +61,6 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 	auto vert_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_tracer.vert.spv");
 	auto frag_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_tracer.frag.spv");
 
-
 	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vertexInputInfo.vertexAttributeDescriptionCount = 0;
@@ -57,7 +71,7 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
+	inputAssembly.primitiveRestartEnable = VK_TRUE;
 
 	VkPipelineDynamicStateCreateInfo dynamicState{};
 	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -74,14 +88,11 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 	rasterizer.cullMode = VK_CULL_MODE_NONE;
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.depthBiasEnable = VK_FALSE;
-	rasterizer.depthBiasConstantFactor = 0.0f; // Optional
-	rasterizer.depthBiasClamp = 0.0f; // Optional
-	rasterizer.depthBiasSlopeFactor = 0.0f; // Optional
 
 	VkPushConstantRange pushConstantRange = {};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // Specify the shader stages that will use the push constants
-	pushConstantRange.offset = 0; // Offset of the push constants in bytes
-	pushConstantRange.size = sizeof(VWrap::PushConstantBlock); // Size of the push constant block
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushConstantRange.offset = 0;
+	pushConstantRange.size = sizeof(VWrap::PushConstantBlock);
 	std::vector<VkPushConstantRange> push_constant_ranges = { pushConstantRange };
 
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
@@ -90,11 +101,7 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 	depthStencil.depthWriteEnable = VK_FALSE;
 	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
 	depthStencil.depthBoundsTestEnable = VK_FALSE;
-	depthStencil.minDepthBounds = 0.0f; // Optional
-	depthStencil.maxDepthBounds = 1.0f; // Optional
 	depthStencil.stencilTestEnable = VK_FALSE;
-	depthStencil.front = {}; // Optional
-	depthStencil.back = {}; // Optional
 
 	VWrap::PipelineCreateInfo create_info{};
 	create_info.extent = m_extent;
@@ -114,15 +121,12 @@ void OctreeTracer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass
 void OctreeTracer::WriteDescriptors()
 {
 	for (size_t i = 0; i < m_descriptor_sets.size(); i++) {
-
 		VkDescriptorImageInfo image_info{};
 		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		image_info.imageView = m_brick_texture_view->Get();
 		image_info.sampler = m_sampler->Get();
 
-		// array of descriptor writes:
 		std::array<VkWriteDescriptorSet, 1> descriptorWrites{};
-
 		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		descriptorWrites[0].descriptorCount = 1;
 		descriptorWrites[0].dstBinding = 0;
@@ -135,14 +139,13 @@ void OctreeTracer::WriteDescriptors()
 	}
 }
 
-void OctreeTracer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer, uint32_t frame, std::shared_ptr<Camera> camera)
+void OctreeTracer::RecordCommands(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex, std::shared_ptr<Camera> camera)
 {
-	auto vk_command_buffer = command_buffer->Get();
-	vkCmdBindPipeline(vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
+	auto vk_cmd = cmd->Get();
+	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
 
-	std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[frame]->Get() };
-	vkCmdBindDescriptorSets(vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
-
+	std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[frameIndex]->Get() };
+	vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
 
 	VkViewport viewport{};
 	viewport.height = (float)m_extent.height;
@@ -151,28 +154,29 @@ void OctreeTracer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer,
 	viewport.maxDepth = 1.0f;
 	viewport.x = 0;
 	viewport.y = 0;
-
-	vkCmdSetViewport(vk_command_buffer, 0, 1, &viewport);
+	vkCmdSetViewport(vk_cmd, 0, 1, &viewport);
 
 	VkRect2D scissor{};
 	scissor.extent = m_extent;
-	scissor.offset = { 0,0 };
-
-	vkCmdSetScissor(vk_command_buffer, 0, 1, &scissor);
+	scissor.offset = { 0, 0 };
+	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
 
 	VWrap::PushConstantBlock PCB;
 	PCB.NDCtoWorld = camera->GetNDCtoWorldMatrix();
 	PCB.cameraPos = camera->GetPosition();
+	vkCmdPushConstants(vk_cmd, m_pipeline->GetLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(VWrap::PushConstantBlock), &PCB);
 
-	// Populate pushConstants with the necessary data
-	vkCmdPushConstants(
-		vk_command_buffer,
-		m_pipeline->GetLayout(), // The pipeline layout used for the push constants
-		VK_SHADER_STAGE_FRAGMENT_BIT, // Shader stage the push constants will be used in
-		0, // Offset of the push constants to update
-		sizeof(VWrap::PushConstantBlock), // Size of the push constants to update
-		&PCB // Pointer to the data to copy
-	);
+	vkCmdDraw(vk_cmd, 4, 1, 0, 0);
+}
 
-	vkCmdDraw(vk_command_buffer, 4, 1, 0, 0);
+std::vector<std::string> OctreeTracer::GetShaderPaths() const {
+	return {
+		std::string(config::SHADER_DIR) + "/shader_tracer.vert.spv",
+		std::string(config::SHADER_DIR) + "/shader_tracer.frag.spv"
+	};
+}
+
+void OctreeTracer::RecreatePipeline(const RenderContext& ctx) {
+	m_pipeline.reset();
+	CreatePipeline(ctx.renderPass);
 }

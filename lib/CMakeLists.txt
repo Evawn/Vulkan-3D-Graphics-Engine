@@ -8,4 +8,4 @@ target_include_directories(VWrap PUBLIC
     "${CMAKE_SOURCE_DIR}/dep"   # For vk_mem_alloc.h, stb_image.h, tiny_obj_loader.h
 )
 
-target_link_libraries(VWrap PUBLIC Vulkan::Vulkan glfw glm::glm)
+target_link_libraries(VWrap PUBLIC Vulkan::Vulkan glfw glm::glm spdlog::spdlog)

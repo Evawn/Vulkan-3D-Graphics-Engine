@@ -34,6 +34,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
+# spdlog — fast logging library
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.14.1
+)
+FetchContent_MakeAvailable(spdlog)
+
 # --- Subdirectories ---
 add_subdirectory(lib)       # VWrap (first-party)
 add_subdirectory(dep)       # ImGui and other third-party

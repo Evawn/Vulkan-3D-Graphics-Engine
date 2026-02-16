@@ -16,12 +16,15 @@ namespace VWrap {
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.usage = usage;
         bufferInfo.size = size;
-        bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-
         QueueFamilyIndices indices = allocator->GetDevice()->GetPhysicalDevice()->FindQueueFamilies();
-        bufferInfo.queueFamilyIndexCount = 2;
         uint32_t queueFamilyIndices[2] = { indices.graphicsFamily.value(), indices.transferFamily.value() };
-        bufferInfo.pQueueFamilyIndices = queueFamilyIndices;
+        if (queueFamilyIndices[0] != queueFamilyIndices[1]) {
+            bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            bufferInfo.queueFamilyIndexCount = 2;
+            bufferInfo.pQueueFamilyIndices = queueFamilyIndices;
+        } else {
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo allocInfo = {};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
@@ -58,12 +61,15 @@ namespace VWrap {
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.usage = usage;
         bufferInfo.size = size;
-        bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-
         QueueFamilyIndices indices = allocator->GetDevice()->GetPhysicalDevice()->FindQueueFamilies();
-        bufferInfo.queueFamilyIndexCount = 2;
         uint32_t queueFamilyIndices[2] = { indices.graphicsFamily.value(), indices.transferFamily.value() };
-        bufferInfo.pQueueFamilyIndices = queueFamilyIndices;
+        if (queueFamilyIndices[0] != queueFamilyIndices[1]) {
+            bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            bufferInfo.queueFamilyIndexCount = 2;
+            bufferInfo.pQueueFamilyIndices = queueFamilyIndices;
+        } else {
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo allocCreateInfo = {};
         allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;

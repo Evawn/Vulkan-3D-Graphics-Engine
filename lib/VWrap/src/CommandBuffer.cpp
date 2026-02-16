@@ -70,6 +70,19 @@ namespace VWrap {
 		vkCmdBeginRenderPass(m_command_buffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 	}
 
+	void CommandBuffer::CmdBeginRenderPass(std::shared_ptr<RenderPass> render_pass, std::shared_ptr<Framebuffer> framebuffer, const std::vector<VkClearValue>& clearValues) {
+		VkRenderPassBeginInfo renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		renderPassInfo.framebuffer = framebuffer->Get();
+		renderPassInfo.renderPass = render_pass->Get();
+		renderPassInfo.renderArea.offset = { 0, 0 };
+		renderPassInfo.renderArea.extent = framebuffer->GetExtent();
+		renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+		renderPassInfo.pClearValues = clearValues.data();
+
+		vkCmdBeginRenderPass(m_command_buffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+	}
+
 	void CommandBuffer::UploadTextureToImage(std::shared_ptr<CommandPool> command_pool, std::shared_ptr<Allocator> allocator, std::shared_ptr<Image>& dst_image, const char* file_name)
 	{
 		int texWidth, texHeight, texChannels;
