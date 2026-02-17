@@ -28,7 +28,20 @@ namespace UIStyle {
 
 	constexpr float kRounding = 3.0f;
 
-	void Apply(float dpi_scale);
+	// --- Font sizes (unscaled logical pixels) ---
+	constexpr float kFontSizeHeader = 14.0f;
+	constexpr float kFontSizeBody   = 13.0f;
+	constexpr float kFontSizeDetail = 11.0f;
+
+	// Load all semantic fonts into the ImGui atlas. Call before atlas build.
+	void LoadFonts(float dpi_scale);
+
+	// Font accessors (valid after LoadFonts + atlas build)
+	ImFont* FontHeader();
+	ImFont* FontBody();
+	ImFont* FontDetail();
+
+	void Apply();
 	ImVec4 GetLogLevelColor(spdlog::level::level_enum level);
 
 }

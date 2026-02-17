@@ -102,6 +102,8 @@ private:
 	size_t m_active_renderer_index = 0;
 	bool m_pending_hot_reload = false;
 	std::optional<size_t> m_pending_renderer_switch;
+	bool m_pending_dpi_update = false;
+	float m_pending_dpi_scale = 1.0f;
 
 public:
 	void Run();
@@ -109,6 +111,8 @@ public:
 private:
 	static void glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height);
 	static void glfw_WindowFocusCallback(GLFWwindow* window, int focused);
+	static void glfw_ContentScaleCallback(GLFWwindow* window, float xscale, float yscale);
+	static GLFWmonitor* GetCurrentMonitor(GLFWwindow* window);
 
 	void Init();
 	void InitWindow();

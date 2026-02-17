@@ -76,24 +76,63 @@ void Application::InitPanels() {
 	m_gui_renderer->RegisterPanel("Inspector", [this]() { m_inspector_panel.Draw(); });
 }
 
+GLFWmonitor* Application::GetCurrentMonitor(GLFWwindow* window) {
+	int wx, wy, ww, wh;
+	glfwGetWindowPos(window, &wx, &wy);
+	glfwGetWindowSize(window, &ww, &wh);
+
+	int best_overlap = 0;
+	GLFWmonitor* best_monitor = nullptr;
+
+	int monitor_count;
+	GLFWmonitor** monitors = glfwGetMonitors(&monitor_count);
+
+	for (int i = 0; i < monitor_count; ++i) {
+		int mx, my, mw, mh;
+		glfwGetMonitorWorkarea(monitors[i], &mx, &my, &mw, &mh);
+
+		int overlap_x = std::max(0, std::min(wx + ww, mx + mw) - std::max(wx, mx));
+		int overlap_y = std::max(0, std::min(wy + wh, my + mh) - std::max(wy, my));
+		int overlap = overlap_x * overlap_y;
+
+		if (overlap > best_overlap) {
+			best_overlap = overlap;
+			best_monitor = monitors[i];
+		}
+	}
+
+	return best_monitor ? best_monitor : glfwGetPrimaryMonitor();
+}
+
 void Application::InitWindow() {
 	glfwInit();
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
-	// Size window to 80% of the screen, centered
-	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
-	const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-	int win_w = static_cast<int>(mode->width * 0.8f);
-	int win_h = static_cast<int>(mode->height * 0.8f);
+	// Create a small hidden window; the OS decides which display to place it on
+	GLFWwindow* raw_window = glfwCreateWindow(800, 600, "Vulkan", nullptr, nullptr);
+	if (!raw_window) {
+		throw std::runtime_error("Failed to create GLFW window");
+	}
+	m_glfw_window = std::make_shared<GLFWwindow*>(raw_window);
 
-	m_glfw_window = std::make_shared<GLFWwindow*>(glfwCreateWindow(win_w, win_h, "Vulkan", nullptr, nullptr));
+	// Size to 80% of the monitor work area the OS placed us on, centered
+	GLFWmonitor* monitor = GetCurrentMonitor(raw_window);
+	int work_x, work_y, work_w, work_h;
+	glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_w, &work_h);
 
-	glfwSetWindowUserPointer(m_glfw_window.get()[0], this);
-	glfwSetFramebufferSizeCallback(m_glfw_window.get()[0], glfw_FramebufferResizeCallback);
-	glfwSetWindowFocusCallback(m_glfw_window.get()[0], glfw_WindowFocusCallback);
+	int win_w = static_cast<int>(work_w * 0.8f);
+	int win_h = static_cast<int>(work_h * 0.8f);
+	glfwSetWindowSize(raw_window, win_w, win_h);
+	glfwSetWindowPos(raw_window, work_x + (work_w - win_w) / 2, work_y + (work_h - win_h) / 2);
 
-	glfwSetWindowPos(m_glfw_window.get()[0], (mode->width - win_w) / 2, (mode->height - win_h) / 2);
+	glfwSetWindowUserPointer(raw_window, this);
+	glfwSetFramebufferSizeCallback(raw_window, glfw_FramebufferResizeCallback);
+	glfwSetWindowFocusCallback(raw_window, glfw_WindowFocusCallback);
+	glfwSetWindowContentScaleCallback(raw_window, glfw_ContentScaleCallback);
+
+	glfwShowWindow(raw_window);
 }
 
 void Application::glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height) {
@@ -102,6 +141,12 @@ void Application::glfw_FramebufferResizeCallback(GLFWwindow* window, int width, 
 }
 
 void Application::glfw_WindowFocusCallback(GLFWwindow* window, int focused) {
+}
+
+void Application::glfw_ContentScaleCallback(GLFWwindow* window, float xscale, float yscale) {
+	auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
+	app->m_pending_dpi_scale = xscale;
+	app->m_pending_dpi_update = true;
 }
 
 void Application::InitVulkan() {
@@ -161,7 +206,7 @@ void Application::InitImGui() {
 	ImGui_ImplVulkan_DestroyFontsTexture();
 	ImGui_ImplVulkan_CreateFontsTexture();
 
-	UIStyle::Apply(dpi_scale);
+	UIStyle::Apply();
 }
 
 void Application::BuildRenderGraph() {
@@ -227,6 +272,19 @@ void Application::MainLoop() {
 		if (m_pending_renderer_switch.has_value()) {
 			SwitchRenderer(m_pending_renderer_switch.value());
 			m_pending_renderer_switch.reset();
+		}
+
+		if (m_pending_dpi_update) {
+			m_pending_dpi_update = false;
+			float new_scale = m_pending_dpi_scale;
+
+			vkDeviceWaitIdle(m_vk.device->Get());
+
+			m_gui_renderer->LoadFonts(new_scale);
+			ImGui_ImplVulkan_DestroyFontsTexture();
+			ImGui_ImplVulkan_CreateFontsTexture();
+
+			UIStyle::Apply();
 		}
 
 		// Click to capture viewport

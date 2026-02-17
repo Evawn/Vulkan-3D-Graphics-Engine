@@ -1,6 +1,52 @@
 #include "UIStyle.h"
+#include "config.h"
+#include <filesystem>
+#include <spdlog/spdlog.h>
 
 using namespace UIStyle;
+
+namespace {
+	ImFont* s_font_header = nullptr;
+	ImFont* s_font_body   = nullptr;
+	ImFont* s_font_detail = nullptr;
+}
+
+void UIStyle::LoadFonts(float dpi_scale) {
+	ImGuiIO& io = ImGui::GetIO();
+	io.Fonts->Clear();
+
+	std::string font_path = std::string(config::RESOURCE_DIR) + "/fonts/Inter-Regular.ttf";
+	bool font_exists = std::filesystem::exists(font_path);
+
+	auto load = [&](float base_size) -> ImFont* {
+		float scaled = base_size * dpi_scale;
+		if (font_exists) {
+			ImFontConfig cfg;
+			cfg.OversampleH = 3;
+			cfg.OversampleV = 2;
+			cfg.PixelSnapH  = true;
+			return io.Fonts->AddFontFromFileTTF(font_path.c_str(), scaled, &cfg);
+		}
+		return io.Fonts->AddFontDefault();
+	};
+
+	// Body first — becomes ImGui default font (Fonts[0])
+	s_font_body   = load(kFontSizeBody);
+	s_font_header = load(kFontSizeHeader);
+	s_font_detail = load(kFontSizeDetail);
+
+	io.FontGlobalScale = 1.0f / dpi_scale;
+
+	if (!font_exists)
+		spdlog::get("App")->warn("Font not found: {} - using defaults", font_path);
+	else
+		spdlog::get("App")->debug("Loaded fonts: body={}px header={}px detail={}px (dpi={})",
+			kFontSizeBody, kFontSizeHeader, kFontSizeDetail, dpi_scale);
+}
+
+ImFont* UIStyle::FontHeader() { return s_font_header; }
+ImFont* UIStyle::FontBody()   { return s_font_body; }
+ImFont* UIStyle::FontDetail() { return s_font_detail; }
 
 ImVec4 UIStyle::GetLogLevelColor(spdlog::level::level_enum level) {
 	switch (level) {
@@ -14,7 +60,7 @@ ImVec4 UIStyle::GetLogLevelColor(spdlog::level::level_enum level) {
 	}
 }
 
-void UIStyle::Apply(float dpi_scale) {
+void UIStyle::Apply() {
 	ImGuiStyle& style = ImGui::GetStyle();
 	ImVec4* c = style.Colors;
 
@@ -103,15 +149,15 @@ void UIStyle::Apply(float dpi_scale) {
 	c[ImGuiCol_NavWindowingDimBg]     = Alpha(kBg, 0.6f);
 	c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.0f, 0.0f, 0.0f, 0.5f);
 
-	// ---- Sizes (compact) ----
-	style.WindowPadding     = ImVec2(4, 3);
-	style.FramePadding      = ImVec2(4, 2);
-	style.ItemSpacing       = ImVec2(4, 2);
-	style.ItemInnerSpacing  = ImVec2(3, 2);
-	style.CellPadding       = ImVec2(3, 1);
-	style.IndentSpacing     = 12.0f;
-	style.ScrollbarSize     = 10.0f;
-	style.GrabMinSize       = 6.0f;
+	// ---- Sizes (VSCode-compact) ----
+	style.WindowPadding     = ImVec2(8, 6);
+	style.FramePadding      = ImVec2(6, 4);
+	style.ItemSpacing       = ImVec2(6, 4);
+	style.ItemInnerSpacing  = ImVec2(4, 4);
+	style.CellPadding       = ImVec2(4, 2);
+	style.IndentSpacing     = 16.0f;
+	style.ScrollbarSize     = 12.0f;
+	style.GrabMinSize       = 8.0f;
 
 	style.WindowRounding    = kRounding;
 	style.ChildRounding     = 2.0f;
@@ -128,6 +174,4 @@ void UIStyle::Apply(float dpi_scale) {
 	style.WindowTitleAlign        = ImVec2(0.0f, 0.5f);
 	style.DockingSeparatorSize    = 1.0f;
 	style.WindowMenuButtonPosition = ImGuiDir_None;
-
-	style.ScaleAllSizes(dpi_scale);
 }
