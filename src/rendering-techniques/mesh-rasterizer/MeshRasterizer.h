@@ -1,10 +1,8 @@
 #pragma once
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
+#include "DescriptorSetBuilder.h"
 #include "Buffer.h"
-#include "DescriptorSet.h"
-#include "DescriptorSetLayout.h"
-#include "DescriptorPool.h"
 #include "Pipeline.h"
 #include "Image.h"
 #include "ImageView.h"
@@ -66,7 +64,6 @@ private:
 	std::vector<TechniqueParameter> m_parameters;
 
 	void CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass);
-	void CreateDescriptors(int max_sets);
 	void CreateVertexBuffer();
 	void CreateIndexBuffer();
 	void CreateUniformBuffers();

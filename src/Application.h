@@ -15,7 +15,7 @@
 #include <optional>
 #include "Camera.h"
 #include "RenderTechnique.h"
-#include "RenderGraph.h"
+#include "Renderer.h"
 #include "DDATracer.h"
 #include "MeshRasterizer.h"
 #include "ComputeTest.h"
@@ -68,12 +68,8 @@ private:
 	// RENDER PASS (kept for ImGui init compatibility)
 	std::shared_ptr<VWrap::RenderPass> m_presentation_render_pass;
 
-	// RENDER GRAPH
-	RenderGraph m_render_graph;
-	ImageHandle m_scene_color;
-	ImageHandle m_scene_depth;
-	ImageHandle m_scene_resolve;
-	ImageHandle m_swapchain;
+	// RENDERER
+	Renderer m_renderer;
 	VkExtent2D m_offscreen_extent{};
 
 	// SCENE TEXTURE (for ImGui viewport)

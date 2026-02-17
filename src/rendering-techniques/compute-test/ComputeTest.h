@@ -2,11 +2,9 @@
 
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
+#include "DescriptorSetBuilder.h"
 #include "ComputePipeline.h"
 #include "Pipeline.h"
-#include "DescriptorSet.h"
-#include "DescriptorSetLayout.h"
-#include "DescriptorPool.h"
 #include "Sampler.h"
 #include "Image.h"
 #include "ImageView.h"
@@ -36,9 +34,7 @@ private:
 	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_graphics_descriptor_sets;
 
 	void CreateComputePipeline();
-	void CreateComputeDescriptors();
 	void CreateGraphicsPipeline();
-	void CreateGraphicsDescriptors(uint32_t max_sets);
 
 public:
 	std::string GetName() const override { return "Compute Test"; }

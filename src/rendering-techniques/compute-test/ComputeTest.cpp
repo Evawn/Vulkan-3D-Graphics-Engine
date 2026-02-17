@@ -1,4 +1,5 @@
 #include "ComputeTest.h"
+#include "PipelineDefaults.h"
 #include "config.h"
 #include <spdlog/spdlog.h>
 
@@ -57,15 +58,26 @@ void ComputeTest::RegisterPasses(
 			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
 		});
 
-	// Create pipelines and descriptors
+	// Compute descriptors (1 storage image)
 	logger->debug("ComputeTest: Creating compute descriptors...");
-	CreateComputeDescriptors();
+	auto computeDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
+		.Build(1);
+	m_compute_descriptor_layout = computeDesc.layout;
+	m_compute_descriptor_pool = computeDesc.pool;
+	m_compute_descriptor_set = computeDesc.sets[0];
 
 	logger->debug("ComputeTest: Creating compute pipeline...");
 	CreateComputePipeline();
 
+	// Graphics descriptors (per-frame sampled image)
 	logger->debug("ComputeTest: Creating graphics descriptors...");
-	CreateGraphicsDescriptors(ctx.maxFramesInFlight);
+	auto gfxDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.Build(ctx.maxFramesInFlight);
+	m_graphics_descriptor_layout = gfxDesc.layout;
+	m_graphics_descriptor_pool = gfxDesc.pool;
+	m_graphics_descriptor_sets = gfxDesc.sets;
 
 	m_render_pass = gfx.GetRenderPassPtr();
 
@@ -117,23 +129,6 @@ void ComputeTest::WriteGraphDescriptors(RenderGraph& graph) {
 	}
 }
 
-void ComputeTest::CreateComputeDescriptors() {
-	VkDescriptorSetLayoutBinding binding{};
-	binding.binding = 0;
-	binding.descriptorCount = 1;
-	binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-	m_compute_descriptor_layout = VWrap::DescriptorSetLayout::Create(m_device, { binding });
-
-	std::vector<VkDescriptorPoolSize> poolSizes = {
-		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }
-	};
-	m_compute_descriptor_pool = VWrap::DescriptorPool::Create(m_device, poolSizes, 1, 0);
-
-	m_compute_descriptor_set = VWrap::DescriptorSet::Create(m_compute_descriptor_pool, m_compute_descriptor_layout);
-}
-
 void ComputeTest::CreateComputePipeline() {
 	auto comp_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/compute_test.comp.spv");
 
@@ -146,72 +141,12 @@ void ComputeTest::CreateComputePipeline() {
 		m_device, m_compute_descriptor_layout, { pushRange }, comp_code);
 }
 
-void ComputeTest::CreateGraphicsDescriptors(uint32_t max_sets) {
-	VkDescriptorSetLayoutBinding binding{};
-	binding.binding = 0;
-	binding.descriptorCount = 1;
-	binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	m_graphics_descriptor_layout = VWrap::DescriptorSetLayout::Create(m_device, { binding });
-
-	std::vector<VkDescriptorPoolSize> poolSizes = {
-		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, max_sets }
-	};
-	m_graphics_descriptor_pool = VWrap::DescriptorPool::Create(m_device, poolSizes, max_sets, 0);
-
-	std::vector<std::shared_ptr<VWrap::DescriptorSetLayout>> layouts(max_sets, m_graphics_descriptor_layout);
-	m_graphics_descriptor_sets = VWrap::DescriptorSet::CreateMany(m_graphics_descriptor_pool, layouts);
-}
-
 void ComputeTest::CreateGraphicsPipeline() {
 	auto vert_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/compute_test.vert.spv");
 	auto frag_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/compute_test.frag.spv");
 
-	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInputInfo.vertexAttributeDescriptionCount = 0;
-	vertexInputInfo.vertexBindingDescriptionCount = 0;
-
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-	inputAssembly.primitiveRestartEnable = VK_TRUE;
-
-	VkPipelineDynamicStateCreateInfo dynamicState{};
-	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	std::array<VkDynamicState, 2> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-	dynamicState.pDynamicStates = dynamicStates.data();
-
-	VkPipelineRasterizationStateCreateInfo rasterizer{};
-	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.depthClampEnable = VK_FALSE;
-	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_NONE;
-	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-	rasterizer.depthBiasEnable = VK_FALSE;
-
-	VkPipelineDepthStencilStateCreateInfo depthStencil{};
-	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_FALSE;
-	depthStencil.depthWriteEnable = VK_FALSE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-	depthStencil.depthBoundsTestEnable = VK_FALSE;
-	depthStencil.stencilTestEnable = VK_FALSE;
-
-	VWrap::PipelineCreateInfo create_info{};
-	create_info.extent = m_extent;
-	create_info.render_pass = m_render_pass;
-	create_info.descriptor_set_layout = m_graphics_descriptor_layout;
-	create_info.vertex_input_info = vertexInputInfo;
-	create_info.input_assembly = inputAssembly;
-	create_info.dynamic_state = dynamicState;
-	create_info.rasterizer = rasterizer;
-	create_info.depth_stencil = depthStencil;
-	create_info.subpass = 0;
+	auto create_info = PipelineDefaults::FullscreenQuad(
+		m_render_pass, m_graphics_descriptor_layout, m_extent);
 
 	m_graphics_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_code, frag_code);
 }

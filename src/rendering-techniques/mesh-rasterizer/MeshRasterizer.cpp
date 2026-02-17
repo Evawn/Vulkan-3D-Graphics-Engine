@@ -1,4 +1,5 @@
 #include "MeshRasterizer.h"
+#include "PipelineDefaults.h"
 #include "config.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -16,7 +17,14 @@ void MeshRasterizer::RegisterPasses(
 	m_graphics_pool = ctx.graphicsPool;
 	m_camera = ctx.camera;
 
-	CreateDescriptors(ctx.maxFramesInFlight);
+	auto desc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.Build(ctx.maxFramesInFlight);
+	m_descriptor_set_layout = desc.layout;
+	m_descriptor_pool = desc.pool;
+	m_descriptor_sets = desc.sets;
+
 	m_sampler = VWrap::Sampler::Create(m_device);
 
 	VWrap::CommandBuffer::UploadTextureToImage(m_graphics_pool, m_allocator, m_texture_image, TEXTURE_PATH.c_str());
@@ -200,77 +208,19 @@ void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pa
 	vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 	vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
 
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-	VkPipelineDynamicStateCreateInfo dynamicState{};
-	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	std::array<VkDynamicState, 2> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-	dynamicState.pDynamicStates = dynamicStates.data();
-
-	VkPipelineRasterizationStateCreateInfo rasterizer{};
-	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.depthClampEnable = VK_FALSE;
-	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = m_wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-	rasterizer.depthBiasEnable = VK_FALSE;
-
-	VkPipelineDepthStencilStateCreateInfo depthStencil{};
-	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_TRUE;
-	depthStencil.depthWriteEnable = VK_TRUE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-	depthStencil.depthBoundsTestEnable = VK_FALSE;
-	depthStencil.stencilTestEnable = VK_FALSE;
-
 	VWrap::PipelineCreateInfo create_info{};
 	create_info.extent = m_extent;
 	create_info.render_pass = render_pass;
 	create_info.descriptor_set_layout = m_descriptor_set_layout;
 	create_info.vertex_input_info = vertexInputInfo;
-	create_info.input_assembly = inputAssembly;
-	create_info.dynamic_state = dynamicState;
-	create_info.rasterizer = rasterizer;
-	create_info.depth_stencil = depthStencil;
+	create_info.input_assembly = PipelineDefaults::TriangleList();
+	create_info.dynamic_state = PipelineDefaults::DynamicViewportScissor();
+	create_info.rasterizer = PipelineDefaults::BackCullFill(m_wireframe);
+	create_info.depth_stencil = PipelineDefaults::DepthTestWrite();
 	create_info.push_constant_ranges = {};
 	create_info.subpass = 0;
 
 	m_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_shader_code, frag_shader_code);
-}
-
-void MeshRasterizer::CreateDescriptors(int max_sets)
-{
-	VkDescriptorSetLayoutBinding uboLayoutBinding{};
-	uboLayoutBinding.binding = 0;
-	uboLayoutBinding.descriptorCount = 1;
-	uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-	VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-	samplerLayoutBinding.binding = 1;
-	samplerLayoutBinding.descriptorCount = 1;
-	samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	std::vector<VkDescriptorSetLayoutBinding> bindings = { uboLayoutBinding, samplerLayoutBinding };
-	m_descriptor_set_layout = VWrap::DescriptorSetLayout::Create(m_device, bindings);
-
-	std::vector<VkDescriptorPoolSize> poolSizes(2);
-	poolSizes[0].descriptorCount = max_sets;
-	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	poolSizes[1].descriptorCount = max_sets;
-	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-
-	m_descriptor_pool = VWrap::DescriptorPool::Create(m_device, poolSizes, max_sets, 0);
-
-	std::vector<std::shared_ptr<VWrap::DescriptorSetLayout>> layouts(static_cast<size_t>(max_sets), m_descriptor_set_layout);
-	m_descriptor_sets = VWrap::DescriptorSet::CreateMany(m_descriptor_pool, layouts);
 }
 
 void MeshRasterizer::UpdateUniformBuffer(uint32_t frame) {

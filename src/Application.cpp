@@ -18,8 +18,16 @@ void Application::Init() {
 	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
 	m_offscreen_extent = extent;
 
-	// Create render graph
-	m_render_graph = RenderGraph(m_vk.device, m_vk.allocator);
+	// Create renderer
+	RendererConfig rendererConfig{};
+	rendererConfig.device = m_vk.device;
+	rendererConfig.allocator = m_vk.allocator;
+	rendererConfig.msaaSamples = m_vk.msaaSamples;
+	rendererConfig.swapchainFormat = m_vk.frameController->GetSwapchain()->GetFormat();
+	rendererConfig.depthFormat = VWrap::FindDepthFormat(m_vk.physicalDevice->Get());
+	rendererConfig.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
+	m_renderer = Renderer(rendererConfig);
+
 	m_scene_sampler = VWrap::Sampler::Create(m_vk.device);
 
 	spdlog::get("App")->debug("Creating camera...");
@@ -210,46 +218,18 @@ void Application::InitImGui() {
 }
 
 void Application::BuildRenderGraph() {
-	m_render_graph.Clear();
-
-	VkFormat format = m_vk.frameController->GetSwapchain()->GetFormat();
-
-	// Scene images (MSAA color, depth, resolve)
-	m_scene_color = m_render_graph.CreateImage("scene_color", {
-		m_offscreen_extent.width, m_offscreen_extent.height, 1,
-		format, m_vk.msaaSamples });
-	m_scene_depth = m_render_graph.CreateImage("scene_depth", {
-		m_offscreen_extent.width, m_offscreen_extent.height, 1,
-		VWrap::FindDepthFormat(m_vk.physicalDevice->Get()),
-		m_vk.msaaSamples });
-	m_scene_resolve = m_render_graph.CreateImage("scene_resolve", {
-		m_offscreen_extent.width, m_offscreen_extent.height, 1,
-		format });
-
-	// Register technique passes
 	auto ctx = BuildRenderContext();
-	m_renderers[m_active_renderer_index]->RegisterPasses(
-		m_render_graph, ctx, m_scene_color, m_scene_depth, m_scene_resolve);
+	auto swapchainView = m_vk.frameController->GetImageViews()[0];
+	auto swapchainExtent = m_vk.frameController->GetSwapchain()->GetExtent();
 
-	// Import swapchain image (updated per-frame)
-	m_swapchain = m_render_graph.ImportImage("swapchain",
-		m_vk.frameController->GetImageViews()[0],
-		format, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-		m_vk.frameController->GetSwapchain()->GetExtent());
-
-	// UI pass: renders ImGui to swapchain
-	m_render_graph.AddGraphicsPass("UI")
-		.SetColorAttachment(m_swapchain, LoadOp::Clear, StoreOp::Store,
-			0.059f, 0.059f, 0.059f, 1.0f)
-		.Read(m_scene_resolve)
-		.SetRecord([this](PassContext& ctx) {
+	m_renderer.Build(
+		m_renderers[m_active_renderer_index].get(),
+		ctx,
+		swapchainView,
+		swapchainExtent,
+		[this](PassContext& ctx) {
 			m_gui_renderer->CmdDraw(ctx.cmd);
 		});
-
-	m_render_graph.Compile();
-
-	// Post-compile: techniques write descriptors for graph-allocated images
-	m_renderers[m_active_renderer_index]->WriteGraphDescriptors(m_render_graph);
 
 	RegisterSceneTexture();
 }
@@ -328,9 +308,7 @@ void Application::DrawFrame() {
 				m_scene_texture = VK_NULL_HANDLE;
 			}
 			m_offscreen_extent = desired;
-			m_render_graph.Resize(desired);
-			m_renderers[m_active_renderer_index]->WriteGraphDescriptors(m_render_graph);
-			m_renderers[m_active_renderer_index]->OnResize(desired, m_render_graph);
+			m_renderer.OnViewportResize(desired, m_renderers[m_active_renderer_index].get());
 			m_camera->SetAspect((float)desired.width / (float)desired.height);
 			RegisterSceneTexture();
 			m_viewport_panel.SetTextureID(m_scene_texture);
@@ -347,12 +325,12 @@ void Application::DrawFrame() {
 	m_last_metrics = m_gpu_profiler->GetMetrics(frame_index);
 
 	// Update swapchain import for current image
-	m_render_graph.UpdateImport(m_swapchain, m_vk.frameController->GetImageViews()[image_index]);
+	m_renderer.UpdateSwapchainView(m_vk.frameController->GetImageViews()[image_index]);
 
 	command_buffer->Begin();
 
 	m_gpu_profiler->CmdBegin(command_buffer, frame_index);
-	m_render_graph.Execute(command_buffer, frame_index);
+	m_renderer.Execute(command_buffer, frame_index);
 	m_gpu_profiler->CmdEnd(command_buffer, frame_index);
 
 	if (vkEndCommandBuffer(command_buffer->Get()) != VK_SUCCESS) {
@@ -419,9 +397,11 @@ void Application::SwitchRenderer(size_t index) {
 }
 
 void Application::CaptureScreenshot() {
-	auto resolveImage = m_render_graph.GetImage(m_scene_resolve);
-	auto resolveDesc = m_render_graph.GetImageDesc(m_scene_resolve);
-	VkFormat format = m_render_graph.GetImageFormat(m_scene_resolve);
+	auto& graph = m_renderer.GetGraph();
+	auto sceneResolve = m_renderer.GetSceneResolve();
+	auto resolveImage = graph.GetImage(sceneResolve);
+	auto resolveDesc = graph.GetImageDesc(sceneResolve);
+	VkFormat format = graph.GetImageFormat(sceneResolve);
 	VkExtent2D extent = { resolveDesc.width, resolveDesc.height };
 
 	auto path = ScreenshotCapture::Capture(
@@ -445,7 +425,7 @@ RenderContext Application::BuildRenderContext() const {
 }
 
 void Application::RegisterSceneTexture() {
-	auto resolveView = m_render_graph.GetImageView(m_scene_resolve);
+	auto resolveView = m_renderer.GetGraph().GetImageView(m_renderer.GetSceneResolve());
 	m_scene_texture = ImGui_ImplVulkan_AddTexture(
 		m_scene_sampler->Get(),
 		resolveView->Get(),
