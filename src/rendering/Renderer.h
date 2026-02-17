@@ -2,6 +2,7 @@
 
 #include "RenderGraph.h"
 #include "RenderTechnique.h"
+#include "FrameController.h"
 #include "Sampler.h"
 #include <functional>
 #include <memory>
@@ -45,6 +46,16 @@ public:
 
 	// Handle viewport/offscreen resize (scene images change, swapchain unchanged).
 	void OnViewportResize(VkExtent2D newExtent, RenderTechnique* technique);
+
+	// Convenience: fetches swapchain info from FrameController internally.
+	void Rebuild(
+		RenderTechnique* technique,
+		const RenderContext& ctx,
+		VWrap::FrameController& fc,
+		std::function<void(PassContext&)> presentRecordFn);
+
+	// Direct access to the resolved scene image view.
+	std::shared_ptr<VWrap::ImageView> GetSceneResolveView() const;
 
 	// Access to graph resources (for screenshot capture, ImGui texture registration).
 	RenderGraph& GetGraph() { return m_graph; }

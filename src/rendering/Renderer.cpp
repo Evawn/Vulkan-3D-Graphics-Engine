@@ -72,3 +72,18 @@ void Renderer::OnViewportResize(VkExtent2D newExtent, RenderTechnique* technique
 	technique->WriteGraphDescriptors(m_graph);
 	technique->OnResize(newExtent, m_graph);
 }
+
+void Renderer::Rebuild(
+	RenderTechnique* technique,
+	const RenderContext& ctx,
+	VWrap::FrameController& fc,
+	std::function<void(PassContext&)> presentRecordFn)
+{
+	auto swapchainView = fc.GetImageViews()[0];
+	auto swapchainExtent = fc.GetSwapchain()->GetExtent();
+	Build(technique, ctx, swapchainView, swapchainExtent, std::move(presentRecordFn));
+}
+
+std::shared_ptr<VWrap::ImageView> Renderer::GetSceneResolveView() const {
+	return m_graph.GetImageView(m_sceneResolve);
+}

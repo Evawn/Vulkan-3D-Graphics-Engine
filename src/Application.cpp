@@ -1,7 +1,5 @@
 #include "Application.h"
 #include "ShaderCompiler.h"
-#include "Log.h"
-#include "UIStyle.h"
 #include "ScreenshotCapture.h"
 
 void Application::Run() {
@@ -11,9 +9,11 @@ void Application::Run() {
 }
 
 void Application::Init() {
-	InitWindow();
+	m_window = Window::Create("Vulkan");
 	InitVulkan();
-	InitImGui();
+
+	// Editor (ImGui + panels)
+	m_editor.InitImGui(m_vk, m_presentation_render_pass, *m_window);
 
 	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
 	m_offscreen_extent = extent;
@@ -27,8 +27,6 @@ void Application::Init() {
 	rendererConfig.depthFormat = VWrap::FindDepthFormat(m_vk.physicalDevice->Get());
 	rendererConfig.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
 	m_renderer = Renderer(rendererConfig);
-
-	m_scene_sampler = VWrap::Sampler::Create(m_vk.device);
 
 	spdlog::get("App")->debug("Creating camera...");
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
@@ -46,229 +44,75 @@ void Application::Init() {
 	spdlog::get("App")->debug("GPU profiler created");
 
 	// Camera controller owns input polling and camera movement
-	Input::Init(m_glfw_window.get()[0]);
+	Input::Init(m_window->GetRaw());
 	m_camera_controller = CameraController::Create(m_camera);
-	m_camera_controller->SetReloadCallback([this]() { HotReloadShaders(); });
+	m_camera_controller->SetReloadCallback([this]() {
+		PushEvent({AppEventType::HotReloadShaders});
+	});
 
-	InitPanels();
-}
+	// Initialize panels (needs camera, controller, renderers)
+	m_editor.InitPanels(&m_renderers, &m_active_renderer_index, m_camera, m_camera_controller, m_vk);
 
-void Application::InitPanels() {
-	// Viewport panel
-	m_viewport_panel.SetTextureID(m_scene_texture);
-	m_gui_renderer->RegisterPanel("Viewport", [this]() { m_viewport_panel.Draw(); });
-
-	// Metrics panel
-	m_metrics_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
-	VkPhysicalDeviceMemoryProperties memProps;
-	vkGetPhysicalDeviceMemoryProperties(m_vk.physicalDevice->Get(), &memProps);
-	m_metrics_panel.SetAllocator(m_vk.allocator->Get(), memProps.memoryHeapCount);
-	m_metrics_panel.SetWireframeCallback([this]() {
+	// Wire editor callbacks to event queue
+	m_editor.SetReloadCallback([this]() {
+		PushEvent({AppEventType::HotReloadShaders});
+	});
+	m_editor.SetSwitchCallback([this](size_t idx) {
+		PushEvent({AppEventType::SwitchRenderer, idx});
+	});
+	m_editor.SetScreenshotCallback([this]() {
+		PushEvent({AppEventType::CaptureScreenshot});
+	});
+	m_editor.SetWireframeCallback([this]() {
 		vkDeviceWaitIdle(m_vk.device->Get());
 		auto ctx = BuildRenderContext();
 		m_renderers[m_active_renderer_index]->RecreatePipeline(ctx);
 	});
-	m_gui_renderer->RegisterPanel("Metrics", [this]() { m_metrics_panel.Draw(); });
 
-	// Output panel
-	m_output_panel.SetSink(Log::GetImGuiSink());
-	m_gui_renderer->RegisterPanel("Output", [this]() { m_output_panel.Draw(); });
-
-	// Inspector panel
-	m_inspector_panel.SetRenderers(&m_renderers, &m_active_renderer_index);
-	m_inspector_panel.SetReloadCallback([this]() { m_pending_hot_reload = true; });
-	m_inspector_panel.SetSwitchCallback([this](size_t idx) { m_pending_renderer_switch = idx; });
-	m_inspector_panel.SetCamera(m_camera);
-	m_inspector_panel.SetAppControls(m_camera_controller->SensitivityPtr(), m_camera_controller->SpeedPtr());
-	m_inspector_panel.SetScreenshotCallback([this]() { CaptureScreenshot(); });
-	m_gui_renderer->RegisterPanel("Inspector", [this]() { m_inspector_panel.Draw(); });
-}
-
-GLFWmonitor* Application::GetCurrentMonitor(GLFWwindow* window) {
-	int wx, wy, ww, wh;
-	glfwGetWindowPos(window, &wx, &wy);
-	glfwGetWindowSize(window, &ww, &wh);
-
-	int best_overlap = 0;
-	GLFWmonitor* best_monitor = nullptr;
-
-	int monitor_count;
-	GLFWmonitor** monitors = glfwGetMonitors(&monitor_count);
-
-	for (int i = 0; i < monitor_count; ++i) {
-		int mx, my, mw, mh;
-		glfwGetMonitorWorkarea(monitors[i], &mx, &my, &mw, &mh);
-
-		int overlap_x = std::max(0, std::min(wx + ww, mx + mw) - std::max(wx, mx));
-		int overlap_y = std::max(0, std::min(wy + wh, my + mh) - std::max(wy, my));
-		int overlap = overlap_x * overlap_y;
-
-		if (overlap > best_overlap) {
-			best_overlap = overlap;
-			best_monitor = monitors[i];
-		}
-	}
-
-	return best_monitor ? best_monitor : glfwGetPrimaryMonitor();
-}
-
-void Application::InitWindow() {
-	glfwInit();
-	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-
-	// Create a small hidden window; the OS decides which display to place it on
-	GLFWwindow* raw_window = glfwCreateWindow(800, 600, "Vulkan", nullptr, nullptr);
-	if (!raw_window) {
-		throw std::runtime_error("Failed to create GLFW window");
-	}
-	m_glfw_window = std::make_shared<GLFWwindow*>(raw_window);
-
-	// Size to 80% of the monitor work area the OS placed us on, centered
-	GLFWmonitor* monitor = GetCurrentMonitor(raw_window);
-	int work_x, work_y, work_w, work_h;
-	glfwGetMonitorWorkarea(monitor, &work_x, &work_y, &work_w, &work_h);
-
-	int win_w = static_cast<int>(work_w * 0.8f);
-	int win_h = static_cast<int>(work_h * 0.8f);
-	glfwSetWindowSize(raw_window, win_w, win_h);
-	glfwSetWindowPos(raw_window, work_x + (work_w - win_w) / 2, work_y + (work_h - win_h) / 2);
-
-	glfwSetWindowUserPointer(raw_window, this);
-	glfwSetFramebufferSizeCallback(raw_window, glfw_FramebufferResizeCallback);
-	glfwSetWindowFocusCallback(raw_window, glfw_WindowFocusCallback);
-	glfwSetWindowContentScaleCallback(raw_window, glfw_ContentScaleCallback);
-
-	glfwShowWindow(raw_window);
-}
-
-void Application::glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height) {
-	auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
-	app->m_vk.frameController->SetResized(true);
-}
-
-void Application::glfw_WindowFocusCallback(GLFWwindow* window, int focused) {
-}
-
-void Application::glfw_ContentScaleCallback(GLFWwindow* window, float xscale, float yscale) {
-	auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
-	app->m_pending_dpi_scale = xscale;
-	app->m_pending_dpi_update = true;
+	m_state = AppState::Running;
 }
 
 void Application::InitVulkan() {
-	m_vk.instance = VWrap::Instance::Create(ENABLE_VALIDATION_LAYERS);
-	m_vk.surface = VWrap::Surface::Create(m_vk.instance, m_glfw_window);
-	m_vk.physicalDevice = VWrap::PhysicalDevice::Pick(m_vk.instance, m_vk.surface);
-	m_vk.device = VWrap::Device::Create(m_vk.physicalDevice, ENABLE_VALIDATION_LAYERS);
-	m_vk.allocator = VWrap::Allocator::Create(m_vk.instance, m_vk.physicalDevice, m_vk.device);
+	m_vk = VWrap::VulkanContext::Create(m_window->GetHandle(), ENABLE_VALIDATION_LAYERS, MAX_FRAMES_IN_FLIGHT);
 
-	VWrap::QueueFamilyIndices indices = m_vk.physicalDevice->FindQueueFamilies();
-
-	m_vk.graphicsQueue = VWrap::Queue::Create(m_vk.device, indices.graphicsFamily.value());
-	m_vk.presentQueue = VWrap::Queue::Create(m_vk.device, indices.presentFamily.value());
-	m_vk.transferQueue = VWrap::Queue::Create(m_vk.device, indices.transferFamily.value());
-	m_vk.computeQueue = VWrap::Queue::Create(m_vk.device, indices.computeFamily.value());
-	m_vk.graphicsCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.graphicsQueue);
-	m_vk.transferCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.transferQueue);
-	m_vk.computeCommandPool = VWrap::CommandPool::Create(m_vk.device, m_vk.computeQueue);
-
-	m_vk.frameController = VWrap::FrameController::Create(m_vk.device, m_vk.surface, m_vk.graphicsCommandPool, m_vk.presentQueue, MAX_FRAMES_IN_FLIGHT);
 	m_vk.frameController->SetResizeCallback([this]() { Resize(); });
 
-	m_vk.msaaSamples = m_vk.physicalDevice->GetMaxUsableSampleCount();
+	m_window->SetFramebufferResizeCallback([this]() {
+		m_vk.frameController->SetResized(true);
+	});
+	m_window->SetContentScaleCallback([this](float scale) {
+		PushEvent({AppEventType::DpiChanged, 0, scale});
+	});
 
 	VkFormat swapchainFormat = m_vk.frameController->GetSwapchain()->GetFormat();
-
-	// Keep presentation render pass for ImGui init compatibility
 	m_presentation_render_pass = VWrap::RenderPass::CreatePresentation(m_vk.device, swapchainFormat);
 }
 
-void Application::InitImGui() {
-	m_gui_renderer = GUIRenderer::Create(m_vk.device);
-
-	VWrap::QueueFamilyIndices indices = m_vk.physicalDevice->FindQueueFamilies();
-	ImGui_ImplGlfw_InitForVulkan(m_glfw_window.get()[0], true);
-
-	ImGui_ImplVulkan_InitInfo init_info{};
-	init_info.Instance = m_vk.instance->Get();
-	init_info.PhysicalDevice = m_vk.physicalDevice->Get();
-	init_info.Device = m_vk.device->Get();
-	init_info.QueueFamily = indices.graphicsFamily.value();
-	init_info.Queue = m_vk.graphicsQueue->Get();
-	init_info.PipelineCache = VK_NULL_HANDLE;
-	init_info.DescriptorPool = m_gui_renderer->GetDescriptorPool()->Get();
-	init_info.Subpass = 0;
-	init_info.MinImageCount = m_vk.frameController->GetSwapchain()->Size();
-	init_info.ImageCount = m_vk.frameController->GetSwapchain()->Size();
-	init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-	init_info.Allocator = VK_NULL_HANDLE;
-	init_info.CheckVkResultFn = check_vk_result;
-	ImGui_ImplVulkan_Init(&init_info, m_presentation_render_pass->Get());
-
-	// Load font at correct DPI-scaled size (fixes fuzzy text)
-	float dpi_scale;
-	glfwGetWindowContentScale(m_glfw_window.get()[0], &dpi_scale, nullptr);
-	m_gui_renderer->LoadFonts(dpi_scale);
-	ImGui_ImplVulkan_DestroyFontsTexture();
-	ImGui_ImplVulkan_CreateFontsTexture();
-
-	UIStyle::Apply();
-}
-
 void Application::BuildRenderGraph() {
-	auto ctx = BuildRenderContext();
-	auto swapchainView = m_vk.frameController->GetImageViews()[0];
-	auto swapchainExtent = m_vk.frameController->GetSwapchain()->GetExtent();
-
-	m_renderer.Build(
+	m_renderer.Rebuild(
 		m_renderers[m_active_renderer_index].get(),
-		ctx,
-		swapchainView,
-		swapchainExtent,
+		BuildRenderContext(),
+		*m_vk.frameController,
 		[this](PassContext& ctx) {
-			m_gui_renderer->CmdDraw(ctx.cmd);
+			m_editor.CmdDraw(ctx.cmd);
 		});
 
-	RegisterSceneTexture();
+	m_editor.RegisterSceneTexture(m_renderer.GetSceneResolveView());
 }
 
 void Application::MainLoop() {
 	auto last_time = std::chrono::high_resolution_clock::now();
 
-	while (!glfwWindowShouldClose(m_glfw_window.get()[0])) {
+	while (!m_window->ShouldClose()) {
 		auto current_time = std::chrono::high_resolution_clock::now();
 		float dt = std::chrono::duration<float, std::chrono::seconds::period>(current_time - last_time).count();
 		last_time = current_time;
 
 		m_camera_controller->Update(dt);
-
-		if (m_pending_hot_reload) {
-			m_pending_hot_reload = false;
-			HotReloadShaders();
-		}
-
-		if (m_pending_renderer_switch.has_value()) {
-			SwitchRenderer(m_pending_renderer_switch.value());
-			m_pending_renderer_switch.reset();
-		}
-
-		if (m_pending_dpi_update) {
-			m_pending_dpi_update = false;
-			float new_scale = m_pending_dpi_scale;
-
-			vkDeviceWaitIdle(m_vk.device->Get());
-
-			m_gui_renderer->LoadFonts(new_scale);
-			ImGui_ImplVulkan_DestroyFontsTexture();
-			ImGui_ImplVulkan_CreateFontsTexture();
-
-			UIStyle::Apply();
-		}
+		ProcessEvents();
 
 		// Click to capture viewport
-		if (!m_camera_controller->IsFocused() && m_viewport_panel.WasClicked()) {
+		if (!m_camera_controller->IsFocused() && m_editor.ViewportWasClicked()) {
 			m_camera_controller->SetFocused(true);
 		}
 
@@ -278,40 +122,72 @@ void Application::MainLoop() {
 			ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
 		}
 
-		m_viewport_panel.SetTextureID(m_scene_texture);
-
-		m_gui_renderer->BeginFrame();
+		m_editor.UpdateViewportTexture();
+		m_editor.BeginFrame();
 		DrawFrame();
-
-		m_metrics_panel.Update(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
+		m_editor.UpdateMetrics(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
 	}
 	vkDeviceWaitIdle(m_vk.device->Get());
 }
 
 void Application::Cleanup() {
-	ImGui_ImplVulkan_Shutdown();
-	ImGui_ImplGlfw_Shutdown();
-	ImGui::DestroyContext();
-	glfwDestroyWindow(m_glfw_window.get()[0]);
-	glfwTerminate();
+	m_state = AppState::ShuttingDown;
+	m_editor.Shutdown();
+	m_window->Destroy();
+}
+
+void Application::PushEvent(AppEvent event) {
+	m_events.push_back(event);
+}
+
+void Application::ProcessEvents() {
+	if (m_events.empty()) return;
+
+	// GPU-mutating events require device idle
+	bool needs_idle = false;
+	for (const auto& e : m_events) {
+		if (e.type == AppEventType::HotReloadShaders ||
+			e.type == AppEventType::SwitchRenderer ||
+			e.type == AppEventType::DpiChanged) {
+			needs_idle = true;
+			break;
+		}
+	}
+	if (needs_idle) {
+		vkDeviceWaitIdle(m_vk.device->Get());
+	}
+
+	for (const auto& event : m_events) {
+		switch (event.type) {
+			case AppEventType::HotReloadShaders:
+				HotReloadShaders();
+				break;
+			case AppEventType::SwitchRenderer:
+				SwitchRenderer(event.index);
+				break;
+			case AppEventType::DpiChanged:
+				m_editor.OnDpiChanged(event.scale);
+				break;
+			case AppEventType::CaptureScreenshot:
+				CaptureScreenshot();
+				break;
+		}
+	}
+	m_events.clear();
 }
 
 void Application::DrawFrame() {
 
 	// Handle viewport resize from panel
-	if (m_viewport_panel.WasResized()) {
-		VkExtent2D desired = m_viewport_panel.GetDesiredExtent();
+	if (m_editor.ViewportWasResized()) {
+		VkExtent2D desired = m_editor.GetDesiredViewportExtent();
 		if (desired.width > 0 && desired.height > 0) {
 			vkDeviceWaitIdle(m_vk.device->Get());
-			if (m_scene_texture != VK_NULL_HANDLE) {
-				ImGui_ImplVulkan_RemoveTexture(m_scene_texture);
-				m_scene_texture = VK_NULL_HANDLE;
-			}
+			m_editor.RemoveSceneTexture();
 			m_offscreen_extent = desired;
 			m_renderer.OnViewportResize(desired, m_renderers[m_active_renderer_index].get());
 			m_camera->SetAspect((float)desired.width / (float)desired.height);
-			RegisterSceneTexture();
-			m_viewport_panel.SetTextureID(m_scene_texture);
+			m_editor.RegisterSceneTexture(m_renderer.GetSceneResolveView());
 		}
 	}
 
@@ -369,8 +245,6 @@ void Application::HotReloadShaders() {
 		return;
 	}
 
-	vkDeviceWaitIdle(m_vk.device->Get());
-
 	auto ctx = BuildRenderContext();
 	renderer->RecreatePipeline(ctx);
 	logger->info("Pipeline recreated successfully");
@@ -382,16 +256,9 @@ void Application::SwitchRenderer(size_t index) {
 	auto logger = spdlog::get("App");
 	logger->info("Switching renderer to: {}", m_renderers[index]->GetName());
 
-	vkDeviceWaitIdle(m_vk.device->Get());
-
-	if (m_scene_texture != VK_NULL_HANDLE) {
-		ImGui_ImplVulkan_RemoveTexture(m_scene_texture);
-		m_scene_texture = VK_NULL_HANDLE;
-	}
-
+	m_editor.RemoveSceneTexture();
 	m_active_renderer_index = index;
 	BuildRenderGraph();
-	m_viewport_panel.SetTextureID(m_scene_texture);
 
 	logger->info("Switched to: {}", m_renderers[index]->GetName());
 }
@@ -408,7 +275,7 @@ void Application::CaptureScreenshot() {
 		m_vk.device, m_vk.allocator, m_vk.graphicsCommandPool,
 		resolveImage, format, extent);
 	if (!path.empty()) {
-		m_inspector_panel.SetLastScreenshotPath(path);
+		m_editor.SetLastScreenshotPath(path);
 	}
 }
 
@@ -422,12 +289,4 @@ RenderContext Application::BuildRenderContext() const {
 	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
 	ctx.camera = m_camera;
 	return ctx;
-}
-
-void Application::RegisterSceneTexture() {
-	auto resolveView = m_renderer.GetGraph().GetImageView(m_renderer.GetSceneResolve());
-	m_scene_texture = ImGui_ImplVulkan_AddTexture(
-		m_scene_sampler->Get(),
-		resolveView->Get(),
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }

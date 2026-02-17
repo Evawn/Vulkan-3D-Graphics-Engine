@@ -30,6 +30,10 @@ struct VulkanContext {
 	std::shared_ptr<CommandPool> computeCommandPool;
 
 	VkSampleCountFlagBits msaaSamples;
+
+	// Factory: creates all Vulkan objects and populates the context.
+	static VulkanContext Create(std::shared_ptr<GLFWwindow*> window,
+								bool enableValidation, uint32_t maxFramesInFlight);
 };
 
 } // namespace VWrap
