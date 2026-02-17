@@ -5,11 +5,23 @@
 #include "Framebuffer.h"
 #include <unordered_map>
 
+struct ColorAttachmentInfo {
+	ImageHandle target;
+	LoadOp load = LoadOp::DontCare;
+	StoreOp store = StoreOp::DontCare;
+	VkClearColorValue clearColor{};
+};
+
 class GraphicsPassBuilder : public PassBuilderBase {
 public:
 	GraphicsPassBuilder(const std::string& name, RenderGraph& graph);
 
+	// Color attachments — SetColorAttachment replaces all with a single one (backwards compat),
+	// AddColorAttachment appends (for MRT).
 	GraphicsPassBuilder& SetColorAttachment(
+		ImageHandle target, LoadOp load, StoreOp store,
+		float r = 0, float g = 0, float b = 0, float a = 1);
+	GraphicsPassBuilder& AddColorAttachment(
 		ImageHandle target, LoadOp load, StoreOp store,
 		float r = 0, float g = 0, float b = 0, float a = 1);
 	GraphicsPassBuilder& SetDepthAttachment(
@@ -18,6 +30,7 @@ public:
 	GraphicsPassBuilder& SetResolveTarget(ImageHandle target);
 	GraphicsPassBuilder& Read(ImageHandle resource);
 	GraphicsPassBuilder& Read(BufferHandle resource);
+	GraphicsPassBuilder& Write(BufferHandle resource);
 	GraphicsPassBuilder& SetRecord(std::function<void(PassContext&)> fn);
 
 	VkRenderPass GetRenderPass();
@@ -26,11 +39,8 @@ public:
 private:
 	friend class RenderGraph;
 
-	// Color attachment
-	ImageHandle m_colorTarget;
-	LoadOp m_colorLoad = LoadOp::DontCare;
-	StoreOp m_colorStore = StoreOp::DontCare;
-	VkClearColorValue m_clearColor{};
+	// Color attachments (MRT)
+	std::vector<ColorAttachmentInfo> m_colorAttachments;
 
 	// Depth attachment
 	ImageHandle m_depthTarget;
@@ -38,6 +48,9 @@ private:
 	LoadOp m_depthLoad = LoadOp::DontCare;
 	StoreOp m_depthStore = StoreOp::DontCare;
 	VkClearDepthStencilValue m_clearDepthStencil{1.0f, 0};
+
+	// Buffer writes
+	std::vector<BufferHandle> m_writeBuffers;
 
 	// Resolve target
 	ImageHandle m_resolveTarget;
@@ -48,6 +61,6 @@ private:
 	std::unordered_map<VkImageView, std::shared_ptr<VWrap::Framebuffer>> m_framebufferCache;
 	std::shared_ptr<VWrap::Framebuffer> m_activeFramebuffer;
 
-	void CreateRenderPass(VkImageLayout colorFinalLayout, VkImageLayout resolveFinalLayout);
+	void CreateRenderPass(const std::vector<VkImageLayout>& colorFinalLayouts, VkImageLayout resolveFinalLayout);
 	void CreateFramebuffer();
 };

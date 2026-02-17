@@ -8,10 +8,16 @@ GraphicsPassBuilder& GraphicsPassBuilder::SetColorAttachment(
 	ImageHandle target, LoadOp load, StoreOp store,
 	float r, float g, float b, float a)
 {
-	m_colorTarget = target;
-	m_colorLoad = load;
-	m_colorStore = store;
-	m_clearColor = { { r, g, b, a } };
+	m_colorAttachments.clear();
+	m_colorAttachments.push_back({ target, load, store, { { r, g, b, a } } });
+	return *this;
+}
+
+GraphicsPassBuilder& GraphicsPassBuilder::AddColorAttachment(
+	ImageHandle target, LoadOp load, StoreOp store,
+	float r, float g, float b, float a)
+{
+	m_colorAttachments.push_back({ target, load, store, { { r, g, b, a } } });
 	return *this;
 }
 
@@ -43,6 +49,11 @@ GraphicsPassBuilder& GraphicsPassBuilder::Read(BufferHandle resource) {
 	return *this;
 }
 
+GraphicsPassBuilder& GraphicsPassBuilder::Write(BufferHandle resource) {
+	m_writeBuffers.push_back(resource);
+	return *this;
+}
+
 GraphicsPassBuilder& GraphicsPassBuilder::SetRecord(std::function<void(PassContext&)> fn) {
 	m_recordFn = std::move(fn);
 	return *this;
@@ -67,15 +78,17 @@ static VkAttachmentStoreOp ToVk(StoreOp op) {
 
 VkRenderPass GraphicsPassBuilder::GetRenderPass() {
 	if (!m_renderPass) {
-		VkImageLayout colorFinal = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		VkImageLayout resolveFinal = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-		const auto& colorRes = m_graph.GetImageResource(m_colorTarget);
-		if (colorRes.imported) {
-			colorFinal = colorRes.externalLayout;
+		std::vector<VkImageLayout> colorFinals;
+		for (const auto& ca : m_colorAttachments) {
+			const auto& colorRes = m_graph.GetImageResource(ca.target);
+			if (colorRes.imported) {
+				colorFinals.push_back(colorRes.externalLayout);
+			} else {
+				colorFinals.push_back(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+			}
 		}
-
-		CreateRenderPass(colorFinal, resolveFinal);
+		VkImageLayout resolveFinal = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		CreateRenderPass(colorFinals, resolveFinal);
 	}
 	return m_renderPass->Get();
 }
@@ -85,35 +98,40 @@ std::shared_ptr<VWrap::RenderPass> GraphicsPassBuilder::GetRenderPassPtr() {
 	return m_renderPass;
 }
 
-void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkImageLayout resolveFinalLayout) {
+void GraphicsPassBuilder::CreateRenderPass(
+	const std::vector<VkImageLayout>& colorFinalLayouts,
+	VkImageLayout resolveFinalLayout)
+{
 	auto device = m_graph.GetDevice();
-	const auto& colorRes = m_graph.GetImageResource(m_colorTarget);
 
 	std::vector<VkAttachmentDescription> attachments;
 	std::vector<VkAttachmentReference> colorRefs;
 	VkAttachmentReference depthRef{};
 	bool hasDepthRef = false;
-	VkAttachmentReference resolveRef{};
-	bool hasResolveRef = false;
 
-	// Attachment 0: Color
-	VkAttachmentDescription colorAttach{};
-	colorAttach.format = colorRes.desc.format;
-	colorAttach.samples = colorRes.desc.samples;
-	colorAttach.loadOp = ToVk(m_colorLoad);
-	colorAttach.storeOp = ToVk(m_colorStore);
-	colorAttach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttach.finalLayout = colorFinalLayout;
-	attachments.push_back(colorAttach);
+	// N color attachments
+	for (size_t c = 0; c < m_colorAttachments.size(); c++) {
+		const auto& ca = m_colorAttachments[c];
+		const auto& colorRes = m_graph.GetImageResource(ca.target);
 
-	VkAttachmentReference colorRef{};
-	colorRef.attachment = 0;
-	colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	colorRefs.push_back(colorRef);
+		VkAttachmentDescription colorAttach{};
+		colorAttach.format = colorRes.desc.format;
+		colorAttach.samples = colorRes.desc.samples;
+		colorAttach.loadOp = ToVk(ca.load);
+		colorAttach.storeOp = ToVk(ca.store);
+		colorAttach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttach.finalLayout = colorFinalLayouts[c];
 
-	uint32_t nextAttachment = 1;
+		uint32_t attachIdx = static_cast<uint32_t>(attachments.size());
+		attachments.push_back(colorAttach);
+
+		VkAttachmentReference ref{};
+		ref.attachment = attachIdx;
+		ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorRefs.push_back(ref);
+	}
 
 	// Depth attachment (optional)
 	if (m_hasDepth) {
@@ -127,14 +145,16 @@ void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkIma
 		depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		depthAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		depthAttach.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-		attachments.push_back(depthAttach);
 
-		depthRef.attachment = nextAttachment++;
+		depthRef.attachment = static_cast<uint32_t>(attachments.size());
 		depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		attachments.push_back(depthAttach);
 		hasDepthRef = true;
 	}
 
-	// Resolve attachment (optional, auto-added when MSAA)
+	// Resolve attachment — resolves the first color attachment only.
+	// Vulkan requires pResolveAttachments to have colorAttachmentCount entries if non-null.
+	std::vector<VkAttachmentReference> resolveRefs;
 	if (m_hasResolve) {
 		const auto& resolveRes = m_graph.GetImageResource(m_resolveTarget);
 		VkAttachmentDescription resolveAttach{};
@@ -146,11 +166,14 @@ void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkIma
 		resolveAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		resolveAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		resolveAttach.finalLayout = resolveFinalLayout;
+
+		uint32_t resolveAttachIdx = static_cast<uint32_t>(attachments.size());
 		attachments.push_back(resolveAttach);
 
-		resolveRef.attachment = nextAttachment++;
-		resolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-		hasResolveRef = true;
+		// Build resolve refs: first color attachment resolves, rest are VK_ATTACHMENT_UNUSED
+		resolveRefs.resize(colorRefs.size(), { VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED });
+		resolveRefs[0].attachment = resolveAttachIdx;
+		resolveRefs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	}
 
 	VkSubpassDescription subpass{};
@@ -158,7 +181,7 @@ void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkIma
 	subpass.colorAttachmentCount = static_cast<uint32_t>(colorRefs.size());
 	subpass.pColorAttachments = colorRefs.data();
 	subpass.pDepthStencilAttachment = hasDepthRef ? &depthRef : nullptr;
-	subpass.pResolveAttachments = hasResolveRef ? &resolveRef : nullptr;
+	subpass.pResolveAttachments = m_hasResolve ? resolveRefs.data() : nullptr;
 
 	std::vector<VkSubpassDependency> dependencies;
 
@@ -178,9 +201,17 @@ void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkIma
 	}
 	dependencies.push_back(startDep);
 
-	// Subpass 0 -> external (if the color/resolve is read downstream as sampled)
-	if (resolveFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
-	    colorFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+	// Subpass 0 -> external (if any color/resolve is read downstream as sampled)
+	bool needsEndDep = (resolveFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	if (!needsEndDep) {
+		for (const auto& layout : colorFinalLayouts) {
+			if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+				needsEndDep = true;
+				break;
+			}
+		}
+	}
+	if (needsEndDep) {
 		VkSubpassDependency endDep{};
 		endDep.srcSubpass = 0;
 		endDep.dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -200,15 +231,23 @@ void GraphicsPassBuilder::CreateRenderPass(VkImageLayout colorFinalLayout, VkIma
 	createInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
 	createInfo.pDependencies = dependencies.data();
 
-	m_renderPass = VWrap::RenderPass::Create(device, createInfo, colorRes.desc.samples);
+	VkSampleCountFlagBits samples = m_colorAttachments.empty()
+		? VK_SAMPLE_COUNT_1_BIT
+		: m_graph.GetImageResource(m_colorAttachments[0].target).desc.samples;
+	m_renderPass = VWrap::RenderPass::Create(device, createInfo, samples);
 }
 
 void GraphicsPassBuilder::CreateFramebuffer() {
 	auto device = m_graph.GetDevice();
-	const auto& colorRes = m_graph.GetImageResource(m_colorTarget);
+	const auto& firstColorRes = m_graph.GetImageResource(m_colorAttachments[0].target);
 
 	std::vector<std::shared_ptr<VWrap::ImageView>> views;
-	views.push_back(colorRes.view);
+
+	// All color attachment views
+	for (const auto& ca : m_colorAttachments) {
+		const auto& colorRes = m_graph.GetImageResource(ca.target);
+		views.push_back(colorRes.view);
+	}
 
 	if (m_hasDepth) {
 		const auto& depthRes = m_graph.GetImageResource(m_depthTarget);
@@ -220,8 +259,8 @@ void GraphicsPassBuilder::CreateFramebuffer() {
 		views.push_back(resolveRes.view);
 	}
 
-	VkExtent2D extent = { colorRes.desc.width, colorRes.desc.height };
+	VkExtent2D extent = { firstColorRes.desc.width, firstColorRes.desc.height };
 	auto fb = VWrap::Framebuffer::Create2D(device, m_renderPass, views, extent);
-	m_framebufferCache[colorRes.view->Get()] = fb;
+	m_framebufferCache[firstColorRes.view->Get()] = fb;
 	m_activeFramebuffer = fb;
 }

@@ -20,6 +20,9 @@ public:
 	                        std::shared_ptr<VWrap::ImageView> view,
 	                        VkFormat format, VkImageLayout externalLayout,
 	                        VkExtent2D extent);
+	BufferHandle ImportBuffer(const std::string& name,
+	                          std::shared_ptr<VWrap::Buffer> buffer,
+	                          VkDeviceSize size);
 
 	// ---- Passes ----
 	GraphicsPassBuilder& AddGraphicsPass(const std::string& name);
@@ -39,11 +42,15 @@ public:
 	ImageDesc GetImageDesc(ImageHandle handle) const;
 	VkFormat GetImageFormat(ImageHandle handle) const;
 
+	std::shared_ptr<VWrap::Buffer> GetBuffer(BufferHandle handle) const;
+	VkBuffer GetVkBuffer(BufferHandle handle) const;
+
 	// ---- Dynamic imports ----
 	void UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageView> view);
 
 	// ---- Internal access for builders ----
 	const ImageResource& GetImageResource(ImageHandle handle) const;
+	const BufferResource& GetBufferResource(BufferHandle handle) const;
 	std::shared_ptr<VWrap::Device> GetDevice() const { return m_device; }
 
 private:
@@ -52,6 +59,7 @@ private:
 
 	// Resources
 	std::vector<ImageResource> m_images;
+	std::vector<BufferResource> m_buffers;
 
 	// Pass storage (unique_ptr for pointer stability)
 	std::vector<std::unique_ptr<GraphicsPassBuilder>> m_graphicsPasses;
@@ -62,13 +70,17 @@ private:
 	std::vector<PassRef> m_executionOrder;
 
 	// Pre-computed barriers per execution step
-	std::vector<std::vector<ImageBarrier>> m_barriers;
+	struct PassBarriers {
+		std::vector<ImageBarrier> imageBarriers;
+		std::vector<BufferBarrier> bufferBarriers;
+	};
+	std::vector<PassBarriers> m_barriers;
 
 	bool m_compiled = false;
 
 	// Internal helpers
 	void AccumulateUsageFlags();
-	void AllocateTransientImages();
+	void AllocateTransientResources();
 	void CreateRenderPasses();
 	void CreateFramebuffers();
 	void ComputeBarriers();

@@ -27,7 +27,31 @@ ImageHandle RenderGraph::CreateImage(const std::string& name, const ImageDesc& d
 
 BufferHandle RenderGraph::CreateBuffer(const std::string& name, const BufferDesc& desc) {
 	BufferHandle handle;
-	handle.id = 0; // TODO: buffer support
+	handle.id = static_cast<uint32_t>(m_buffers.size());
+
+	BufferResource res;
+	res.name = name;
+	res.desc = desc;
+	res.imported = false;
+	res.usageFlags = desc.usage;
+	m_buffers.push_back(std::move(res));
+
+	return handle;
+}
+
+BufferHandle RenderGraph::ImportBuffer(const std::string& name,
+                                       std::shared_ptr<VWrap::Buffer> buffer,
+                                       VkDeviceSize size) {
+	BufferHandle handle;
+	handle.id = static_cast<uint32_t>(m_buffers.size());
+
+	BufferResource res;
+	res.name = name;
+	res.imported = true;
+	res.buffer = buffer;
+	res.desc.size = size;
+	m_buffers.push_back(std::move(res));
+
 	return handle;
 }
 
@@ -111,6 +135,21 @@ VkFormat RenderGraph::GetImageFormat(ImageHandle handle) const {
 	return m_images[handle.id].format;
 }
 
+const BufferResource& RenderGraph::GetBufferResource(BufferHandle handle) const {
+	assert(handle.id < m_buffers.size());
+	return m_buffers[handle.id];
+}
+
+std::shared_ptr<VWrap::Buffer> RenderGraph::GetBuffer(BufferHandle handle) const {
+	assert(handle.id < m_buffers.size());
+	return m_buffers[handle.id].buffer;
+}
+
+VkBuffer RenderGraph::GetVkBuffer(BufferHandle handle) const {
+	assert(handle.id < m_buffers.size());
+	return m_buffers[handle.id].buffer->Get();
+}
+
 void RenderGraph::UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageView> view) {
 	assert(handle.id < m_images.size());
 	assert(m_images[handle.id].imported);
@@ -123,8 +162,14 @@ void RenderGraph::UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageV
 			auto& ref = m_executionOrder[i];
 			if (ref.type == PassType::Graphics) {
 				auto& pass = *m_graphicsPasses[ref.index];
-				if (pass.m_colorTarget.id == handle.id ||
-				    (pass.m_hasResolve && pass.m_resolveTarget.id == handle.id)) {
+				bool referencesHandle = false;
+				for (const auto& ca : pass.m_colorAttachments) {
+					if (ca.target.id == handle.id) { referencesHandle = true; break; }
+				}
+				if (!referencesHandle && pass.m_hasResolve && pass.m_resolveTarget.id == handle.id) {
+					referencesHandle = true;
+				}
+				if (referencesHandle) {
 					auto it = pass.m_framebufferCache.find(newView);
 					if (it != pass.m_framebufferCache.end()) {
 						pass.m_activeFramebuffer = it->second;
@@ -146,13 +191,15 @@ void RenderGraph::AccumulateUsageFlags() {
 		if (ref.type == PassType::Graphics) {
 			auto& pass = *m_graphicsPasses[ref.index];
 
-			// Color attachment
-			if (pass.m_colorTarget.id < m_images.size()) {
-				m_images[pass.m_colorTarget.id].usageFlags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-				// If MSAA and transient, mark as transient attachment
-				if (!m_images[pass.m_colorTarget.id].imported &&
-				    m_images[pass.m_colorTarget.id].desc.samples != VK_SAMPLE_COUNT_1_BIT) {
-					m_images[pass.m_colorTarget.id].usageFlags |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+			// Color attachments (MRT)
+			for (const auto& ca : pass.m_colorAttachments) {
+				if (ca.target.id < m_images.size()) {
+					m_images[ca.target.id].usageFlags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+					// If MSAA and transient, mark as transient attachment
+					if (!m_images[ca.target.id].imported &&
+					    m_images[ca.target.id].desc.samples != VK_SAMPLE_COUNT_1_BIT) {
+						m_images[ca.target.id].usageFlags |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+					}
 				}
 			}
 
@@ -171,6 +218,16 @@ void RenderGraph::AccumulateUsageFlags() {
 				if (img.id < m_images.size())
 					m_images[img.id].usageFlags |= VK_IMAGE_USAGE_SAMPLED_BIT;
 			}
+
+			// Buffer reads/writes
+			for (auto& buf : pass.m_readBuffers) {
+				if (buf.id < m_buffers.size())
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			}
+			for (auto& buf : pass.m_writeBuffers) {
+				if (buf.id < m_buffers.size())
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			}
 		}
 		else if (ref.type == PassType::Compute) {
 			auto& pass = *m_computePasses[ref.index];
@@ -183,11 +240,21 @@ void RenderGraph::AccumulateUsageFlags() {
 				if (img.id < m_images.size())
 					m_images[img.id].usageFlags |= VK_IMAGE_USAGE_STORAGE_BIT;
 			}
+
+			// Buffer reads/writes
+			for (auto& buf : pass.m_readBuffers) {
+				if (buf.id < m_buffers.size())
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			}
+			for (auto& buf : pass.m_writeBuffers) {
+				if (buf.id < m_buffers.size())
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			}
 		}
 	}
 }
 
-void RenderGraph::AllocateTransientImages() {
+void RenderGraph::AllocateTransientResources() {
 	auto logger = spdlog::get("Render");
 
 	for (auto& res : m_images) {
@@ -223,6 +290,22 @@ void RenderGraph::AllocateTransientImages() {
 
 		logger->debug("RenderGraph: Allocated transient image '{}' ({}x{}, format {})",
 			res.name, res.desc.width, res.desc.height, static_cast<int>(res.desc.format));
+	}
+
+	// Allocate transient buffers
+	for (auto& res : m_buffers) {
+		if (res.imported) continue;
+		if (res.buffer) continue;
+
+		res.buffer = VWrap::Buffer::Create(
+			m_allocator,
+			res.desc.size,
+			res.usageFlags,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			0);
+
+		logger->debug("RenderGraph: Allocated transient buffer '{}' (size {})",
+			res.name, res.desc.size);
 	}
 }
 
@@ -275,13 +358,16 @@ void RenderGraph::CreateRenderPasses() {
 
 		auto& pass = *m_graphicsPasses[ref.index];
 
-		VkImageLayout colorFinal = DetermineColorFinalLayout(i, pass.m_colorTarget);
+		std::vector<VkImageLayout> colorFinals;
+		for (const auto& ca : pass.m_colorAttachments) {
+			colorFinals.push_back(DetermineColorFinalLayout(i, ca.target));
+		}
 		VkImageLayout resolveFinal = pass.m_hasResolve
 			? DetermineResolveFinalLayout(i, pass.m_resolveTarget)
 			: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 		pass.m_renderPass.reset();
-		pass.CreateRenderPass(colorFinal, resolveFinal);
+		pass.CreateRenderPass(colorFinals, resolveFinal);
 	}
 }
 
@@ -297,6 +383,7 @@ void RenderGraph::ComputeBarriers() {
 	m_barriers.clear();
 	m_barriers.resize(m_executionOrder.size());
 
+	// Image layout tracking
 	std::vector<VkImageLayout> currentLayout(m_images.size(), VK_IMAGE_LAYOUT_UNDEFINED);
 
 	for (size_t i = 0; i < m_images.size(); i++) {
@@ -309,7 +396,10 @@ void RenderGraph::ComputeBarriers() {
 		VkPipelineStageFlags stage;
 		VkAccessFlags access;
 	};
-	std::vector<WriterInfo> lastWriter(m_images.size(), { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 });
+	std::vector<WriterInfo> lastImageWriter(m_images.size(), { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 });
+
+	// Buffer writer tracking
+	std::vector<WriterInfo> lastBufferWriter(m_buffers.size(), { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 });
 
 	for (size_t i = 0; i < m_executionOrder.size(); i++) {
 		const auto& ref = m_executionOrder[i];
@@ -317,60 +407,118 @@ void RenderGraph::ComputeBarriers() {
 		if (ref.type == PassType::Compute) {
 			auto& pass = *m_computePasses[ref.index];
 
+			// Image write barriers
 			for (const auto& img : pass.m_writeImages) {
 				if (currentLayout[img.id] != VK_IMAGE_LAYOUT_GENERAL) {
 					ImageBarrier barrier;
 					barrier.image = img;
-					barrier.srcStage = lastWriter[img.id].stage;
+					barrier.srcStage = lastImageWriter[img.id].stage;
 					barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-					barrier.srcAccess = lastWriter[img.id].access;
+					barrier.srcAccess = lastImageWriter[img.id].access;
 					barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
 					barrier.oldLayout = currentLayout[img.id];
 					barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-					m_barriers[i].push_back(barrier);
+					m_barriers[i].imageBarriers.push_back(barrier);
 					currentLayout[img.id] = VK_IMAGE_LAYOUT_GENERAL;
 				}
 			}
 
 			for (const auto& img : pass.m_writeImages) {
-				lastWriter[img.id] = {
+				lastImageWriter[img.id] = {
 					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 					VK_ACCESS_SHADER_WRITE_BIT
 				};
 				currentLayout[img.id] = VK_IMAGE_LAYOUT_GENERAL;
 			}
+
+			// Buffer write barriers
+			for (const auto& buf : pass.m_writeBuffers) {
+				BufferBarrier barrier;
+				barrier.buffer = buf;
+				barrier.srcStage = lastBufferWriter[buf.id].stage;
+				barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+				barrier.srcAccess = lastBufferWriter[buf.id].access;
+				barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
+				m_barriers[i].bufferBarriers.push_back(barrier);
+
+				lastBufferWriter[buf.id] = {
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					VK_ACCESS_SHADER_WRITE_BIT
+				};
+			}
+
+			// Buffer read barriers
+			for (const auto& buf : pass.m_readBuffers) {
+				BufferBarrier barrier;
+				barrier.buffer = buf;
+				barrier.srcStage = lastBufferWriter[buf.id].stage;
+				barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+				barrier.srcAccess = lastBufferWriter[buf.id].access;
+				barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
+				m_barriers[i].bufferBarriers.push_back(barrier);
+			}
 		}
 		else if (ref.type == PassType::Graphics) {
 			auto& pass = *m_graphicsPasses[ref.index];
 
+			// Image read barriers
 			for (const auto& img : pass.m_readImages) {
 				VkImageLayout required = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				if (currentLayout[img.id] != required) {
 					ImageBarrier barrier;
 					barrier.image = img;
-					barrier.srcStage = lastWriter[img.id].stage;
+					barrier.srcStage = lastImageWriter[img.id].stage;
 					barrier.dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-					barrier.srcAccess = lastWriter[img.id].access;
+					barrier.srcAccess = lastImageWriter[img.id].access;
 					barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
 					barrier.oldLayout = currentLayout[img.id];
 					barrier.newLayout = required;
-					m_barriers[i].push_back(barrier);
+					m_barriers[i].imageBarriers.push_back(barrier);
 					currentLayout[img.id] = required;
 				}
 			}
 
-			if (pass.m_colorTarget.id < m_images.size()) {
-				VkImageLayout colorFinal = DetermineColorFinalLayout(i, pass.m_colorTarget);
-				currentLayout[pass.m_colorTarget.id] = colorFinal;
-				lastWriter[pass.m_colorTarget.id] = {
-					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+			// Buffer read barriers (vertex/fragment shader SSBOs)
+			for (const auto& buf : pass.m_readBuffers) {
+				BufferBarrier barrier;
+				barrier.buffer = buf;
+				barrier.srcStage = lastBufferWriter[buf.id].stage;
+				barrier.dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+				barrier.srcAccess = lastBufferWriter[buf.id].access;
+				barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
+				m_barriers[i].bufferBarriers.push_back(barrier);
+			}
+
+			// Buffer write barriers
+			for (const auto& buf : pass.m_writeBuffers) {
+				BufferBarrier barrier;
+				barrier.buffer = buf;
+				barrier.srcStage = lastBufferWriter[buf.id].stage;
+				barrier.dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+				barrier.srcAccess = lastBufferWriter[buf.id].access;
+				barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
+				m_barriers[i].bufferBarriers.push_back(barrier);
+
+				lastBufferWriter[buf.id] = {
+					VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					VK_ACCESS_SHADER_WRITE_BIT
 				};
+			}
+
+			for (const auto& ca : pass.m_colorAttachments) {
+				if (ca.target.id < m_images.size()) {
+					VkImageLayout colorFinal = DetermineColorFinalLayout(i, ca.target);
+					currentLayout[ca.target.id] = colorFinal;
+					lastImageWriter[ca.target.id] = {
+						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+					};
+				}
 			}
 
 			if (pass.m_hasDepth && pass.m_depthTarget.id < m_images.size()) {
 				currentLayout[pass.m_depthTarget.id] = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-				lastWriter[pass.m_depthTarget.id] = {
+				lastImageWriter[pass.m_depthTarget.id] = {
 					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
 				};
@@ -379,7 +527,7 @@ void RenderGraph::ComputeBarriers() {
 			if (pass.m_hasResolve && pass.m_resolveTarget.id < m_images.size()) {
 				VkImageLayout resolveFinal = DetermineResolveFinalLayout(i, pass.m_resolveTarget);
 				currentLayout[pass.m_resolveTarget.id] = resolveFinal;
-				lastWriter[pass.m_resolveTarget.id] = {
+				lastImageWriter[pass.m_resolveTarget.id] = {
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 				};
@@ -390,11 +538,11 @@ void RenderGraph::ComputeBarriers() {
 
 void RenderGraph::Compile() {
 	auto logger = spdlog::get("Render");
-	logger->info("RenderGraph: Compiling ({} passes, {} images)",
-		m_executionOrder.size(), m_images.size());
+	logger->info("RenderGraph: Compiling ({} passes, {} images, {} buffers)",
+		m_executionOrder.size(), m_images.size(), m_buffers.size());
 
 	AccumulateUsageFlags();
-	AllocateTransientImages();
+	AllocateTransientResources();
 	CreateRenderPasses();
 	CreateFramebuffers();
 	ComputeBarriers();
@@ -420,8 +568,8 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 			enabled = m_computePasses[ref.index]->IsEnabled();
 		if (!enabled) continue;
 
-		// Insert barriers
-		for (const auto& barrier : m_barriers[i]) {
+		// Insert image barriers
+		for (const auto& barrier : m_barriers[i].imageBarriers) {
 			const auto& res = m_images[barrier.image.id];
 
 			VkImageMemoryBarrier imgBarrier{};
@@ -445,15 +593,34 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 			cmd->CmdPipelineBarrier(barrier.srcStage, barrier.dstStage, { imgBarrier });
 		}
 
+		// Insert buffer barriers
+		for (const auto& barrier : m_barriers[i].bufferBarriers) {
+			const auto& res = m_buffers[barrier.buffer.id];
+
+			VkBufferMemoryBarrier bufBarrier{};
+			bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+			bufBarrier.srcAccessMask = barrier.srcAccess;
+			bufBarrier.dstAccessMask = barrier.dstAccess;
+			bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bufBarrier.buffer = res.buffer ? res.buffer->Get() : VK_NULL_HANDLE;
+			bufBarrier.offset = 0;
+			bufBarrier.size = VK_WHOLE_SIZE;
+
+			cmd->CmdPipelineBarrier(barrier.srcStage, barrier.dstStage, {}, { bufBarrier });
+		}
+
 		if (ref.type == PassType::Graphics) {
 			auto& pass = *m_graphicsPasses[ref.index];
-			const auto& colorRes = m_images[pass.m_colorTarget.id];
-			VkExtent2D extent = { colorRes.desc.width, colorRes.desc.height };
+			const auto& firstColorRes = m_images[pass.m_colorAttachments[0].target.id];
+			VkExtent2D extent = { firstColorRes.desc.width, firstColorRes.desc.height };
 
 			std::vector<VkClearValue> clearValues;
-			VkClearValue colorClear;
-			colorClear.color = pass.m_clearColor;
-			clearValues.push_back(colorClear);
+			for (const auto& ca : pass.m_colorAttachments) {
+				VkClearValue colorClear;
+				colorClear.color = ca.clearColor;
+				clearValues.push_back(colorClear);
+			}
 
 			if (pass.m_hasDepth) {
 				VkClearValue depthClear;
@@ -463,7 +630,7 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 
 			if (pass.m_hasResolve) {
 				VkClearValue resolveClear;
-				resolveClear.color = pass.m_clearColor;
+				resolveClear.color = pass.m_colorAttachments[0].clearColor;
 				clearValues.push_back(resolveClear);
 			}
 
@@ -550,6 +717,7 @@ void RenderGraph::Resize(VkExtent2D newExtent) {
 
 void RenderGraph::Clear() {
 	m_images.clear();
+	m_buffers.clear();
 	m_graphicsPasses.clear();
 	m_computePasses.clear();
 	m_executionOrder.clear();

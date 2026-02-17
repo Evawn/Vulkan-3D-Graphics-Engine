@@ -9,6 +9,7 @@
 
 #include "Image.h"
 #include "ImageView.h"
+#include "Buffer.h"
 #include "CommandBuffer.h"
 
 // ---- Handles ----
@@ -28,6 +29,7 @@ struct ImageDesc {
 
 struct BufferDesc {
 	VkDeviceSize size;
+	VkBufferUsageFlags usage = 0; // User-specified base usage (e.g., VERTEX_BUFFER_BIT)
 };
 
 // ---- Enums ----
@@ -60,7 +62,19 @@ struct ImageResource {
 	VkImageUsageFlags usageFlags = 0;
 };
 
-// ---- Barrier ----
+// ---- Internal buffer storage ----
+
+struct BufferResource {
+	std::string name;
+	BufferDesc desc;
+	bool imported = false;
+
+	std::shared_ptr<VWrap::Buffer> buffer;
+
+	VkBufferUsageFlags usageFlags = 0;
+};
+
+// ---- Barriers ----
 
 struct ImageBarrier {
 	ImageHandle image;
@@ -70,4 +84,12 @@ struct ImageBarrier {
 	VkAccessFlags dstAccess;
 	VkImageLayout oldLayout;
 	VkImageLayout newLayout;
+};
+
+struct BufferBarrier {
+	BufferHandle buffer;
+	VkPipelineStageFlags srcStage;
+	VkPipelineStageFlags dstStage;
+	VkAccessFlags srcAccess;
+	VkAccessFlags dstAccess;
 };

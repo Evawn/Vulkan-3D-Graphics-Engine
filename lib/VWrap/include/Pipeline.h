@@ -21,6 +21,7 @@ namespace VWrap {
 
 		std::vector<VkPushConstantRange> push_constant_ranges;
 		uint32_t subpass;
+		uint32_t colorAttachmentCount = 1;
 	};
 
 	/// <summary>
