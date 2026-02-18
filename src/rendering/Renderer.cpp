@@ -48,8 +48,9 @@ void Renderer::Build(
 	technique->WriteGraphDescriptors(m_graph);
 }
 
-void Renderer::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex) {
-	m_graph.Execute(cmd, frameIndex);
+void Renderer::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
+                       GPUProfiler* profiler) {
+	m_graph.Execute(cmd, frameIndex, profiler);
 }
 
 void Renderer::UpdateSwapchainView(std::shared_ptr<VWrap::ImageView> view) {

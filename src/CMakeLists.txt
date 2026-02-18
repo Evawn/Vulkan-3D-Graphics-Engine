@@ -1,8 +1,12 @@
 file(GLOB_RECURSE APP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+file(GLOB_RECURSE APP_MM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.mm")
 
-add_executable(VulkanEngine ${APP_SOURCES})
+add_executable(VulkanEngine ${APP_SOURCES} ${APP_MM_SOURCES})
 
 target_link_libraries(VulkanEngine PRIVATE VWrap ImGui glfw glm::glm spdlog::spdlog)
+if(APPLE)
+    target_link_libraries(VulkanEngine PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
+endif()
 
 target_include_directories(VulkanEngine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"

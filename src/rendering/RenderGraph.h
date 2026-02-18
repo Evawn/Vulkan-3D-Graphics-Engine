@@ -8,6 +8,8 @@
 #include <memory>
 #include <vector>
 
+class GPUProfiler;
+
 class RenderGraph {
 public:
 	RenderGraph() = default;
@@ -31,7 +33,8 @@ public:
 
 	// ---- Lifecycle ----
 	void Compile();
-	void Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex);
+	void Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
+	             GPUProfiler* profiler = nullptr);
 	void Resize(VkExtent2D newExtent);
 	void Clear();
 
@@ -47,6 +50,10 @@ public:
 
 	// ---- Dynamic imports ----
 	void UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageView> view);
+
+	// ---- Introspection ----
+	GraphSnapshot BuildSnapshot() const;
+	size_t GetPassCount() const { return m_executionOrder.size(); }
 
 	// ---- Internal access for builders ----
 	const ImageResource& GetImageResource(ImageHandle handle) const;

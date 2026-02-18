@@ -66,7 +66,10 @@ private:
 
 	// GPU PROFILER
 	std::shared_ptr<GPUProfiler> m_gpu_profiler;
-	GPUProfiler::PerformanceMetrics m_last_metrics{0.0f, 0.0f};
+	GPUProfiler::PerformanceMetrics m_last_metrics{};
+
+	// RENDER GRAPH SNAPSHOT (for dev tooling panel)
+	GraphSnapshot m_graphSnapshot;
 
 	// CAMERA
 	std::shared_ptr<Camera> m_camera;

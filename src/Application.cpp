@@ -98,6 +98,12 @@ void Application::BuildRenderGraph() {
 		});
 
 	m_editor.RegisterSceneTexture(m_renderer.GetSceneResolveView());
+
+	// Update profiler pass count and graph snapshot for dev tooling panel
+	if (m_gpu_profiler)
+		m_gpu_profiler->SetPassCount(static_cast<uint32_t>(m_renderer.GetGraph().GetPassCount()));
+	m_graphSnapshot = m_renderer.GetGraph().BuildSnapshot();
+	m_editor.SetGraphSnapshot(&m_graphSnapshot);
 }
 
 void Application::MainLoop() {
@@ -126,6 +132,7 @@ void Application::MainLoop() {
 		m_editor.BeginFrame();
 		DrawFrame();
 		m_editor.UpdateMetrics(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
+		m_editor.SetPerformanceMetrics(&m_last_metrics);
 	}
 	vkDeviceWaitIdle(m_vk.device->Get());
 }
@@ -174,6 +181,13 @@ void Application::ProcessEvents() {
 		}
 	}
 	m_events.clear();
+
+	// Check for deferred technique reloads (e.g., model file changed via File parameter)
+	auto& technique = m_renderers[m_active_renderer_index];
+	if (technique->NeedsReload()) {
+		vkDeviceWaitIdle(m_vk.device->Get());
+		technique->PerformReload(BuildRenderContext());
+	}
 }
 
 void Application::DrawFrame() {
@@ -206,7 +220,7 @@ void Application::DrawFrame() {
 	command_buffer->Begin();
 
 	m_gpu_profiler->CmdBegin(command_buffer, frame_index);
-	m_renderer.Execute(command_buffer, frame_index);
+	m_renderer.Execute(command_buffer, frame_index, m_gpu_profiler.get());
 	m_gpu_profiler->CmdEnd(command_buffer, frame_index);
 
 	if (vkEndCommandBuffer(command_buffer->Get()) != VK_SUCCESS) {

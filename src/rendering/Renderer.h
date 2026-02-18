@@ -4,6 +4,7 @@
 #include "RenderTechnique.h"
 #include "FrameController.h"
 #include "Sampler.h"
+#include "GPUProfiler.h"
 #include <functional>
 #include <memory>
 
@@ -31,7 +32,8 @@ public:
 		std::function<void(PassContext&)> presentRecordFn);
 
 	// Execute the compiled graph for one frame.
-	void Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex);
+	void Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
+	             GPUProfiler* profiler = nullptr);
 
 	// Update the swapchain image for the current frame (called per-frame before Execute).
 	void UpdateSwapchainView(std::shared_ptr<VWrap::ImageView> view);

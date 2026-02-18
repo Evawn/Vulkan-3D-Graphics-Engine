@@ -1,4 +1,5 @@
 #include "RenderGraph.h"
+#include "GPUProfiler.h"
 #include "Utils.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -180,6 +181,70 @@ void RenderGraph::UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageV
 			}
 		}
 	}
+}
+
+// =====================================================================
+// RenderGraph — Introspection
+// =====================================================================
+
+GraphSnapshot RenderGraph::BuildSnapshot() const {
+	GraphSnapshot snap;
+	snap.images = m_images;
+	snap.buffers = m_buffers;
+	snap.passes.reserve(m_executionOrder.size());
+	snap.barriers.reserve(m_executionOrder.size());
+
+	for (size_t i = 0; i < m_executionOrder.size(); i++) {
+		const auto& ref = m_executionOrder[i];
+		PassInfo info;
+
+		if (ref.type == PassType::Graphics) {
+			const auto& pass = *m_graphicsPasses[ref.index];
+			info.name = pass.GetName();
+			info.type = PassType::Graphics;
+			info.enabled = pass.IsEnabled();
+			info.readImages = pass.m_readImages;
+			info.readBuffers = pass.m_readBuffers;
+			info.writeBuffers = pass.m_writeBuffers;
+
+			PassInfo::GraphicsDetail gfx;
+			for (const auto& ca : pass.m_colorAttachments) {
+				gfx.colorAttachments.push_back({ ca.target, ca.load, ca.store });
+				info.writeImages.push_back(ca.target);
+			}
+			gfx.depthTarget = pass.m_depthTarget;
+			gfx.hasDepth = pass.m_hasDepth;
+			gfx.depthLoad = pass.m_depthLoad;
+			gfx.depthStore = pass.m_depthStore;
+			gfx.resolveTarget = pass.m_resolveTarget;
+			gfx.hasResolve = pass.m_hasResolve;
+			if (pass.m_hasDepth)
+				info.writeImages.push_back(pass.m_depthTarget);
+			if (pass.m_hasResolve)
+				info.writeImages.push_back(pass.m_resolveTarget);
+			info.gfx = gfx;
+		}
+		else {
+			const auto& pass = *m_computePasses[ref.index];
+			info.name = pass.GetName();
+			info.type = PassType::Compute;
+			info.enabled = pass.IsEnabled();
+			info.readImages = pass.m_readImages;
+			info.readBuffers = pass.m_readBuffers;
+			info.writeImages = pass.m_writeImages;
+			info.writeBuffers = pass.m_writeBuffers;
+		}
+
+		snap.passes.push_back(std::move(info));
+
+		if (i < m_barriers.size()) {
+			snap.barriers.push_back({ m_barriers[i].imageBarriers, m_barriers[i].bufferBarriers });
+		} else {
+			snap.barriers.push_back({});
+		}
+	}
+
+	return snap;
 }
 
 // =====================================================================
@@ -555,7 +620,8 @@ void RenderGraph::Compile() {
 // RenderGraph — Execute
 // =====================================================================
 
-void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex) {
+void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
+                          GPUProfiler* profiler) {
 	auto vk_cmd = cmd->Get();
 
 	for (size_t i = 0; i < m_executionOrder.size(); i++) {
@@ -609,6 +675,8 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 
 			cmd->CmdPipelineBarrier(barrier.srcStage, barrier.dstStage, {}, { bufBarrier });
 		}
+
+		if (profiler) profiler->CmdBeginPass(cmd, frameIndex, static_cast<uint32_t>(i));
 
 		if (ref.type == PassType::Graphics) {
 			auto& pass = *m_graphicsPasses[ref.index];
@@ -677,6 +745,8 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 				pass.m_recordFn(ctx);
 			}
 		}
+
+		if (profiler) profiler->CmdEndPass(cmd, frameIndex, static_cast<uint32_t>(i));
 	}
 }
 

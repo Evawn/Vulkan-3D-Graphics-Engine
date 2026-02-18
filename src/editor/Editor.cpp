@@ -68,6 +68,9 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 	m_inspector.SetCamera(camera);
 	m_inspector.SetAppControls(cameraController->SensitivityPtr(), cameraController->SpeedPtr());
 	m_gui->RegisterPanel("Inspector", [this]() { m_inspector.Draw(); });
+
+	// Render Graph panel
+	m_gui->RegisterPanel("Render Graph", [this]() { m_renderGraphPanel.Draw(); });
 }
 
 void Editor::Shutdown() {
@@ -145,4 +148,12 @@ void Editor::UpdateMetrics(float fps, float gpuMs, float frameMs) {
 
 void Editor::SetLastScreenshotPath(const std::string& path) {
 	m_inspector.SetLastScreenshotPath(path);
+}
+
+void Editor::SetGraphSnapshot(const GraphSnapshot* snapshot) {
+	m_renderGraphPanel.SetSnapshot(snapshot);
+}
+
+void Editor::SetPerformanceMetrics(const GPUProfiler::PerformanceMetrics* metrics) {
+	m_renderGraphPanel.SetMetrics(metrics);
 }

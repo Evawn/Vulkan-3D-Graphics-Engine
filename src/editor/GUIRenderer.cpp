@@ -49,6 +49,7 @@ void GUIRenderer::SetupDefaultLayout(ImGuiID dockspace_id) {
 	ImGui::DockBuilderDockWindow("Viewport", left_top);
 	ImGui::DockBuilderDockWindow("Output", left_bottom);
 	ImGui::DockBuilderDockWindow("Metrics", right_top);
+	ImGui::DockBuilderDockWindow("Render Graph", right_top);
 	ImGui::DockBuilderDockWindow("Inspector", right_bottom);
 
 	ImGui::DockBuilderFinish(dockspace_id);

@@ -6,6 +6,7 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
+#include <optional>
 
 #include "Image.h"
 #include "ImageView.h"
@@ -92,4 +93,46 @@ struct BufferBarrier {
 	VkPipelineStageFlags dstStage;
 	VkAccessFlags srcAccess;
 	VkAccessFlags dstAccess;
+};
+
+// ---- Introspection (read-only snapshots) ----
+
+struct PassInfo {
+	std::string name;
+	PassType type;
+	bool enabled;
+
+	std::vector<ImageHandle> readImages;
+	std::vector<BufferHandle> readBuffers;
+	std::vector<ImageHandle> writeImages;
+	std::vector<BufferHandle> writeBuffers;
+
+	struct ColorAttachmentDetail {
+		ImageHandle target;
+		LoadOp load = LoadOp::DontCare;
+		StoreOp store = StoreOp::DontCare;
+	};
+
+	struct GraphicsDetail {
+		std::vector<ColorAttachmentDetail> colorAttachments;
+		ImageHandle depthTarget;
+		ImageHandle resolveTarget;
+		bool hasDepth = false;
+		bool hasResolve = false;
+		LoadOp depthLoad = LoadOp::DontCare;
+		StoreOp depthStore = StoreOp::DontCare;
+	};
+	std::optional<GraphicsDetail> gfx;
+};
+
+struct PassBarrierSnapshot {
+	std::vector<ImageBarrier> imageBarriers;
+	std::vector<BufferBarrier> bufferBarriers;
+};
+
+struct GraphSnapshot {
+	std::vector<PassInfo> passes;
+	std::vector<PassBarrierSnapshot> barriers;
+	std::vector<ImageResource> images;
+	std::vector<BufferResource> buffers;
 };

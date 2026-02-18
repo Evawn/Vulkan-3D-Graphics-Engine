@@ -5,6 +5,7 @@
 #include "MetricsPanel.h"
 #include "OutputPanel.h"
 #include "InspectorPanel.h"
+#include "RenderGraphPanel.h"
 #include "VulkanContext.h"
 #include "Sampler.h"
 #include "ImageView.h"
@@ -65,6 +66,10 @@ public:
 	// Screenshot path forwarding
 	void SetLastScreenshotPath(const std::string& path);
 
+	// Render Graph panel
+	void SetGraphSnapshot(const GraphSnapshot* snapshot);
+	void SetPerformanceMetrics(const GPUProfiler::PerformanceMetrics* metrics);
+
 private:
 	std::shared_ptr<GUIRenderer> m_gui;
 	std::shared_ptr<VWrap::Sampler> m_scene_sampler;
@@ -74,4 +79,5 @@ private:
 	MetricsPanel m_metrics;
 	OutputPanel m_output;
 	InspectorPanel m_inspector;
+	RenderGraphPanel m_renderGraphPanel;
 };
