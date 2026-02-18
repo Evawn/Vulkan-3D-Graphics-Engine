@@ -18,14 +18,22 @@ private:
 
 	// Graph-managed 64^3 3D storage image
 	ImageHandle m_volume;
+	// Graph-managed SVO structure buffer
+	BufferHandle m_svo_buffer;
 
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
-	// Compute pipeline + descriptors
+	// Generate pipeline + descriptors (compute: writes volume)
 	std::shared_ptr<VWrap::ComputePipeline> m_compute_pipeline;
 	std::shared_ptr<VWrap::DescriptorSetLayout> m_compute_descriptor_layout;
 	std::shared_ptr<VWrap::DescriptorPool> m_compute_descriptor_pool;
 	std::shared_ptr<VWrap::DescriptorSet> m_compute_descriptor_set;
+
+	// Build pipeline + descriptors (compute: reads volume, writes SVO buffer)
+	std::shared_ptr<VWrap::ComputePipeline> m_build_pipeline;
+	std::shared_ptr<VWrap::DescriptorSetLayout> m_build_descriptor_layout;
+	std::shared_ptr<VWrap::DescriptorPool> m_build_descriptor_pool;
+	std::shared_ptr<VWrap::DescriptorSet> m_build_descriptor_set;
 
 	// Graphics pipeline + descriptors (per-frame)
 	std::shared_ptr<VWrap::Pipeline> m_graphics_pipeline;
@@ -44,6 +52,7 @@ private:
 	std::vector<TechniqueParameter> m_parameters;
 
 	void CreateComputePipeline();
+	void CreateBuildPipeline();
 	void CreateGraphicsPipeline();
 
 public:

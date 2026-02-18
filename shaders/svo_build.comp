@@ -1,0 +1,117 @@
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(rgba8, set = 0, binding = 0) uniform readonly image3D volume;
+
+layout(std430, set = 0, binding = 1) buffer SVOBuffer {
+	uint num_levels;
+	uint volume_size;
+	uint leaf_size;
+	uint node_count;
+	uint nodes[];
+};
+
+layout(push_constant) uniform PC {
+	int volume_size_pc;
+	int leaf_size_pc;
+} pc;
+
+shared uint chunk_occupied[64];
+
+void main() {
+	ivec3 chunk_id = ivec3(gl_LocalInvocationID);
+	uint flat_id = gl_LocalInvocationIndex;
+
+	int vol = pc.volume_size_pc;
+	int leaf = pc.leaf_size_pc;
+	int chunks_per_axis = vol / leaf;
+
+	// Skip threads beyond the chunk grid
+	if (any(greaterThanEqual(chunk_id, ivec3(chunks_per_axis)))) {
+		chunk_occupied[flat_id] = 0;
+		barrier();
+		return;
+	}
+
+	ivec3 chunk_origin = chunk_id * leaf;
+
+	// Phase 1: Classify chunk - check if any voxel is non-empty
+	bool occupied = false;
+	for (int z = 0; z < leaf && !occupied; z++) {
+		for (int y = 0; y < leaf && !occupied; y++) {
+			for (int x = 0; x < leaf && !occupied; x++) {
+				vec4 v = imageLoad(volume, chunk_origin + ivec3(x, y, z));
+				if (v.a > 0.0) {
+					occupied = true;
+				}
+			}
+		}
+	}
+
+	chunk_occupied[flat_id] = occupied ? 1 : 0;
+	barrier();
+
+	// Phase 2: Build SVO tree (thread 0 only)
+	if (flat_id != 0) return;
+
+	// For 64^3 volume with 16^3 leaves: chunks_per_axis = 4
+	// Octree has 2 internal levels:
+	//   Level 2 (root): 1 node covering full volume
+	//   Level 1: up to 8 nodes, each covering (vol/2)^3
+
+	// Build level 1 masks: each level-1 node covers a 2x2x2 group of chunks
+	uint level1_masks[8];
+	bool level1_occupied[8];
+	uint level1_count = 0;
+	uint root_mask = 0;
+
+	for (int oct = 0; oct < 8; oct++) {
+		// Octant offset in chunk-grid units (each octant covers half the chunks per axis)
+		int half_chunks = chunks_per_axis / 2;
+		ivec3 oct_base = ivec3(oct & 1, (oct >> 1) & 1, (oct >> 2) & 1) * half_chunks;
+
+		// Build this octant's children mask (the 8 leaf chunks within it)
+		uint mask = 0;
+		bool any_occ = false;
+		for (int child = 0; child < 8; child++) {
+			ivec3 child_off = ivec3(child & 1, (child >> 1) & 1, (child >> 2) & 1);
+			ivec3 c = oct_base + child_off;
+			uint idx = c.x + c.y * uint(chunks_per_axis) + c.z * uint(chunks_per_axis * chunks_per_axis);
+			if (chunk_occupied[idx] == 1) {
+				mask |= (1u << child);
+				any_occ = true;
+			}
+		}
+
+		level1_masks[oct] = mask;
+		level1_occupied[oct] = any_occ;
+		if (any_occ) {
+			root_mask |= (1u << oct);
+		}
+	}
+
+	// Count level-1 nodes (only occupied octants get nodes)
+	level1_count = bitCount(root_mask);
+
+	// Write root node: mask | (first_child << 8)
+	// Root's first child is at index 1 (right after root)
+	nodes[0] = root_mask | (1u << 8);
+
+	// Write level-1 nodes in octant order (only for occupied octants)
+	uint write_idx = 1;
+	for (int oct = 0; oct < 8; oct++) {
+		if ((root_mask & (1u << oct)) != 0) {
+			// Level-1 nodes have no children in the node buffer (children are leaves)
+			// Store just the mask; first_child field is unused for leaf-parent nodes
+			nodes[write_idx] = level1_masks[oct];
+			write_idx++;
+		}
+	}
+
+	// Write header
+	num_levels = 2;
+	volume_size = uint(vol);
+	leaf_size = uint(leaf);
+	node_count = write_idx;
+}

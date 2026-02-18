@@ -8,6 +8,11 @@ struct SVOGeneratePC {
 	float time;
 };
 
+struct SVOBuildPC {
+	int volume_size;
+	int leaf_size;
+};
+
 struct SVOTracePC {
 	glm::mat4 NDCtoWorld;
 	glm::vec3 cameraPos;
@@ -38,6 +43,12 @@ void SVORenderer::RegisterPasses(
 		VK_IMAGE_TYPE_3D
 	});
 
+	// SVO structure buffer (header + node data)
+	m_svo_buffer = graph.CreateBuffer("svo_tree", {
+		1024,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+	});
+
 	// Compute pass: generate voxels into volume
 	graph.AddComputePass("SVO Generate")
 		.Write(m_volume)
@@ -55,12 +66,29 @@ void SVORenderer::RegisterPasses(
 			ctx.cmd->CmdDispatch(16, 16, 16);
 		});
 
-	// Graphics pass: DDA ray-march the volume
+	// Compute pass: build SVO from voxel volume
+	graph.AddComputePass("SVO Build")
+		.Read(m_volume)
+		.Write(m_svo_buffer)
+		.SetRecord([this](PassContext& ctx) {
+			ctx.cmd->CmdBindComputePipeline(m_build_pipeline);
+			ctx.cmd->CmdBindComputeDescriptorSets(m_build_pipeline->GetLayout(),
+				{ m_build_descriptor_set->Get() });
+			SVOBuildPC pc{};
+			pc.volume_size = 64;
+			pc.leaf_size = 16;
+			vkCmdPushConstants(ctx.cmd->Get(), m_build_pipeline->GetLayout(),
+				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+			ctx.cmd->CmdDispatch(1, 1, 1);
+		});
+
+	// Graphics pass: SVO traversal + leaf DDA ray-march
 	auto& gfx = graph.AddGraphicsPass("SVO Trace")
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(resolveTarget)
 		.Read(m_volume)
+		.Read(m_svo_buffer)
 		.SetRecord([this](PassContext& ctx) {
 			auto vk_cmd = ctx.cmd->Get();
 			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphics_pipeline->Get());
@@ -80,8 +108,8 @@ void SVORenderer::RegisterPasses(
 			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
 		});
 
-	// Compute descriptors (1 storage image)
-	logger->debug("SVORenderer: Creating compute descriptors...");
+	// Generate descriptors (1 storage image)
+	logger->debug("SVORenderer: Creating generate descriptors...");
 	auto computeDesc = DescriptorSetBuilder(m_device)
 		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
 		.Build(1);
@@ -89,13 +117,27 @@ void SVORenderer::RegisterPasses(
 	m_compute_descriptor_pool = computeDesc.pool;
 	m_compute_descriptor_set = computeDesc.sets[0];
 
-	logger->debug("SVORenderer: Creating compute pipeline...");
+	logger->debug("SVORenderer: Creating generate pipeline...");
 	CreateComputePipeline();
 
-	// Graphics descriptors (per-frame combined image sampler)
+	// Build descriptors (storage image + storage buffer)
+	logger->debug("SVORenderer: Creating build descriptors...");
+	auto buildDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		.Build(1);
+	m_build_descriptor_layout = buildDesc.layout;
+	m_build_descriptor_pool = buildDesc.pool;
+	m_build_descriptor_set = buildDesc.sets[0];
+
+	logger->debug("SVORenderer: Creating build pipeline...");
+	CreateBuildPipeline();
+
+	// Graphics descriptors (per-frame: combined image sampler + SVO buffer)
 	logger->debug("SVORenderer: Creating graphics descriptors...");
 	auto gfxDesc = DescriptorSetBuilder(m_device)
 		.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		.Build(ctx.maxFramesInFlight);
 	m_graphics_descriptor_layout = gfxDesc.layout;
 	m_graphics_descriptor_pool = gfxDesc.pool;
@@ -114,38 +156,82 @@ void SVORenderer::RegisterPasses(
 
 void SVORenderer::WriteGraphDescriptors(RenderGraph& graph) {
 	auto volumeView = graph.GetImageView(m_volume);
+	auto svoBuffer = graph.GetBuffer(m_svo_buffer);
 
-	// Compute descriptor: storage image in GENERAL layout
-	VkDescriptorImageInfo computeImageInfo{};
-	computeImageInfo.imageView = volumeView->Get();
-	computeImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	// Generate descriptor: storage image in GENERAL layout
+	{
+		VkDescriptorImageInfo imageInfo{};
+		imageInfo.imageView = volumeView->Get();
+		imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-	VkWriteDescriptorSet computeWrite{};
-	computeWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	computeWrite.dstSet = m_compute_descriptor_set->Get();
-	computeWrite.dstBinding = 0;
-	computeWrite.descriptorCount = 1;
-	computeWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	computeWrite.pImageInfo = &computeImageInfo;
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = m_compute_descriptor_set->Get();
+		write.dstBinding = 0;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		write.pImageInfo = &imageInfo;
 
-	vkUpdateDescriptorSets(m_device->Get(), 1, &computeWrite, 0, nullptr);
+		vkUpdateDescriptorSets(m_device->Get(), 1, &write, 0, nullptr);
+	}
 
-	// Graphics descriptors: sampled image per frame
+	// Build descriptors: storage image (read) + storage buffer (write)
+	{
+		VkDescriptorImageInfo imageInfo{};
+		imageInfo.imageView = volumeView->Get();
+		imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+		VkDescriptorBufferInfo bufferInfo{};
+		bufferInfo.buffer = svoBuffer->Get();
+		bufferInfo.offset = 0;
+		bufferInfo.range = VK_WHOLE_SIZE;
+
+		VkWriteDescriptorSet writes[2]{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = m_build_descriptor_set->Get();
+		writes[0].dstBinding = 0;
+		writes[0].descriptorCount = 1;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		writes[0].pImageInfo = &imageInfo;
+
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = m_build_descriptor_set->Get();
+		writes[1].dstBinding = 1;
+		writes[1].descriptorCount = 1;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[1].pBufferInfo = &bufferInfo;
+
+		vkUpdateDescriptorSets(m_device->Get(), 2, writes, 0, nullptr);
+	}
+
+	// Graphics descriptors: sampled image + SVO buffer per frame
 	for (auto& ds : m_graphics_descriptor_sets) {
 		VkDescriptorImageInfo imageInfo{};
 		imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		imageInfo.imageView = volumeView->Get();
 		imageInfo.sampler = m_sampler->Get();
 
-		VkWriteDescriptorSet write{};
-		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		write.dstSet = ds->Get();
-		write.dstBinding = 0;
-		write.descriptorCount = 1;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		write.pImageInfo = &imageInfo;
+		VkDescriptorBufferInfo bufferInfo{};
+		bufferInfo.buffer = svoBuffer->Get();
+		bufferInfo.offset = 0;
+		bufferInfo.range = VK_WHOLE_SIZE;
 
-		vkUpdateDescriptorSets(m_device->Get(), 1, &write, 0, nullptr);
+		VkWriteDescriptorSet writes[2]{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = ds->Get();
+		writes[0].dstBinding = 0;
+		writes[0].descriptorCount = 1;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		writes[0].pImageInfo = &imageInfo;
+
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = ds->Get();
+		writes[1].dstBinding = 1;
+		writes[1].descriptorCount = 1;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[1].pBufferInfo = &bufferInfo;
+
+		vkUpdateDescriptorSets(m_device->Get(), 2, writes, 0, nullptr);
 	}
 }
 
@@ -159,6 +245,18 @@ void SVORenderer::CreateComputePipeline() {
 
 	m_compute_pipeline = VWrap::ComputePipeline::Create(
 		m_device, m_compute_descriptor_layout, { pushRange }, comp_code);
+}
+
+void SVORenderer::CreateBuildPipeline() {
+	auto comp_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/svo_build.comp.spv");
+
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pushRange.offset = 0;
+	pushRange.size = sizeof(SVOBuildPC);
+
+	m_build_pipeline = VWrap::ComputePipeline::Create(
+		m_device, m_build_descriptor_layout, { pushRange }, comp_code);
 }
 
 void SVORenderer::CreateGraphicsPipeline() {
@@ -184,6 +282,7 @@ void SVORenderer::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
 std::vector<std::string> SVORenderer::GetShaderPaths() const {
 	return {
 		std::string(config::SHADER_DIR) + "/svo_generate.comp.spv",
+		std::string(config::SHADER_DIR) + "/svo_build.comp.spv",
 		std::string(config::SHADER_DIR) + "/svo_trace.vert.spv",
 		std::string(config::SHADER_DIR) + "/svo_trace.frag.spv"
 	};
@@ -192,7 +291,9 @@ std::vector<std::string> SVORenderer::GetShaderPaths() const {
 void SVORenderer::RecreatePipeline(const RenderContext& ctx) {
 	m_graphics_pipeline.reset();
 	m_compute_pipeline.reset();
+	m_build_pipeline.reset();
 	CreateComputePipeline();
+	CreateBuildPipeline();
 	CreateGraphicsPipeline();
 }
 
@@ -211,5 +312,5 @@ std::vector<TechniqueParameter>& SVORenderer::GetParameters() {
 }
 
 FrameStats SVORenderer::GetFrameStats() const {
-	return { 2, 4, 0 };
+	return { 3, 4, 0 };
 }
