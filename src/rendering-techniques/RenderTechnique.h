@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <functional>
 #include <memory>
 #include <vulkan/vulkan.h>
 #include "Device.h"
@@ -25,13 +26,19 @@ struct RenderContext {
 };
 
 struct TechniqueParameter {
-	enum Type { Float, Int, Bool, Color3, Color4, Enum };
+	enum Type { Float, Int, Bool, Color3, Color4, Enum, File };
 	std::string label;
 	Type type;
-	void* data;
+	void* data = nullptr;
 	float min = 0.0f;
 	float max = 1.0f;
 	std::vector<const char*> enumLabels;
+
+	// File type fields
+	std::string* filePath = nullptr;
+	std::vector<std::string> fileFilters;                  // e.g. {"obj"}
+	std::string fileFilterDesc;                            // e.g. "3D Models"
+	std::function<void(const std::string&)> onFileChanged;
 };
 
 struct FrameStats {
@@ -72,6 +79,7 @@ public:
 	virtual void SetWireframe(bool enabled) { (void)enabled; }
 	virtual bool GetWireframe() const { return false; }
 
+	// Deferred reload support (for file parameter changes)
 	virtual bool NeedsReload() const { return false; }
 	virtual void PerformReload(const RenderContext& ctx) { (void)ctx; }
 };

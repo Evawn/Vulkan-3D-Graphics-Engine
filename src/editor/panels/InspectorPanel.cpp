@@ -1,5 +1,6 @@
 #include "InspectorPanel.h"
 #include "UIStyle.h"
+#include "FileDialog.h"
 
 void InspectorPanel::SetRenderers(
 	std::vector<std::unique_ptr<RenderTechnique>>* renderers,
@@ -30,6 +31,26 @@ static void DrawTechniqueParameter(TechniqueParameter& param) {
 		int* val = static_cast<int*>(param.data);
 		if (!param.enumLabels.empty()) {
 			ImGui::Combo(param.label.c_str(), val, param.enumLabels.data(), (int)param.enumLabels.size());
+		}
+		break;
+	}
+	case TechniqueParameter::File: {
+		if (param.filePath) {
+			auto pos = param.filePath->find_last_of('/');
+			std::string display = (pos != std::string::npos) ? param.filePath->substr(pos + 1) : *param.filePath;
+			if (display.empty()) display = "(none)";
+			ImGui::TextColored(UIStyle::kTextDim, "%s", display.c_str());
+			ImGui::SameLine();
+			std::string buttonLabel = "Browse##" + param.label;
+			if (ImGui::Button(buttonLabel.c_str())) {
+				std::string result = FileDialog::OpenFile(param.label, param.fileFilters, *param.filePath);
+				if (!result.empty() && result != *param.filePath) {
+					*param.filePath = result;
+					if (param.onFileChanged) {
+						param.onFileChanged(result);
+					}
+				}
+			}
 		}
 		break;
 	}

@@ -17,9 +17,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-const std::string MODEL_PATH = std::string(config::ASSET_DIR) + "/models/viking_room.obj";
-const std::string TEXTURE_PATH = std::string(config::ASSET_DIR) + "/textures/viking_room.png";
-
 struct UniformBufferObject {
 	glm::mat4 model;
 	glm::mat4 view;
@@ -61,6 +58,13 @@ private:
 	bool m_wireframe = false;
 	float m_accumulated_rotation = 0.0f;
 
+	// File paths (dynamic, exposed as File parameters)
+	std::string m_model_path;
+	std::string m_texture_path;
+	std::string m_mtl_path;  // User-selected MTL (may differ from OBJ's mtllib)
+	bool m_needs_reload = false;
+	bool m_needs_texture_reload = false;
+
 	std::vector<TechniqueParameter> m_parameters;
 
 	void CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass);
@@ -69,6 +73,9 @@ private:
 	void CreateUniformBuffers();
 	void WriteDescriptors();
 	void LoadModel();
+	void ReloadModel(const std::string& newPath);
+	void ReloadTexture(const std::string& newPath);
+	void CreatePlaceholderTexture();
 	void UpdateUniformBuffer(uint32_t frame);
 
 public:
@@ -91,4 +98,7 @@ public:
 	FrameStats GetFrameStats() const override;
 	void SetWireframe(bool enabled) override;
 	bool GetWireframe() const override { return m_wireframe; }
+
+	bool NeedsReload() const override { return m_needs_reload || m_needs_texture_reload; }
+	void PerformReload(const RenderContext& ctx) override;
 };
