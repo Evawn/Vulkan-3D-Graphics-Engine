@@ -5,6 +5,7 @@
 
 struct SVOGeneratePC {
 	int shape;
+	float time;
 };
 
 struct SVOTracePC {
@@ -27,6 +28,7 @@ void SVORenderer::RegisterPasses(
 	m_allocator = ctx.allocator;
 	m_extent = ctx.extent;
 	m_camera = ctx.camera;
+	m_start_time = std::chrono::steady_clock::now();
 
 	// 64^3 3D storage image for voxel volume
 	m_volume = graph.CreateImage("svo_volume", {
@@ -45,6 +47,8 @@ void SVORenderer::RegisterPasses(
 				{ m_compute_descriptor_set->Get() });
 			SVOGeneratePC pc{};
 			pc.shape = m_shape;
+			auto now = std::chrono::steady_clock::now();
+			pc.time = std::chrono::duration<float>(now - m_start_time).count() * m_time_scale;
 			vkCmdPushConstants(ctx.cmd->Get(), m_compute_pipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 			// 64 / 4 = 16 workgroups per axis
@@ -195,7 +199,9 @@ void SVORenderer::RecreatePipeline(const RenderContext& ctx) {
 std::vector<TechniqueParameter>& SVORenderer::GetParameters() {
 	if (m_parameters.empty()) {
 		m_parameters = {
-			{ "Shape", TechniqueParameter::Enum, &m_shape, 0.0f, 0.0f, { "Sphere", "Torus", "Box Frame" } },
+			{ "Shape", TechniqueParameter::Enum, &m_shape, 0.0f, 0.0f,
+				{ "Sphere", "Torus", "Box Frame", "Cylinder", "Cone", "Octahedron", "Gyroid", "Sine Blob", "Menger Sponge" } },
+			{ "Time Scale", TechniqueParameter::Float, &m_time_scale, 0.0f, 5.0f },
 			{ "Max Iterations", TechniqueParameter::Int, &m_max_iterations, 1.0f, 500.0f },
 			{ "Sky Color", TechniqueParameter::Color3, m_sky_color },
 			{ "Debug Coloring", TechniqueParameter::Bool, &m_debug_color },
