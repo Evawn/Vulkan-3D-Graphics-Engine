@@ -16,6 +16,7 @@ target_include_directories(VulkanEngine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/mesh-rasterizer"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/compute-test"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/voxel"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/svo"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor/panels"
     "${CMAKE_SOURCE_DIR}/dep"

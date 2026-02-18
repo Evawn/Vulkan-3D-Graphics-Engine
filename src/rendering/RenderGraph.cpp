@@ -773,6 +773,7 @@ void RenderGraph::Resize(VkExtent2D newExtent) {
 
 	for (auto& res : m_images) {
 		if (res.imported) continue;
+		if (res.desc.imageType == VK_IMAGE_TYPE_3D) continue;
 		res.desc.width = newExtent.width;
 		res.desc.height = newExtent.height;
 	}

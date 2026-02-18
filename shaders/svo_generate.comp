@@ -1,0 +1,35 @@
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(rgba8, set = 0, binding = 0) uniform writeonly image3D volume;
+
+layout(push_constant) uniform PC {
+	int shape;
+} pc;
+
+void main() {
+	ivec3 coord = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThanEqual(coord, ivec3(64)))) return;
+
+	vec3 p = (vec3(coord) + 0.5) / 64.0 - 0.5;
+	bool filled = false;
+
+	if (pc.shape == 0) {
+		filled = length(p) < 0.4;
+	} else if (pc.shape == 1) {
+		float R = 0.3, r = 0.1;
+		vec2 q = vec2(length(p.xz) - R, p.y);
+		filled = length(q) < r;
+	} else if (pc.shape == 2) {
+		vec3 a = abs(p);
+		float e = 0.02;
+		float h = 0.4;
+		bool onEdgeX = (a.y > h - e && a.z > h - e);
+		bool onEdgeY = (a.x > h - e && a.z > h - e);
+		bool onEdgeZ = (a.x > h - e && a.y > h - e);
+		filled = (onEdgeX || onEdgeY || onEdgeZ) && all(lessThanEqual(a, vec3(h)));
+	}
+
+	imageStore(volume, coord, filled ? vec4(1.0) : vec4(0.0));
+}

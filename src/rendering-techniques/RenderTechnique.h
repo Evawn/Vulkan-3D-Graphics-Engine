@@ -71,4 +71,7 @@ public:
 
 	virtual void SetWireframe(bool enabled) { (void)enabled; }
 	virtual bool GetWireframe() const { return false; }
+
+	virtual bool NeedsReload() const { return false; }
+	virtual void PerformReload(const RenderContext& ctx) { (void)ctx; }
 };

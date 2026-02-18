@@ -14,6 +14,7 @@
 #include "DDATracer.h"
 #include "MeshRasterizer.h"
 #include "ComputeTest.h"
+#include "SVORenderer.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <vector>

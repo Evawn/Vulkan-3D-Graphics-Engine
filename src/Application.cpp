@@ -35,6 +35,7 @@ void Application::Init() {
 	m_renderers.push_back(std::make_unique<DDATracer>());
 	m_renderers.push_back(std::make_unique<ComputeTest>());
 	m_renderers.push_back(std::make_unique<MeshRasterizer>());
+	m_renderers.push_back(std::make_unique<SVORenderer>());
 	m_active_renderer_index = 0;
 
 	BuildRenderGraph();
