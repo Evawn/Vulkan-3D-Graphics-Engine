@@ -35,9 +35,9 @@ void SVORenderer::RegisterPasses(
 	m_camera = ctx.camera;
 	m_start_time = std::chrono::steady_clock::now();
 
-	// 64^3 3D storage image for voxel volume
+	// 128^3 3D storage image for voxel volume
 	m_volume = graph.CreateImage("svo_volume", {
-		64, 64, 64,
+		128, 128, 128,
 		VK_FORMAT_R8G8B8A8_UNORM,
 		VK_SAMPLE_COUNT_1_BIT,
 		VK_IMAGE_TYPE_3D
@@ -45,7 +45,7 @@ void SVORenderer::RegisterPasses(
 
 	// SVO structure buffer (header + node data)
 	m_svo_buffer = graph.CreateBuffer("svo_tree", {
-		1024,
+		4096,
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
 	});
 
@@ -62,8 +62,8 @@ void SVORenderer::RegisterPasses(
 			pc.time = std::chrono::duration<float>(now - m_start_time).count() * m_time_scale;
 			vkCmdPushConstants(ctx.cmd->Get(), m_compute_pipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-			// 64 / 4 = 16 workgroups per axis
-			ctx.cmd->CmdDispatch(16, 16, 16);
+			// 128 / 4 = 32 workgroups per axis
+			ctx.cmd->CmdDispatch(32, 32, 32);
 		});
 
 	// Compute pass: build SVO from voxel volume
@@ -75,7 +75,7 @@ void SVORenderer::RegisterPasses(
 			ctx.cmd->CmdBindComputeDescriptorSets(m_build_pipeline->GetLayout(),
 				{ m_build_descriptor_set->Get() });
 			SVOBuildPC pc{};
-			pc.volume_size = 64;
+			pc.volume_size = 128;
 			pc.leaf_size = 16;
 			vkCmdPushConstants(ctx.cmd->Get(), m_build_pipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);

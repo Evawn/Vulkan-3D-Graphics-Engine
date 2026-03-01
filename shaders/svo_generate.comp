@@ -13,9 +13,9 @@ const float PI = 3.14159265;
 
 void main() {
 	ivec3 coord = ivec3(gl_GlobalInvocationID);
-	if (any(greaterThanEqual(coord, ivec3(64)))) return;
+	if (any(greaterThanEqual(coord, ivec3(128)))) return;
 
-	vec3 p = (vec3(coord) + 0.5) / 64.0 - 0.5;
+	vec3 p = (vec3(coord) + 0.5) / 128.0 - 0.5;
 	float t = pc.time;
 	bool filled = false;
 

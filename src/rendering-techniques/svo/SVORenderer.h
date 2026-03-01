@@ -16,7 +16,7 @@ private:
 	VkExtent2D m_extent{};
 	std::shared_ptr<Camera> m_camera;
 
-	// Graph-managed 64^3 3D storage image
+	// Graph-managed 128^3 3D storage image
 	ImageHandle m_volume;
 	// Graph-managed SVO structure buffer
 	BufferHandle m_svo_buffer;
