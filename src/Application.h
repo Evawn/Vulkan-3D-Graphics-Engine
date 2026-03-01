@@ -15,6 +15,7 @@
 #include "MeshRasterizer.h"
 #include "ComputeTest.h"
 #include "SVORenderer.h"
+#include "SVOBackup.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <vector>
