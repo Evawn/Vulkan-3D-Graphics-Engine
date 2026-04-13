@@ -17,6 +17,7 @@
 #include "SVORenderer.h"
 #include "SVOBackup.h"
 #include "BrickmapRenderer.h"
+#include "BrickmapPaletteRenderer.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <vector>

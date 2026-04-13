@@ -1,0 +1,69 @@
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(r8ui, set = 0, binding = 0) uniform readonly uimage3D volume;
+
+layout(std430, set = 0, binding = 1) buffer BrickmapBuffer {
+	uint bm_volume_size;
+	uint bm_brick_size;
+	uint bm_grid_dim;
+	uint bm_brick_count;       // zeroed by CPU before dispatch, used as atomic counter
+	uint bm_top_grid[4096];    // 16^3 grid cells
+	uint bm_brick_data[];      // each brick = 128 uint32 (512 bytes of packed material indices)
+};
+
+layout(push_constant) uniform PC {
+	int volume_size;
+	int brick_size;
+} pc;
+
+void main() {
+	ivec3 gid = ivec3(gl_GlobalInvocationID);
+	int gd = pc.volume_size / pc.brick_size;  // 16
+
+	if (any(greaterThanEqual(gid, ivec3(gd)))) return;
+
+	// Write header (idempotent -- every thread writes the same values)
+	bm_volume_size = uint(pc.volume_size);
+	bm_brick_size = uint(pc.brick_size);
+	bm_grid_dim = uint(gd);
+
+	int bs = pc.brick_size;
+	int grid_idx = gid.x + gid.y * gd + gid.z * gd * gd;
+	ivec3 brick_origin = gid * bs;
+
+	// Build packed material data for this brick (128 uints = 512 bytes)
+	uint data[128];
+	for (int i = 0; i < 128; i++) data[i] = 0;
+
+	bool any_occupied = false;
+
+	for (int lz = 0; lz < bs; lz++) {
+		for (int ly = 0; ly < bs; ly++) {
+			for (int lx = 0; lx < bs; lx++) {
+				uvec4 v = imageLoad(volume, brick_origin + ivec3(lx, ly, lz));
+				uint mat = v.r;
+				if (mat != 0u) {
+					any_occupied = true;
+					int linear = lz * 64 + ly * 8 + lx;
+					int word_idx = linear / 4;
+					int byte_lane = linear % 4;
+					data[word_idx] |= (mat << (byte_lane * 8));
+				}
+			}
+		}
+	}
+
+	if (any_occupied) {
+		// Atomically allocate a brick index
+		uint brick_idx = atomicAdd(bm_brick_count, 1);
+		bm_top_grid[grid_idx] = brick_idx;
+		// Write packed material data into brick pool
+		for (int i = 0; i < 128; i++) {
+			bm_brick_data[brick_idx * 128 + i] = data[i];
+		}
+	} else {
+		bm_top_grid[grid_idx] = 0xFFFFFFFFu;
+	}
+}
