@@ -1,0 +1,68 @@
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(rgba8, set = 0, binding = 0) uniform readonly image3D volume;
+
+layout(std430, set = 0, binding = 1) buffer BrickmapBuffer {
+	uint bm_volume_size;
+	uint bm_brick_size;
+	uint bm_grid_dim;
+	uint bm_brick_count;       // zeroed by CPU before dispatch, used as atomic counter
+	uint bm_top_grid[4096];    // 16^3 grid cells
+	uint bm_brick_bitmasks[];  // each brick = 16 uint32 (512 bits)
+};
+
+layout(push_constant) uniform PC {
+	int volume_size;
+	int brick_size;
+} pc;
+
+void main() {
+	ivec3 gid = ivec3(gl_GlobalInvocationID);
+	int gd = pc.volume_size / pc.brick_size;  // 16
+
+	if (any(greaterThanEqual(gid, ivec3(gd)))) return;
+
+	// Write header (idempotent — every thread writes the same values)
+	bm_volume_size = uint(pc.volume_size);
+	bm_brick_size = uint(pc.brick_size);
+	bm_grid_dim = uint(gd);
+
+	int bs = pc.brick_size;
+	int grid_idx = gid.x + gid.y * gd + gid.z * gd * gd;
+	ivec3 brick_origin = gid * bs;
+
+	// Build 512-bit occupancy bitmask for this brick
+	uint bitmask[16];
+	for (int i = 0; i < 16; i++) bitmask[i] = 0;
+
+	bool any_occupied = false;
+
+	for (int lz = 0; lz < bs; lz++) {
+		for (int ly = 0; ly < bs; ly++) {
+			for (int lx = 0; lx < bs; lx++) {
+				vec4 v = imageLoad(volume, brick_origin + ivec3(lx, ly, lz));
+				if (v.a > 0.0) {
+					any_occupied = true;
+					int bit_idx = lz * 64 + ly * 8 + lx;
+					int word = bit_idx / 32;
+					int bit = bit_idx % 32;
+					bitmask[word] |= (1u << bit);
+				}
+			}
+		}
+	}
+
+	if (any_occupied) {
+		// Atomically allocate a brick index
+		uint brick_idx = atomicAdd(bm_brick_count, 1);
+		bm_top_grid[grid_idx] = brick_idx;
+		// Write bitmask into brick pool
+		for (int i = 0; i < 16; i++) {
+			bm_brick_bitmasks[brick_idx * 16 + i] = bitmask[i];
+		}
+	} else {
+		bm_top_grid[grid_idx] = 0xFFFFFFFFu;
+	}
+}

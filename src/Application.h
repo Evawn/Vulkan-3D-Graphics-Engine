@@ -16,6 +16,7 @@
 #include "ComputeTest.h"
 #include "SVORenderer.h"
 #include "SVOBackup.h"
+#include "BrickmapRenderer.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <vector>
