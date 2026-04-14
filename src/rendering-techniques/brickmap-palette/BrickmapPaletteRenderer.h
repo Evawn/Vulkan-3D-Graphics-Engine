@@ -10,7 +10,10 @@
 #include "ImageView.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
+#include "VoxLoader.h"
 #include <chrono>
+
+class RenderGraph;
 
 class BrickmapPaletteRenderer : public RenderTechnique {
 private:
@@ -59,12 +62,25 @@ private:
 	float m_time_scale = 1.0f;
 	std::chrono::steady_clock::time_point m_start_time;
 
+	// Dynamic volume sizing
+	uint32_t m_volume_size = 128;
+
+	// .vox file import state
+	std::string m_vox_file_path;
+	bool m_needs_reload = false;
+	bool m_needs_rebuild = false;
+	bool m_vox_active = false;
+	std::optional<VoxModel> m_pending_vox;
+	RenderGraph* m_graph = nullptr;
+
 	std::vector<TechniqueParameter> m_parameters;
 
 	void CreateComputePipeline();
 	void CreateBuildPipeline();
 	void CreateGraphicsPipeline();
 	void CreatePaletteTexture();
+	void UploadVolumeData(const uint8_t* data);
+	void UploadPalette(const uint8_t* rgbaData);
 
 public:
 	std::string GetName() const override { return "Brickmap Palette Renderer"; }
@@ -78,6 +94,10 @@ public:
 
 	void Shutdown() override {}
 	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override;
+
+	bool NeedsReload() const override { return m_needs_reload; }
+	void PerformReload(const RenderContext& ctx) override;
+	bool NeedsRebuild() const override { return m_needs_rebuild; }
 
 	void WriteGraphDescriptors(RenderGraph& graph) override;
 

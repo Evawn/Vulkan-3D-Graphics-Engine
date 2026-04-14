@@ -4,13 +4,12 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
 layout(r8ui, set = 0, binding = 0) uniform readonly uimage3D volume;
 
+// Flat uint array — layout adapts to any grid_dim (G):
+//   [0]: volume_size   [1]: brick_size   [2]: grid_dim   [3]: brick_count
+//   [4 .. 4+G³-1]:             top_grid
+//   [4+G³ ..]:                 brick_data (128 uint32 per brick)
 layout(std430, set = 0, binding = 1) buffer BrickmapBuffer {
-	uint bm_volume_size;
-	uint bm_brick_size;
-	uint bm_grid_dim;
-	uint bm_brick_count;       // zeroed by CPU before dispatch, used as atomic counter
-	uint bm_top_grid[4096];    // 16^3 grid cells
-	uint bm_brick_data[];      // each brick = 128 uint32 (512 bytes of packed material indices)
+	uint bm_data[];
 };
 
 layout(push_constant) uniform PC {
@@ -20,14 +19,16 @@ layout(push_constant) uniform PC {
 
 void main() {
 	ivec3 gid = ivec3(gl_GlobalInvocationID);
-	int gd = pc.volume_size / pc.brick_size;  // 16
+	int gd = pc.volume_size / pc.brick_size;
 
 	if (any(greaterThanEqual(gid, ivec3(gd)))) return;
 
 	// Write header (idempotent -- every thread writes the same values)
-	bm_volume_size = uint(pc.volume_size);
-	bm_brick_size = uint(pc.brick_size);
-	bm_grid_dim = uint(gd);
+	bm_data[0] = uint(pc.volume_size);
+	bm_data[1] = uint(pc.brick_size);
+	bm_data[2] = uint(gd);
+
+	uint grid_cells = uint(gd * gd * gd);
 
 	int bs = pc.brick_size;
 	int grid_idx = gid.x + gid.y * gd + gid.z * gd * gd;
@@ -56,14 +57,12 @@ void main() {
 	}
 
 	if (any_occupied) {
-		// Atomically allocate a brick index
-		uint brick_idx = atomicAdd(bm_brick_count, 1);
-		bm_top_grid[grid_idx] = brick_idx;
-		// Write packed material data into brick pool
+		uint brick_idx = atomicAdd(bm_data[3], 1);
+		bm_data[4 + grid_idx] = brick_idx;
 		for (int i = 0; i < 128; i++) {
-			bm_brick_data[brick_idx * 128 + i] = data[i];
+			bm_data[4 + grid_cells + brick_idx * 128 + i] = data[i];
 		}
 	} else {
-		bm_top_grid[grid_idx] = 0xFFFFFFFFu;
+		bm_data[4 + grid_idx] = 0xFFFFFFFFu;
 	}
 }

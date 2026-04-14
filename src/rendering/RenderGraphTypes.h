@@ -26,6 +26,7 @@ struct ImageDesc {
 	VkFormat format;
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 	VkImageType imageType = VK_IMAGE_TYPE_2D;
+	VkImageUsageFlags extraUsage = 0; // ORed into auto-derived usage flags
 };
 
 struct BufferDesc {

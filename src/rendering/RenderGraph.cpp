@@ -317,6 +317,11 @@ void RenderGraph::AccumulateUsageFlags() {
 			}
 		}
 	}
+
+	// Apply user-requested extra usage flags
+	for (auto& img : m_images) {
+		img.usageFlags |= img.desc.extraUsage;
+	}
 }
 
 void RenderGraph::AllocateTransientResources() {

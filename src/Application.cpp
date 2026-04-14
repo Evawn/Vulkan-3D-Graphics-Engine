@@ -192,6 +192,13 @@ void Application::ProcessEvents() {
 		vkDeviceWaitIdle(m_vk.device->Get());
 		technique->PerformReload(BuildRenderContext());
 	}
+
+	// Check if technique needs a full graph rebuild (e.g., volume size changed)
+	if (technique->NeedsRebuild()) {
+		vkDeviceWaitIdle(m_vk.device->Get());
+		m_editor.RemoveSceneTexture();
+		BuildRenderGraph();
+	}
 }
 
 void Application::DrawFrame() {

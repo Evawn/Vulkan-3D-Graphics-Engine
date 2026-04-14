@@ -10,13 +10,12 @@ layout(push_constant) uniform PushConstantBlock {
 	int debugColor;
 } pc;
 
+// Flat uint array — layout adapts to any grid_dim (G):
+//   [0]: volume_size   [1]: brick_size   [2]: grid_dim   [3]: brick_count
+//   [4 .. 4+G³-1]:             top_grid
+//   [4+G³ ..]:                 brick_data (128 uint32 per brick)
 layout(std430, set = 0, binding = 0) readonly buffer BrickmapBuffer {
-	uint bm_volume_size;
-	uint bm_brick_size;
-	uint bm_grid_dim;
-	uint bm_brick_count;
-	uint bm_top_grid[4096];
-	uint bm_brick_data[];   // 128 uints per brick (512 packed material bytes)
+	uint bm_data[];
 };
 
 layout(set = 0, binding = 1) uniform sampler2D palette_sampler;
@@ -28,12 +27,18 @@ const vec4 HORIZON_COLOR = vec4(0.8, 0.9, 1.0, 1.0);
 const vec3 VOLUME_ORIGIN = vec3(-1.0);
 const float VOLUME_SCALE = 2.0;
 
+// Cached from header — set once in main()
+uint g_volume_size;
+uint g_grid_dim;
+uint g_brick_size;
+uint g_grid_cells;
+
 vec3 worldToVoxel(vec3 p) {
-	return (p - VOLUME_ORIGIN) / VOLUME_SCALE * float(bm_volume_size);
+	return (p - VOLUME_ORIGIN) / VOLUME_SCALE * float(g_volume_size);
 }
 
 vec3 voxelToWorld(vec3 p) {
-	return p / float(bm_volume_size) * VOLUME_SCALE + VOLUME_ORIGIN;
+	return p / float(g_volume_size) * VOLUME_SCALE + VOLUME_ORIGIN;
 }
 
 vec4 missColor(vec3 direction) {
@@ -44,16 +49,21 @@ vec4 missColor(vec3 direction) {
 	else return HORIZON_COLOR * (2.0 - theta);
 }
 
-// Extract material index from packed brick data
 uint brickVoxelMaterial(uint brick_index, ivec3 local) {
 	int linear = local.z * 64 + local.y * 8 + local.x;
 	int word_idx = linear / 4;
 	int byte_lane = linear % 4;
-	uint word = bm_brick_data[brick_index * 128 + word_idx];
+	uint word = bm_data[4 + g_grid_cells + brick_index * 128 + word_idx];
 	return (word >> (byte_lane * 8)) & 0xFFu;
 }
 
 void main() {
+	// Read brickmap header
+	g_volume_size = bm_data[0];
+	g_brick_size  = bm_data[1];
+	g_grid_dim    = bm_data[2];
+	g_grid_cells  = g_grid_dim * g_grid_dim * g_grid_dim;
+
 	vec3 rayOrigin = pc.cameraPos;
 	vec4 transformed = pc.NDCtoWorld * vec4(texCoords, 1.0);
 	vec3 pixelLocation = transformed.xyz / transformed.w;
@@ -76,15 +86,15 @@ void main() {
 	float t = max(tEntry, 0.0) + 0.0001;
 	int total_iters = 0;
 
-	int grid_dim = int(bm_grid_dim);
-	int brick_size = int(bm_brick_size);
+	int grid_dim = int(g_grid_dim);
+	int brick_size = int(g_brick_size);
 	float brick_size_f = float(brick_size);
 
 	// Convert ray to voxel space for DDA
 	vec3 p_voxel = worldToVoxel(rayOrigin + direction * t);
-	p_voxel = clamp(p_voxel, vec3(0.001), vec3(float(bm_volume_size) - 0.001));
+	p_voxel = clamp(p_voxel, vec3(0.001), vec3(float(g_volume_size) - 0.001));
 
-	// --- Outer DDA setup on the top-level grid (16^3) ---
+	// --- Outer DDA setup on the top-level grid ---
 	ivec3 cell = ivec3(floor(p_voxel / brick_size_f));
 	cell = clamp(cell, ivec3(0), ivec3(grid_dim - 1));
 
@@ -96,7 +106,7 @@ void main() {
 	);
 
 	// Distance in t for one full grid cell along each axis
-	vec3 tDelta = abs(vec3(brick_size_f) / (direction * float(bm_volume_size) / VOLUME_SCALE));
+	vec3 tDelta = abs(vec3(brick_size_f) / (direction * float(g_volume_size) / VOLUME_SCALE));
 
 	// Distance to the next grid boundary along each axis
 	vec3 cell_world_min = voxelToWorld(vec3(cell) * brick_size_f);
@@ -120,7 +130,7 @@ void main() {
 		}
 
 		int grid_idx = cell.x + cell.y * grid_dim + cell.z * grid_dim * grid_dim;
-		uint brick_index = bm_top_grid[grid_idx];
+		uint brick_index = bm_data[4 + grid_idx];
 
 		if (brick_index != 0xFFFFFFFFu) {
 			// --- Inner DDA: step through 8^3 voxels inside this brick ---
@@ -136,7 +146,7 @@ void main() {
 			local_coord = clamp(local_coord, ivec3(0), ivec3(brick_size - 1));
 
 			// Inner DDA: distance per voxel along each axis
-			vec3 tDeltaInner = abs(vec3(1.0) / (direction * float(bm_volume_size) / VOLUME_SCALE));
+			vec3 tDeltaInner = abs(vec3(1.0) / (direction * float(g_volume_size) / VOLUME_SCALE));
 
 			// Distance to next voxel boundary
 			vec3 voxel_world_min = voxelToWorld(brick_origin_voxel + vec3(local_coord));

@@ -7,15 +7,16 @@ layout(r8ui, set = 0, binding = 0) uniform writeonly uimage3D volume;
 layout(push_constant) uniform PC {
 	int shape;
 	float time;
+	int volume_size;
 } pc;
 
 const float PI = 3.14159265;
 
 void main() {
 	ivec3 coord = ivec3(gl_GlobalInvocationID);
-	if (any(greaterThanEqual(coord, ivec3(128)))) return;
+	if (any(greaterThanEqual(coord, ivec3(pc.volume_size)))) return;
 
-	vec3 p = (vec3(coord) + 0.5) / 128.0 - 0.5;
+	vec3 p = (vec3(coord) + 0.5) / float(pc.volume_size) - 0.5;
 	float t = pc.time;
 	bool filled = false;
 	uint materialIndex = 0u;

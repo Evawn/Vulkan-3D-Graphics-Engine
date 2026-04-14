@@ -82,4 +82,7 @@ public:
 	// Deferred reload support (for file parameter changes)
 	virtual bool NeedsReload() const { return false; }
 	virtual void PerformReload(const RenderContext& ctx) { (void)ctx; }
+
+	// Graph rebuild support (for resource size changes)
+	virtual bool NeedsRebuild() const { return false; }
 };

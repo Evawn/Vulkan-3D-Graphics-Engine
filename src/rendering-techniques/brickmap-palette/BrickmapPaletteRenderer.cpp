@@ -25,6 +25,7 @@ static void hsvToRgb(float h, float s, float v, uint8_t& r, uint8_t& g, uint8_t&
 struct BrickmapPaletteGeneratePC {
 	int shape;
 	float time;
+	int volume_size;
 };
 
 struct BrickmapPaletteBuildPC {
@@ -114,28 +115,40 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	m_camera = ctx.camera;
 	m_start_time = std::chrono::steady_clock::now();
 
-	// 128^3 3D storage image for voxel volume (R8_UINT: material index per voxel)
+	m_graph = &graph;
+	m_needs_rebuild = false; // clear rebuild flag (we're rebuilding now)
+
+	uint32_t vs = m_volume_size;
+	uint32_t grid_dim = vs / 8;
+	uint32_t grid_cells = grid_dim * grid_dim * grid_dim;
+	VkDeviceSize brickmapSize = (4 + grid_cells + grid_cells * 128) * sizeof(uint32_t);
+
+	logger->info("BrickmapPaletteRenderer: volume={}^3, grid={}^3, buffer={} bytes",
+		vs, grid_dim, brickmapSize);
+
+	// 3D storage image for voxel volume (R8_UINT: material index per voxel)
+	// extraUsage: TRANSFER_DST for CPU-side .vox upload via staging buffer
 	m_volume = graph.CreateImage("brickmap_palette_volume", {
-		128, 128, 128,
+		vs, vs, vs,
 		VK_FORMAT_R8_UINT,
 		VK_SAMPLE_COUNT_1_BIT,
-		VK_IMAGE_TYPE_3D
+		VK_IMAGE_TYPE_3D,
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT
 	});
 
-	// Brickmap structure buffer:
-	//   Header:       16 bytes (4 uint32)
-	//   Top grid:     16^3 * 4 = 16384 bytes
-	//   Brick pool:   up to 4096 bricks * 128 uint32 * 4 = 2097152 bytes
-	//   Total:        2113552 bytes
+	// Brickmap structure buffer (dynamic layout):
+	//   Header:       4 uint32 (16 bytes)
+	//   Top grid:     grid_dim^3 uint32
+	//   Brick pool:   up to grid_dim^3 bricks * 128 uint32
 	m_brickmap_buffer = graph.CreateBuffer("brickmap_palette_data", {
-		2113552,
+		brickmapSize,
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
 	});
 
 	// Compute pass: generate voxels into volume
 	graph.AddComputePass("Brickmap Palette Generate")
 		.Write(m_volume)
-		.SetRecord([this](PassContext& ctx) {
+		.SetRecord([this, vs](PassContext& ctx) {
 			ctx.cmd->CmdBindComputePipeline(m_compute_pipeline);
 			ctx.cmd->CmdBindComputeDescriptorSets(m_compute_pipeline->GetLayout(),
 				{ m_compute_descriptor_set->Get() });
@@ -143,17 +156,18 @@ void BrickmapPaletteRenderer::RegisterPasses(
 			pc.shape = m_shape;
 			auto now = std::chrono::steady_clock::now();
 			pc.time = std::chrono::duration<float>(now - m_start_time).count() * m_time_scale;
+			pc.volume_size = static_cast<int>(vs);
 			vkCmdPushConstants(ctx.cmd->Get(), m_compute_pipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-			// 128 / 4 = 32 workgroups per axis
-			ctx.cmd->CmdDispatch(32, 32, 32);
+			uint32_t wg = vs / 4; // local_size = 4
+			ctx.cmd->CmdDispatch(wg, wg, wg);
 		});
 
 	// Compute pass: build brickmap from voxel volume
 	graph.AddComputePass("Brickmap Palette Build")
 		.Read(m_volume)
 		.Write(m_brickmap_buffer)
-		.SetRecord([this](PassContext& ctx) {
+		.SetRecord([this, vs, grid_dim](PassContext& ctx) {
 			auto vk_cmd = ctx.cmd->Get();
 
 			// Zero the brick_count atomic counter (offset 12, size 4) before dispatch
@@ -172,12 +186,12 @@ void BrickmapPaletteRenderer::RegisterPasses(
 			ctx.cmd->CmdBindComputeDescriptorSets(m_build_pipeline->GetLayout(),
 				{ m_build_descriptor_set->Get() });
 			BrickmapPaletteBuildPC pc{};
-			pc.volume_size = 128;
+			pc.volume_size = static_cast<int>(vs);
 			pc.brick_size = 8;
 			vkCmdPushConstants(vk_cmd, m_build_pipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-			// 16 / 4 = 4 workgroups per axis
-			ctx.cmd->CmdDispatch(4, 4, 4);
+			uint32_t wg = grid_dim / 4; // local_size = 4
+			ctx.cmd->CmdDispatch(wg, wg, wg);
 		});
 
 	// Graphics pass: brickmap two-level DDA ray-march with palette colors
@@ -258,6 +272,17 @@ void BrickmapPaletteRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 	auto volumeView = graph.GetImageView(m_volume);
 	auto brickmapBuffer = graph.GetBuffer(m_brickmap_buffer);
 	m_brickmap_vk_buffer = brickmapBuffer->Get();
+
+	// Upload pending .vox data after graph rebuild
+	if (m_pending_vox) {
+		m_vox_active = true;
+		graph.SetPassEnabled("Brickmap Palette Generate", false);
+		UploadVolumeData(m_pending_vox->volume.data());
+		UploadPalette(m_pending_vox->palette.data());
+		spdlog::get("Render")->info("BrickmapPaletteRenderer: Uploaded pending .vox ({}x{}x{}, volume={}^3)",
+			m_pending_vox->sizeX, m_pending_vox->sizeY, m_pending_vox->sizeZ, m_pending_vox->volumeSize);
+		m_pending_vox.reset();
+	}
 
 	// Generate descriptor: storage image in GENERAL layout
 	{
@@ -408,10 +433,106 @@ std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
 			{ "Sky Color", TechniqueParameter::Color3, m_sky_color },
 			{ "Debug Coloring", TechniqueParameter::Bool, &m_debug_color },
 		};
+
+		TechniqueParameter voxFile;
+		voxFile.label = "VOX Model";
+		voxFile.type = TechniqueParameter::File;
+		voxFile.filePath = &m_vox_file_path;
+		voxFile.fileFilters = {"vox"};
+		voxFile.fileFilterDesc = "MagicaVoxel Models";
+		voxFile.onFileChanged = [this](const std::string&) {
+			m_needs_reload = true;
+		};
+		m_parameters.push_back(std::move(voxFile));
 	}
 	return m_parameters;
 }
 
 FrameStats BrickmapPaletteRenderer::GetFrameStats() const {
 	return { 3, 4, 0 };
+}
+
+void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
+	m_needs_reload = false;
+	auto logger = spdlog::get("Render");
+
+	if (m_vox_file_path.empty()) {
+		// Switch back to procedural mode
+		if (m_vox_active) {
+			logger->info("BrickmapPaletteRenderer: Restoring procedural mode");
+			m_vox_active = false;
+			if (m_volume_size != 128) {
+				m_volume_size = 128;
+				m_needs_rebuild = true; // graph rebuild will re-enable generate pass
+			} else {
+				m_graph->SetPassEnabled("Brickmap Palette Generate", true);
+				CreatePaletteTexture();
+			}
+		}
+		return;
+	}
+
+	auto model = LoadVoxFile(m_vox_file_path);
+	if (!model) {
+		logger->error("BrickmapPaletteRenderer: Failed to load .vox file");
+		return;
+	}
+
+	if (model->volumeSize != m_volume_size) {
+		// Volume size changed — need graph rebuild
+		m_volume_size = model->volumeSize;
+		m_pending_vox = std::move(*model);
+		m_needs_rebuild = true;
+		logger->info("BrickmapPaletteRenderer: Volume resize to {}^3, rebuilding graph", m_volume_size);
+		return;
+	}
+
+	// Same size — upload directly
+	m_vox_active = true;
+	m_graph->SetPassEnabled("Brickmap Palette Generate", false);
+
+	UploadVolumeData(model->volume.data());
+	UploadPalette(model->palette.data());
+
+	logger->info("BrickmapPaletteRenderer: Loaded .vox model ({}x{}x{}, volume={}^3)",
+		model->sizeX, model->sizeY, model->sizeZ, model->volumeSize);
+}
+
+void BrickmapPaletteRenderer::UploadVolumeData(const uint8_t* data) {
+	uint32_t vs = m_volume_size;
+	VkDeviceSize size = static_cast<VkDeviceSize>(vs) * vs * vs;
+
+	auto staging = VWrap::Buffer::CreateStaging(m_allocator, size);
+	void* mapped = staging->Map();
+	std::memcpy(mapped, data, size);
+	staging->Unmap();
+
+	auto volumeImage = m_graph->GetImage(m_volume);
+
+	auto cmd = VWrap::CommandBuffer::Create(m_graphics_pool);
+	cmd->BeginSingle();
+	cmd->CmdTransitionImageLayout(volumeImage, VK_FORMAT_R8_UINT,
+		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	cmd->CmdCopyBufferToImage(staging, volumeImage, vs, vs, vs);
+	cmd->CmdTransitionImageLayout(volumeImage, VK_FORMAT_R8_UINT,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+	cmd->EndAndSubmit();
+}
+
+void BrickmapPaletteRenderer::UploadPalette(const uint8_t* rgbaData) {
+	VkDeviceSize imageSize = 256 * 4;
+
+	auto staging = VWrap::Buffer::CreateStaging(m_allocator, imageSize);
+	void* mapped = staging->Map();
+	std::memcpy(mapped, rgbaData, imageSize);
+	staging->Unmap();
+
+	auto cmd = VWrap::CommandBuffer::Create(m_graphics_pool);
+	cmd->BeginSingle();
+	cmd->CmdTransitionImageLayout(m_palette_image, VK_FORMAT_R8G8B8A8_UNORM,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	cmd->CmdCopyBufferToImage(staging, m_palette_image, 256, 1, 1);
+	cmd->CmdTransitionImageLayout(m_palette_image, VK_FORMAT_R8G8B8A8_UNORM,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	cmd->EndAndSubmit();
 }
