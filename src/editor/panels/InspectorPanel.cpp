@@ -113,6 +113,10 @@ void InspectorPanel::Draw() {
 		ImGui::SliderFloat("Sun Angular Size", &m_lighting->sunAngularSize, 0.1f, 15.0f, "%.2f deg");
 		ImGui::SliderFloat("Sun Intensity", &m_lighting->sunIntensity, 0.0f, 5.0f, "%.2f");
 		ImGui::ColorEdit3("Sun Color",      m_lighting->sunColor);
+		ImGui::Separator();
+		ImGui::SliderFloat("Ambient Intensity", &m_lighting->ambientIntensity, 0.0f, 1.0f, "%.2f");
+		ImGui::SliderFloat("AO Strength",       &m_lighting->aoStrength,       0.0f, 1.0f, "%.2f");
+		ImGui::Checkbox   ("Sun Shadows",       &m_lighting->shadowsEnabled);
 	}
 
 	// === Post-Processing ===

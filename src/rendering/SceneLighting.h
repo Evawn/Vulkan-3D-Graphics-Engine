@@ -16,6 +16,11 @@ struct SceneLighting {
 	float sunIntensity = 1.0f;    // scalar multiplier for disk color
 	float sunColor[3] = { 1.0f, 0.98f, 0.92f };
 
+	// Surface-shading controls (consumed by the brickmap palette tracer).
+	float ambientIntensity = 0.35f;  // skyColor * this = ambient term, modulated by AO
+	float aoStrength       = 1.0f;   // 0 disables corner AO; 1 = full weight
+	bool  shadowsEnabled   = true;   // gates the secondary DDA march toward the sun
+
 	// Direction pointing from origin toward the sun (unit vector). World-space, +Z = up.
 	glm::vec3 GetSunDirection() const {
 		float az = glm::radians(sunAzimuth);

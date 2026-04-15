@@ -46,7 +46,11 @@ struct BrickmapPaletteTracePC {
 	glm::vec3 skyColor;       int debugColor;
 	glm::vec3 sunDirection;   float sunCosHalfAngle;
 	glm::vec3 sunColor;       float sunIntensity;
+	float ambientIntensity;   float aoStrength;
+	int   shadowsEnabled;     int   _pad0;
 };
+static_assert(sizeof(BrickmapPaletteTracePC) == 144,
+	"BrickmapPaletteTracePC must stay in std140 layout — 144 bytes");
 
 void BrickmapPaletteRenderer::CreatePaletteTexture() {
 	// 256-entry RGBA palette: index 0 = empty, 1-9 = shape colors
@@ -234,6 +238,9 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				pc.sunCosHalfAngle = m_lighting->GetSunCosHalfAngle();
 				pc.sunColor = glm::vec3(m_lighting->sunColor[0], m_lighting->sunColor[1], m_lighting->sunColor[2]);
 				pc.sunIntensity = m_lighting->sunIntensity;
+				pc.ambientIntensity = m_lighting->ambientIntensity;
+				pc.aoStrength = m_lighting->aoStrength;
+				pc.shadowsEnabled = m_lighting->shadowsEnabled ? 1 : 0;
 			} else {
 				// No lighting state — place the sun below the horizon so the disk test
 				// never passes and the sky renders as pure gradient.
@@ -241,7 +248,11 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				pc.sunCosHalfAngle = 1.0f;
 				pc.sunColor = glm::vec3(1.0f);
 				pc.sunIntensity = 0.0f;
+				pc.ambientIntensity = 1.0f;
+				pc.aoStrength = 0.0f;
+				pc.shadowsEnabled = 0;
 			}
+			pc._pad0 = 0;
 			vkCmdPushConstants(vk_cmd, m_graphics_pipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BrickmapPaletteTracePC), &pc);
 
