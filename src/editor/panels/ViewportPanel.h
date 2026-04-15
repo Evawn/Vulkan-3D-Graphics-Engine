@@ -1,6 +1,7 @@
 #pragma once
 
 #include "imgui.h"
+#include "../UIState.h"
 #include <vulkan/vulkan.h>
 
 class ViewportPanel {
@@ -12,9 +13,11 @@ private:
 	bool m_hovered = false;
 	bool m_was_resized = false;
 	bool m_clicked = false;
+	UIState* m_ui = nullptr;
 
 public:
 	void SetTextureID(VkDescriptorSet texID) { m_texture_id = texID; }
+	void SetUIState(UIState* ui) { m_ui = ui; }
 	void Draw();
 
 	bool IsFocused() const { return m_focused; }

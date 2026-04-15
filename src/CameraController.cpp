@@ -14,7 +14,9 @@ std::shared_ptr<CameraController> CameraController::Create(std::shared_ptr<Camer
 			{{GLFW_KEY_D, KeyState::DOWN}, (int)Action::MOVE_RIGHT},
 			{{GLFW_KEY_SPACE, KeyState::DOWN}, (int)Action::MOVE_UP},
 			{{GLFW_KEY_LEFT_SHIFT, KeyState::DOWN}, (int)Action::MOVE_DOWN},
-			{{GLFW_KEY_F5, KeyState::PRESSED}, (int)Action::RELOAD_SHADERS}
+			{{GLFW_KEY_F5, KeyState::PRESSED}, (int)Action::RELOAD_SHADERS},
+			{{GLFW_KEY_F, KeyState::PRESSED}, (int)Action::TOGGLE_VIEWPORT_ONLY},
+			{{GLFW_KEY_F11, KeyState::PRESSED}, (int)Action::TOGGLE_OS_FULLSCREEN}
 		}
 	};
 	Input::AddContext(ret->m_context);
@@ -37,6 +39,7 @@ void CameraController::SetFocused(bool focused) {
 	if (!focused) {
 		m_move_state = {};
 	}
+	if (m_focus_changed) m_focus_changed(focused);
 }
 
 void CameraController::ParseInput(const InputQuery& query) {
@@ -73,6 +76,12 @@ void CameraController::ParseInput(const InputQuery& query) {
 			break;
 		case Action::RELOAD_SHADERS:
 			if (m_reload_callback) m_reload_callback();
+			break;
+		case Action::TOGGLE_VIEWPORT_ONLY:
+			if (m_toggle_viewport_only) m_toggle_viewport_only();
+			break;
+		case Action::TOGGLE_OS_FULLSCREEN:
+			if (m_toggle_fullscreen) m_toggle_fullscreen();
 			break;
 		default:
 			return;

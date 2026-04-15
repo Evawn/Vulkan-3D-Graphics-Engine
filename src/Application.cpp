@@ -61,6 +61,17 @@ void Application::Init() {
 	m_camera_controller->SetReloadCallback([this]() {
 		PushEvent({AppEventType::HotReloadShaders});
 	});
+	m_camera_controller->SetToggleViewportOnlyCallback([this]() {
+		auto* s = m_editor.GetState();
+		s->viewport_only = !s->viewport_only;
+	});
+	m_camera_controller->SetToggleFullscreenCallback([this]() {
+		bool fs = m_window->ToggleFullscreen();
+		m_editor.GetState()->os_fullscreen = fs;
+	});
+	m_camera_controller->SetFocusChangedCallback([this](bool focused) {
+		m_editor.GetState()->camera_focused = focused;
+	});
 
 	// Initialize panels (needs camera, controller, renderers)
 	m_editor.InitPanels(&m_renderers, &m_active_renderer_index, m_camera, m_camera_controller, m_vk);
@@ -95,6 +106,8 @@ void Application::InitVulkan() {
 
 	m_window->SetFramebufferResizeCallback([this]() {
 		m_vk.frameController->SetResized(true);
+		// Preserve side/bottom panel pixel widths — let the viewport absorb the delta.
+		m_editor.GetState()->layout_dirty = true;
 	});
 	m_window->SetContentScaleCallback([this](float scale) {
 		PushEvent({AppEventType::DpiChanged, 0, scale});
@@ -112,6 +125,14 @@ void Application::BuildRenderGraph() {
 		[this](PassContext& ctx) {
 			m_editor.CmdDraw(ctx.cmd);
 		});
+
+	// Techniques create their graphics pipeline inside RegisterPasses using
+	// the render pass returned by GetRenderPassPtr(), but Compile() later
+	// resets each graphics pass's VkRenderPass and creates a fresh one.
+	// Recreate pipelines now so they bind against the post-Compile render pass.
+	auto ctx = BuildRenderContext();
+	m_renderers[m_active_renderer_index]->RecreatePipeline(ctx);
+	m_renderer.GetPostProcess().RecreatePipelines();
 
 	m_editor.RegisterSceneTexture(m_renderer.GetFinalSceneView());
 

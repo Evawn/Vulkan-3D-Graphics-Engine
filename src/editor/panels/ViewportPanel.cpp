@@ -1,8 +1,12 @@
 #include "ViewportPanel.h"
+#include "../UIStyle.h"
 
 void ViewportPanel::Draw() {
+	const bool active = m_ui && m_ui->camera_focused;
+
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-	ImGui::Begin("Viewport");
+	ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
+	ImGui::Begin("Viewport", nullptr, flags);
 
 	m_focused = ImGui::IsWindowFocused();
 	m_hovered = ImGui::IsWindowHovered();
@@ -23,6 +27,19 @@ void ViewportPanel::Draw() {
 		if (ImGui::IsItemClicked()) {
 			m_clicked = true;
 		}
+	}
+
+	// Camera-focused outline: drawn with the window's draw list so docking chrome
+	// can't paint over it. Inset by 1px so the stroke sits fully inside the viewport.
+	if (active) {
+		ImVec2 p_min = ImGui::GetWindowPos();
+		ImVec2 sz   = ImGui::GetWindowSize();
+		ImVec2 p_max = ImVec2(p_min.x + sz.x, p_min.y + sz.y);
+		ImU32 col = ImGui::ColorConvertFloat4ToU32(UIStyle::kAccent);
+		ImGui::GetWindowDrawList()->AddRect(
+			ImVec2(p_min.x + 0.5f, p_min.y + 0.5f),
+			ImVec2(p_max.x - 0.5f, p_max.y - 0.5f),
+			col, 0.0f, 0, 1.0f);
 	}
 
 	ImGui::End();

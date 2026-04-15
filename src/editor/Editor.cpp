@@ -14,6 +14,7 @@ void Editor::InitImGui(VWrap::VulkanContext& vk,
 					   std::shared_ptr<VWrap::RenderPass> renderPass,
 					   Window& window) {
 	m_gui = GUIRenderer::Create(vk.device);
+	m_gui->SetUIState(&m_ui);
 	m_scene_sampler = VWrap::Sampler::Create(vk.device);
 
 	VWrap::QueueFamilyIndices indices = vk.physicalDevice->FindQueueFamilies();
@@ -50,6 +51,7 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 						VWrap::VulkanContext& vk) {
 	// Viewport panel
 	m_viewport.SetTextureID(m_scene_texture);
+	m_viewport.SetUIState(&m_ui);
 	m_gui->RegisterPanel("Viewport", [this]() { m_viewport.Draw(); });
 
 	// Metrics panel

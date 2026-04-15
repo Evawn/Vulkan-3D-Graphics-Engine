@@ -61,6 +61,24 @@ void Window::SetContentScaleCallback(std::function<void(float)> cb) {
 	m_on_scale_change = std::move(cb);
 }
 
+bool Window::ToggleFullscreen() {
+	GLFWwindow* raw = *m_handle;
+	if (!m_is_fullscreen) {
+		// Save current windowed rect so we can restore later.
+		glfwGetWindowPos(raw, &m_saved_x, &m_saved_y);
+		glfwGetWindowSize(raw, &m_saved_w, &m_saved_h);
+
+		GLFWmonitor* monitor = GetCurrentMonitor(raw);
+		const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+		glfwSetWindowMonitor(raw, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+		m_is_fullscreen = true;
+	} else {
+		glfwSetWindowMonitor(raw, nullptr, m_saved_x, m_saved_y, m_saved_w, m_saved_h, 0);
+		m_is_fullscreen = false;
+	}
+	return m_is_fullscreen;
+}
+
 void Window::Destroy() {
 	if (m_handle && *m_handle) {
 		glfwDestroyWindow(*m_handle);

@@ -18,6 +18,11 @@ public:
 	void SetFramebufferResizeCallback(std::function<void()> cb);
 	void SetContentScaleCallback(std::function<void(float)> cb);
 
+	// Toggle borderless fullscreen on the monitor the window currently overlaps most.
+	// Returns the new fullscreen state (true = fullscreen).
+	bool ToggleFullscreen();
+	bool IsFullscreen() const { return m_is_fullscreen; }
+
 	void Destroy();
 	~Window();
 
@@ -27,6 +32,10 @@ private:
 	std::shared_ptr<GLFWwindow*> m_handle;
 	std::function<void()> m_on_resize;
 	std::function<void(float)> m_on_scale_change;
+
+	// Windowed-mode rect saved so ToggleFullscreen can restore it.
+	bool m_is_fullscreen = false;
+	int m_saved_x = 0, m_saved_y = 0, m_saved_w = 0, m_saved_h = 0;
 
 	static GLFWmonitor* GetCurrentMonitor(GLFWwindow* window);
 	static void glfw_FramebufferResizeCallback(GLFWwindow* window, int width, int height);

@@ -477,6 +477,24 @@ void RenderGraph::ComputeBarriers() {
 		if (ref.type == PassType::Compute) {
 			auto& pass = *m_computePasses[ref.index];
 
+			// Image read barriers: ensure previous writes to the image are
+			// made visible before this compute pass reads it, and transition
+			// to GENERAL (the only layout compute shaders can sample/load from
+			// as a storage image).
+			for (const auto& img : pass.m_readImages) {
+				VkImageLayout required = VK_IMAGE_LAYOUT_GENERAL;
+				ImageBarrier barrier;
+				barrier.image = img;
+				barrier.srcStage = lastImageWriter[img.id].stage;
+				barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+				barrier.srcAccess = lastImageWriter[img.id].access;
+				barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
+				barrier.oldLayout = currentLayout[img.id];
+				barrier.newLayout = required;
+				m_barriers[i].imageBarriers.push_back(barrier);
+				currentLayout[img.id] = required;
+			}
+
 			// Image write barriers
 			for (const auto& img : pass.m_writeImages) {
 				if (currentLayout[img.id] != VK_IMAGE_LAYOUT_GENERAL) {
@@ -765,6 +783,10 @@ void RenderGraph::Resize(VkExtent2D newExtent) {
 
 	for (auto& res : m_images) {
 		if (res.imported) continue;
+		// Preserve 3D volumes across resize — their contents (e.g. uploaded
+		// .vox data) would otherwise be wiped and there's no producer pass
+		// running every frame to refill them once Generate is disabled.
+		if (res.desc.imageType == VK_IMAGE_TYPE_3D) continue;
 		res.image.reset();
 		res.view.reset();
 		res.usageFlags = 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GUIRenderer.h"
+#include "UIState.h"
 #include "ViewportPanel.h"
 #include "MetricsPanel.h"
 #include "OutputPanel.h"
@@ -74,7 +75,11 @@ public:
 	void SetGraphSnapshot(const GraphSnapshot* snapshot);
 	void SetPerformanceMetrics(const GPUProfiler::PerformanceMetrics* metrics);
 
+	// Shared UI state (panel sizes, viewport-only mode, camera focus mirror, etc.)
+	UIState* GetState() { return &m_ui; }
+
 private:
+	UIState m_ui;
 	std::shared_ptr<GUIRenderer> m_gui;
 	std::shared_ptr<VWrap::Sampler> m_scene_sampler;
 	VkDescriptorSet m_scene_texture = VK_NULL_HANDLE;

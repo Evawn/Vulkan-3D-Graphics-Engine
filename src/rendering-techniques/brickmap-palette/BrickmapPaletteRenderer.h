@@ -60,7 +60,7 @@ private:
 	int m_shape = 0;
 	int m_max_iterations = 250;
 	float m_sky_color[3] = { 0.529f, 0.808f, 0.922f };
-	bool m_debug_color = true;
+	bool m_debug_color = false;
 	float m_time_scale = 1.0f;
 	std::chrono::steady_clock::time_point m_start_time;
 
