@@ -66,6 +66,10 @@ public:
 	// Screenshot path forwarding
 	void SetLastScreenshotPath(const std::string& path);
 
+	// Inspector wiring for lighting + post-process (called once after construction)
+	void SetLighting(SceneLighting* lighting) { m_inspector.SetLighting(lighting); }
+	void SetPostProcess(PostProcessChain* chain) { m_inspector.SetPostProcess(chain); }
+
 	// Render Graph panel
 	void SetGraphSnapshot(const GraphSnapshot* snapshot);
 	void SetPerformanceMetrics(const GPUProfiler::PerformanceMetrics* metrics);

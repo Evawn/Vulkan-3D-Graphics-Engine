@@ -2,11 +2,14 @@
 
 #include "imgui.h"
 #include "RenderTechnique.h"
+#include "SceneLighting.h"
 #include "Camera.h"
 #include <vector>
 #include <memory>
 #include <functional>
 #include <string>
+
+class PostProcessChain;
 
 class InspectorPanel {
 private:
@@ -25,6 +28,10 @@ private:
 	std::function<void()> m_screenshot_callback;
 	std::string m_last_screenshot_path;
 
+	// Lighting + post-processing (owned by Renderer; panel just edits them)
+	SceneLighting* m_lighting = nullptr;
+	PostProcessChain* m_post_process = nullptr;
+
 public:
 	void SetRenderers(std::vector<std::unique_ptr<RenderTechnique>>* renderers, size_t* activeIndex);
 	void SetReloadCallback(std::function<void()> cb) { m_reload_callback = std::move(cb); }
@@ -33,5 +40,7 @@ public:
 	void SetAppControls(float* sensitivity, float* speed) { m_sensitivity = sensitivity; m_speed = speed; }
 	void SetScreenshotCallback(std::function<void()> cb) { m_screenshot_callback = std::move(cb); }
 	void SetLastScreenshotPath(const std::string& path) { m_last_screenshot_path = path; }
+	void SetLighting(SceneLighting* lighting) { m_lighting = lighting; }
+	void SetPostProcess(PostProcessChain* chain) { m_post_process = chain; }
 	void Draw();
 };

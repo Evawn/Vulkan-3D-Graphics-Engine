@@ -11,6 +11,7 @@
 #include "Buffer.h"
 #include "CommandBuffer.h"
 #include "VoxLoader.h"
+#include "SceneLighting.h"
 #include <chrono>
 #include <glm/glm.hpp>
 
@@ -73,6 +74,12 @@ private:
 	bool m_vox_active = false;
 	std::optional<VoxModel> m_pending_vox;
 	RenderGraph* m_graph = nullptr;
+
+	// Shared, non-owning pointer to renderer-owned lighting state. Captured from
+	// RenderContext during RegisterPasses; read during per-frame record to
+	// populate sun push constants. Survives RegisterPasses lifetime because the
+	// Renderer owns it.
+	const SceneLighting* m_lighting = nullptr;
 
 	std::vector<TechniqueParameter> m_parameters;
 

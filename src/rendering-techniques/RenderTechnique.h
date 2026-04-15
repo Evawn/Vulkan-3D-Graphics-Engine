@@ -14,6 +14,7 @@
 
 class RenderGraph;
 struct ImageHandle;
+struct SceneLighting;
 
 struct RenderContext {
 	std::shared_ptr<VWrap::Device> device;
@@ -23,6 +24,7 @@ struct RenderContext {
 	VkExtent2D extent;
 	uint32_t maxFramesInFlight;
 	std::shared_ptr<Camera> camera;
+	SceneLighting* lighting = nullptr;  // shared, non-owning; renderer-owned state
 };
 
 struct TechniqueParameter {

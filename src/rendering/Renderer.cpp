@@ -16,6 +16,17 @@ void Renderer::Build(
 	m_graph.Clear();
 	m_offscreenExtent = ctx.extent;
 
+	// Ensure the post-process chain has up-to-date context (effects may be
+	// registered by Application before Build() is first called).
+	PostProcessContext ppCtx{};
+	ppCtx.device = m_config.device;
+	ppCtx.allocator = m_config.allocator;
+	ppCtx.sceneFormat = m_config.swapchainFormat;
+	ppCtx.maxFramesInFlight = m_config.maxFramesInFlight;
+	ppCtx.camera = ctx.camera;
+	ppCtx.lighting = &m_lighting;
+	m_postProcess.SetContext(ppCtx);
+
 	// Create scene images (MSAA color, depth, resolve)
 	m_sceneColor = m_graph.CreateImage("scene_color", {
 		m_offscreenExtent.width, m_offscreenExtent.height, 1,
@@ -30,22 +41,27 @@ void Renderer::Build(
 	// Register technique passes
 	technique->RegisterPasses(m_graph, ctx, m_sceneColor, m_sceneDepth, m_sceneResolve);
 
+	// Register post-process passes; chain threads sceneResolve through any
+	// enabled effects and returns the final scene image.
+	m_finalScene = m_postProcess.Register(m_graph, m_sceneResolve, m_offscreenExtent);
+
 	// Import swapchain image (updated per-frame)
 	m_swapchain = m_graph.ImportImage("swapchain",
 		swapchainView, m_config.swapchainFormat,
 		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, swapchainExtent);
 
-	// UI/presentation pass: renders to swapchain, reads scene resolve
+	// UI/presentation pass: renders to swapchain, reads post-processed scene
 	m_graph.AddGraphicsPass("UI")
 		.SetColorAttachment(m_swapchain, LoadOp::Clear, StoreOp::Store,
 			0.059f, 0.059f, 0.059f, 1.0f)
-		.Read(m_sceneResolve)
+		.Read(m_finalScene)
 		.SetRecord(std::move(presentRecordFn));
 
 	m_graph.Compile();
 
-	// Post-compile: techniques write descriptors for graph-allocated images
+	// Post-compile: techniques and effects write descriptors for graph-allocated images
 	technique->WriteGraphDescriptors(m_graph);
+	m_postProcess.WriteGraphDescriptors(m_graph);
 }
 
 void Renderer::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
@@ -72,6 +88,7 @@ void Renderer::OnViewportResize(VkExtent2D newExtent, RenderTechnique* technique
 	m_graph.Resize(newExtent);
 	technique->WriteGraphDescriptors(m_graph);
 	technique->OnResize(newExtent, m_graph);
+	m_postProcess.OnResize(newExtent, m_graph);
 }
 
 void Renderer::Rebuild(
@@ -87,4 +104,8 @@ void Renderer::Rebuild(
 
 std::shared_ptr<VWrap::ImageView> Renderer::GetSceneResolveView() const {
 	return m_graph.GetImageView(m_sceneResolve);
+}
+
+std::shared_ptr<VWrap::ImageView> Renderer::GetFinalSceneView() const {
+	return m_graph.GetImageView(m_finalScene);
 }

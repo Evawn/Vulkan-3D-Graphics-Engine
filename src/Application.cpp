@@ -1,6 +1,8 @@
 #include "Application.h"
 #include "ShaderCompiler.h"
 #include "ScreenshotCapture.h"
+#include "post-process/BloomEffect.h"
+#include "post-process/LensFlareEffect.h"
 
 void Application::Run() {
 	Init();
@@ -27,6 +29,12 @@ void Application::Init() {
 	rendererConfig.depthFormat = VWrap::FindDepthFormat(m_vk.physicalDevice->Get());
 	rendererConfig.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
 	m_renderer = Renderer(rendererConfig);
+
+	// Register default post-process effects. Order matters: bloom first (operates
+	// on the raw scene-with-sun), lens flare second (overlays ghosts on top of
+	// the bloomed image so halos interact visually with the ghosts).
+	m_renderer.GetPostProcess().AddEffect(std::make_unique<BloomEffect>());
+	m_renderer.GetPostProcess().AddEffect(std::make_unique<LensFlareEffect>());
 
 	spdlog::get("App")->debug("Creating camera...");
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
@@ -56,6 +64,10 @@ void Application::Init() {
 
 	// Initialize panels (needs camera, controller, renderers)
 	m_editor.InitPanels(&m_renderers, &m_active_renderer_index, m_camera, m_camera_controller, m_vk);
+
+	// Wire scene lighting + post-process chain into the inspector so ImGui can edit them.
+	m_editor.SetLighting(&m_renderer.GetLighting());
+	m_editor.SetPostProcess(&m_renderer.GetPostProcess());
 
 	// Wire editor callbacks to event queue
 	m_editor.SetReloadCallback([this]() {
@@ -101,7 +113,7 @@ void Application::BuildRenderGraph() {
 			m_editor.CmdDraw(ctx.cmd);
 		});
 
-	m_editor.RegisterSceneTexture(m_renderer.GetSceneResolveView());
+	m_editor.RegisterSceneTexture(m_renderer.GetFinalSceneView());
 
 	// Update profiler pass count and graph snapshot for dev tooling panel
 	if (m_gpu_profiler)
@@ -212,7 +224,7 @@ void Application::DrawFrame() {
 			m_offscreen_extent = desired;
 			m_renderer.OnViewportResize(desired, m_renderers[m_active_renderer_index].get());
 			m_camera->SetAspect((float)desired.width / (float)desired.height);
-			m_editor.RegisterSceneTexture(m_renderer.GetSceneResolveView());
+			m_editor.RegisterSceneTexture(m_renderer.GetFinalSceneView());
 		}
 	}
 
@@ -254,6 +266,9 @@ void Application::HotReloadShaders() {
 
 	auto& renderer = m_renderers[m_active_renderer_index];
 	auto spvPaths = renderer->GetShaderPaths();
+	// Include post-process shaders so hot-reload affects bloom/flare too.
+	auto ppPaths = m_renderer.GetPostProcess().GetShaderPaths();
+	spvPaths.insert(spvPaths.end(), ppPaths.begin(), ppPaths.end());
 
 	auto results = ShaderCompiler::CompileAll(spvPaths);
 
@@ -272,6 +287,7 @@ void Application::HotReloadShaders() {
 
 	auto ctx = BuildRenderContext();
 	renderer->RecreatePipeline(ctx);
+	m_renderer.GetPostProcess().RecreatePipelines();
 	logger->info("Pipeline recreated successfully");
 }
 
@@ -290,10 +306,12 @@ void Application::SwitchRenderer(size_t index) {
 
 void Application::CaptureScreenshot() {
 	auto& graph = m_renderer.GetGraph();
-	auto sceneResolve = m_renderer.GetSceneResolve();
-	auto resolveImage = graph.GetImage(sceneResolve);
-	auto resolveDesc = graph.GetImageDesc(sceneResolve);
-	VkFormat format = graph.GetImageFormat(sceneResolve);
+	// Capture the post-processed output so the screenshot matches what the user
+	// sees in the viewport (sun + bloom + flare included).
+	auto finalScene = m_renderer.GetFinalScene();
+	auto resolveImage = graph.GetImage(finalScene);
+	auto resolveDesc = graph.GetImageDesc(finalScene);
+	VkFormat format = graph.GetImageFormat(finalScene);
 	VkExtent2D extent = { resolveDesc.width, resolveDesc.height };
 
 	auto path = ScreenshotCapture::Capture(
@@ -313,5 +331,9 @@ RenderContext Application::BuildRenderContext() const {
 	ctx.extent = m_offscreen_extent;
 	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
 	ctx.camera = m_camera;
+	// const_cast: RenderContext stores a non-const pointer because techniques may
+	// eventually write to lighting (e.g. sync-to-time-of-day hooks). The Renderer
+	// itself owns the state; the constness here is incidental.
+	ctx.lighting = const_cast<SceneLighting*>(&m_renderer.GetLighting());
 	return ctx;
 }

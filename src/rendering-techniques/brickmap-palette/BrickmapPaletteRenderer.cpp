@@ -38,12 +38,14 @@ struct BrickmapPaletteBuildPC {
 	int brick_size;
 };
 
+// Layout matches shaders/brickmap_palette_trace.frag — std140 rules: vec3 followed
+// by a scalar packs into 16 bytes; mat4 starts 16-byte aligned.
 struct BrickmapPaletteTracePC {
 	glm::mat4 NDCtoWorld;
-	glm::vec3 cameraPos;
-	int maxIterations;
-	glm::vec3 skyColor;
-	int debugColor;
+	glm::vec3 cameraPos;      int maxIterations;
+	glm::vec3 skyColor;       int debugColor;
+	glm::vec3 sunDirection;   float sunCosHalfAngle;
+	glm::vec3 sunColor;       float sunIntensity;
 };
 
 void BrickmapPaletteRenderer::CreatePaletteTexture() {
@@ -118,6 +120,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	m_graphics_pool = ctx.graphicsPool;
 	m_extent = ctx.extent;
 	m_camera = ctx.camera;
+	m_lighting = ctx.lighting;
 	m_start_time = std::chrono::steady_clock::now();
 
 	m_graph = &graph;
@@ -226,6 +229,19 @@ void BrickmapPaletteRenderer::RegisterPasses(
 			pc.maxIterations = m_max_iterations;
 			pc.skyColor = glm::vec3(m_sky_color[0], m_sky_color[1], m_sky_color[2]);
 			pc.debugColor = m_debug_color ? 1 : 0;
+			if (m_lighting) {
+				pc.sunDirection = m_lighting->GetSunDirection();
+				pc.sunCosHalfAngle = m_lighting->GetSunCosHalfAngle();
+				pc.sunColor = glm::vec3(m_lighting->sunColor[0], m_lighting->sunColor[1], m_lighting->sunColor[2]);
+				pc.sunIntensity = m_lighting->sunIntensity;
+			} else {
+				// No lighting state — place the sun below the horizon so the disk test
+				// never passes and the sky renders as pure gradient.
+				pc.sunDirection = glm::vec3(0.0f, 0.0f, -1.0f);
+				pc.sunCosHalfAngle = 1.0f;
+				pc.sunColor = glm::vec3(1.0f);
+				pc.sunIntensity = 0.0f;
+			}
 			vkCmdPushConstants(vk_cmd, m_graphics_pipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BrickmapPaletteTracePC), &pc);
 

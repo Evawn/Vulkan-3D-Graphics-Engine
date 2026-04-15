@@ -1,6 +1,7 @@
 #include "InspectorPanel.h"
 #include "UIStyle.h"
 #include "FileDialog.h"
+#include "post-process/PostProcessChain.h"
 
 void InspectorPanel::SetRenderers(
 	std::vector<std::unique_ptr<RenderTechnique>>* renderers,
@@ -102,6 +103,33 @@ void InspectorPanel::Draw() {
 					DrawTechniqueParameter(param);
 				}
 			}
+		}
+	}
+
+	// === Lighting ===
+	if (m_lighting && ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::SliderFloat("Sun Azimuth",   &m_lighting->sunAzimuth,   -180.0f, 180.0f, "%.1f");
+		ImGui::SliderFloat("Sun Elevation", &m_lighting->sunElevation, -20.0f,  90.0f,  "%.1f");
+		ImGui::SliderFloat("Sun Angular Size", &m_lighting->sunAngularSize, 0.1f, 15.0f, "%.2f deg");
+		ImGui::SliderFloat("Sun Intensity", &m_lighting->sunIntensity, 0.0f, 5.0f, "%.2f");
+		ImGui::ColorEdit3("Sun Color",      m_lighting->sunColor);
+	}
+
+	// === Post-Processing ===
+	if (m_post_process && ImGui::CollapsingHeader("Post-Processing", ImGuiTreeNodeFlags_DefaultOpen)) {
+		for (size_t i = 0; i < m_post_process->GetEffectCount(); i++) {
+			auto* fx = m_post_process->GetEffect(i);
+			ImGui::PushID(static_cast<int>(i));
+			if (ImGui::TreeNodeEx(fx->GetName().c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+				auto& params = fx->GetParameters();
+				if (params.empty()) {
+					ImGui::TextColored(UIStyle::kTextDim, "No parameters");
+				} else {
+					for (auto& p : params) DrawTechniqueParameter(p);
+				}
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
 		}
 	}
 
