@@ -4,34 +4,43 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
 layout(r8ui, set = 0, binding = 0) uniform readonly uimage3D volume;
 
-// Flat uint array — layout adapts to any grid_dim (G):
-//   [0]: volume_size   [1]: brick_size   [2]: grid_dim   [3]: brick_count
-//   [4 .. 4+G³-1]:             top_grid
-//   [4+G³ ..]:                 brick_data (128 uint32 per brick)
+// Flat uint array — per-axis layout:
+//   [0]: vs_x   [1]: vs_y   [2]: vs_z   [3]: brick_size
+//   [4]: gd_x   [5]: gd_y   [6]: gd_z   [7]: brick_count
+//   [8 .. 8+gd_x*gd_y*gd_z-1]:  top_grid
+//   [8+top_cells ..]:           brick_data (128 uint32 per brick)
 layout(std430, set = 0, binding = 1) buffer BrickmapBuffer {
 	uint bm_data[];
 };
 
 layout(push_constant) uniform PC {
-	int volume_size;
+	int volume_size_x;
+	int volume_size_y;
+	int volume_size_z;
 	int brick_size;
 } pc;
 
 void main() {
 	ivec3 gid = ivec3(gl_GlobalInvocationID);
-	int gd = pc.volume_size / pc.brick_size;
+	ivec3 vs  = ivec3(pc.volume_size_x, pc.volume_size_y, pc.volume_size_z);
+	ivec3 gd  = vs / pc.brick_size;
 
-	if (any(greaterThanEqual(gid, ivec3(gd)))) return;
+	if (any(greaterThanEqual(gid, gd))) return;
 
 	// Write header (idempotent -- every thread writes the same values)
-	bm_data[0] = uint(pc.volume_size);
-	bm_data[1] = uint(pc.brick_size);
-	bm_data[2] = uint(gd);
+	bm_data[0] = uint(vs.x);
+	bm_data[1] = uint(vs.y);
+	bm_data[2] = uint(vs.z);
+	bm_data[3] = uint(pc.brick_size);
+	bm_data[4] = uint(gd.x);
+	bm_data[5] = uint(gd.y);
+	bm_data[6] = uint(gd.z);
+	// bm_data[7] = brick_count, populated by atomicAdd below
 
-	uint grid_cells = uint(gd * gd * gd);
+	uint grid_cells = uint(gd.x * gd.y * gd.z);
 
 	int bs = pc.brick_size;
-	int grid_idx = gid.x + gid.y * gd + gid.z * gd * gd;
+	int grid_idx = gid.x + gid.y * gd.x + gid.z * gd.x * gd.y;
 	ivec3 brick_origin = gid * bs;
 
 	// Build packed material data for this brick (128 uints = 512 bytes)
@@ -57,12 +66,12 @@ void main() {
 	}
 
 	if (any_occupied) {
-		uint brick_idx = atomicAdd(bm_data[3], 1);
-		bm_data[4 + grid_idx] = brick_idx;
+		uint brick_idx = atomicAdd(bm_data[7], 1);
+		bm_data[8 + grid_idx] = brick_idx;
 		for (int i = 0; i < 128; i++) {
-			bm_data[4 + grid_cells + brick_idx * 128 + i] = data[i];
+			bm_data[8 + grid_cells + brick_idx * 128 + i] = data[i];
 		}
 	} else {
-		bm_data[4 + grid_idx] = 0xFFFFFFFFu;
+		bm_data[8 + grid_idx] = 0xFFFFFFFFu;
 	}
 }

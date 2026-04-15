@@ -12,6 +12,7 @@
 #include "CommandBuffer.h"
 #include "VoxLoader.h"
 #include <chrono>
+#include <glm/glm.hpp>
 
 class RenderGraph;
 
@@ -62,8 +63,8 @@ private:
 	float m_time_scale = 1.0f;
 	std::chrono::steady_clock::time_point m_start_time;
 
-	// Dynamic volume sizing
-	uint32_t m_volume_size = 128;
+	// Dynamic per-axis volume sizing (procedural defaults to uvec3(128); .vox fits per-axis)
+	glm::uvec3 m_volume_size = glm::uvec3(128, 128, 128);
 
 	// .vox file import state
 	std::string m_vox_file_path;

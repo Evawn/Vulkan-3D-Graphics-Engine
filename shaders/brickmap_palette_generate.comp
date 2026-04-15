@@ -7,16 +7,24 @@ layout(r8ui, set = 0, binding = 0) uniform writeonly uimage3D volume;
 layout(push_constant) uniform PC {
 	int shape;
 	float time;
-	int volume_size;
+	int volume_size_x;
+	int volume_size_y;
+	int volume_size_z;
 } pc;
 
 const float PI = 3.14159265;
 
 void main() {
 	ivec3 coord = ivec3(gl_GlobalInvocationID);
-	if (any(greaterThanEqual(coord, ivec3(pc.volume_size)))) return;
+	ivec3 volume_size = ivec3(pc.volume_size_x, pc.volume_size_y, pc.volume_size_z);
+	if (any(greaterThanEqual(coord, volume_size))) return;
 
-	vec3 p = (vec3(coord) + 0.5) / float(pc.volume_size) - 0.5;
+	// Procedural shapes are designed for a cubic [-0.5, 0.5] domain. Normalize
+	// by the max dim and center the shape in the volume so it stays
+	// shape-accurate if the volume is ever non-cubic. (Procedural path
+	// currently always passes equal dims, so this is a no-op in practice.)
+	float normDim = float(max(max(volume_size.x, volume_size.y), volume_size.z));
+	vec3 p = (vec3(coord) + 0.5 - vec3(volume_size) * 0.5) / normDim;
 	float t = pc.time;
 	bool filled = false;
 	uint materialIndex = 0u;

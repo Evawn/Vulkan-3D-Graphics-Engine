@@ -32,13 +32,13 @@ void Application::Init() {
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
 	spdlog::get("App")->debug("Initializing renderers...");
+	m_renderers.push_back(std::make_unique<BrickmapPaletteRenderer>());
 	m_renderers.push_back(std::make_unique<DDATracer>());
 	m_renderers.push_back(std::make_unique<ComputeTest>());
 	m_renderers.push_back(std::make_unique<MeshRasterizer>());
 	m_renderers.push_back(std::make_unique<SVORenderer>());
 	m_renderers.push_back(std::make_unique<SVOBackup>());
 	m_renderers.push_back(std::make_unique<BrickmapRenderer>());
-	m_renderers.push_back(std::make_unique<BrickmapPaletteRenderer>());
 	m_active_renderer_index = 0;
 
 	BuildRenderGraph();

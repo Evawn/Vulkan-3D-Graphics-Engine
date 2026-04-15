@@ -133,7 +133,7 @@ void InspectorPanel::Draw() {
 			ImGui::SliderFloat("Sensitivity", m_sensitivity, 0.01f, 2.0f, "%.3f");
 		}
 		if (m_speed) {
-			ImGui::SliderFloat("Speed", m_speed, 0.1f, 10.0f, "%.1f");
+			ImGui::SliderFloat("Fly Speed", m_speed, 0.1f, 50.0f, "%.1f");
 		}
 
 		if (m_camera && ImGui::Button("Reset Camera")) {

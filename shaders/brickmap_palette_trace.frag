@@ -10,10 +10,11 @@ layout(push_constant) uniform PushConstantBlock {
 	int debugColor;
 } pc;
 
-// Flat uint array — layout adapts to any grid_dim (G):
-//   [0]: volume_size   [1]: brick_size   [2]: grid_dim   [3]: brick_count
-//   [4 .. 4+G³-1]:             top_grid
-//   [4+G³ ..]:                 brick_data (128 uint32 per brick)
+// Flat uint array — per-axis layout:
+//   [0]: vs_x   [1]: vs_y   [2]: vs_z   [3]: brick_size
+//   [4]: gd_x   [5]: gd_y   [6]: gd_z   [7]: brick_count
+//   [8 .. 8+gd_x*gd_y*gd_z-1]: top_grid
+//   [8+top_cells ..]:          brick_data (128 uint32 per brick)
 layout(std430, set = 0, binding = 0) readonly buffer BrickmapBuffer {
 	uint bm_data[];
 };
@@ -24,21 +25,24 @@ layout(location = 0) out vec4 outColor;
 
 const float PI_OVER_2 = asin(1.0);
 const vec4 HORIZON_COLOR = vec4(0.8, 0.9, 1.0, 1.0);
-const vec3 VOLUME_ORIGIN = vec3(-1.0);
-const float VOLUME_SCALE = 2.0;
 
 // Cached from header — set once in main()
-uint g_volume_size;
-uint g_grid_dim;
-uint g_brick_size;
-uint g_grid_cells;
+uvec3 g_volume_size;
+uvec3 g_grid_dim;
+uint  g_brick_size;
+uint  g_grid_cells;
+
+// World-space AABB: longest axis spans [-1, 1]; shorter axes stop short
+// proportionally, preserving the model's aspect ratio.
+float g_voxel_world_size;   // = 2.0 / max(vs)
+vec3  g_half_extents;       // = vec3(vs) * g_voxel_world_size * 0.5
 
 vec3 worldToVoxel(vec3 p) {
-	return (p - VOLUME_ORIGIN) / VOLUME_SCALE * float(g_volume_size);
+	return (p + g_half_extents) / g_voxel_world_size;
 }
 
 vec3 voxelToWorld(vec3 p) {
-	return p / float(g_volume_size) * VOLUME_SCALE + VOLUME_ORIGIN;
+	return p * g_voxel_world_size - g_half_extents;
 }
 
 vec4 missColor(vec3 direction) {
@@ -53,16 +57,21 @@ uint brickVoxelMaterial(uint brick_index, ivec3 local) {
 	int linear = local.z * 64 + local.y * 8 + local.x;
 	int word_idx = linear / 4;
 	int byte_lane = linear % 4;
-	uint word = bm_data[4 + g_grid_cells + brick_index * 128 + word_idx];
+	uint word = bm_data[8 + g_grid_cells + brick_index * 128 + word_idx];
 	return (word >> (byte_lane * 8)) & 0xFFu;
 }
 
 void main() {
-	// Read brickmap header
-	g_volume_size = bm_data[0];
-	g_brick_size  = bm_data[1];
-	g_grid_dim    = bm_data[2];
-	g_grid_cells  = g_grid_dim * g_grid_dim * g_grid_dim;
+	// Read brickmap header (new 8-uint layout)
+	g_volume_size = uvec3(bm_data[0], bm_data[1], bm_data[2]);
+	g_brick_size  = bm_data[3];
+	g_grid_dim    = uvec3(bm_data[4], bm_data[5], bm_data[6]);
+	g_grid_cells  = g_grid_dim.x * g_grid_dim.y * g_grid_dim.z;
+
+	// World AABB derived from per-axis volume — longest axis fills [-1, 1].
+	uint max_vs = max(max(g_volume_size.x, g_volume_size.y), g_volume_size.z);
+	g_voxel_world_size = 2.0 / float(max_vs);
+	g_half_extents     = vec3(g_volume_size) * g_voxel_world_size * 0.5;
 
 	vec3 rayOrigin = pc.cameraPos;
 	vec4 transformed = pc.NDCtoWorld * vec4(texCoords, 1.0);
@@ -70,9 +79,9 @@ void main() {
 	vec3 direction = normalize(pixelLocation - rayOrigin);
 	vec3 invDir = 1.0 / direction;
 
-	// Ray-AABB intersection with volume bounds [-1, 1]^3
-	vec3 tMin = (-1.0 - rayOrigin) * invDir;
-	vec3 tMax = (1.0 - rayOrigin) * invDir;
+	// Ray-AABB intersection with the per-axis box [-halfExtents, +halfExtents]
+	vec3 tMin = (-g_half_extents - rayOrigin) * invDir;
+	vec3 tMax = ( g_half_extents - rayOrigin) * invDir;
 	vec3 t1 = min(tMin, tMax);
 	vec3 t2 = max(tMin, tMax);
 	float tEntry = max(max(t1.x, t1.y), t1.z);
@@ -86,17 +95,17 @@ void main() {
 	float t = max(tEntry, 0.0) + 0.0001;
 	int total_iters = 0;
 
-	int grid_dim = int(g_grid_dim);
+	ivec3 grid_dim = ivec3(g_grid_dim);
 	int brick_size = int(g_brick_size);
 	float brick_size_f = float(brick_size);
 
 	// Convert ray to voxel space for DDA
 	vec3 p_voxel = worldToVoxel(rayOrigin + direction * t);
-	p_voxel = clamp(p_voxel, vec3(0.001), vec3(float(g_volume_size) - 0.001));
+	p_voxel = clamp(p_voxel, vec3(0.001), vec3(g_volume_size) - 0.001);
 
 	// --- Outer DDA setup on the top-level grid ---
 	ivec3 cell = ivec3(floor(p_voxel / brick_size_f));
-	cell = clamp(cell, ivec3(0), ivec3(grid_dim - 1));
+	cell = clamp(cell, ivec3(0), grid_dim - 1);
 
 	// DDA step directions
 	ivec3 step_sign = ivec3(
@@ -105,8 +114,9 @@ void main() {
 		direction.z >= 0.0 ? 1 : -1
 	);
 
-	// Distance in t for one full grid cell along each axis
-	vec3 tDelta = abs(vec3(brick_size_f) / (direction * float(g_volume_size) / VOLUME_SCALE));
+	// Distance in t for one full grid cell along each axis.
+	// One voxel in world space = g_voxel_world_size, so one brick = bs * voxel_world_size.
+	vec3 tDelta = abs(vec3(brick_size_f * g_voxel_world_size) / direction);
 
 	// Distance to the next grid boundary along each axis
 	vec3 cell_world_min = voxelToWorld(vec3(cell) * brick_size_f);
@@ -124,13 +134,13 @@ void main() {
 	bvec3 last_face = bvec3(false);
 
 	for (int outer_step = 0; outer_step < pc.maxIterations; outer_step++) {
-		// Bounds check: exited the grid
-		if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, ivec3(grid_dim)))) {
+		// Bounds check: exited the grid (per-axis)
+		if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, grid_dim))) {
 			break;
 		}
 
-		int grid_idx = cell.x + cell.y * grid_dim + cell.z * grid_dim * grid_dim;
-		uint brick_index = bm_data[4 + grid_idx];
+		int grid_idx = cell.x + cell.y * grid_dim.x + cell.z * grid_dim.x * grid_dim.y;
+		uint brick_index = bm_data[8 + grid_idx];
 
 		if (brick_index != 0xFFFFFFFFu) {
 			// --- Inner DDA: step through 8^3 voxels inside this brick ---
@@ -145,8 +155,8 @@ void main() {
 			ivec3 local_coord = ivec3(floor(local_f));
 			local_coord = clamp(local_coord, ivec3(0), ivec3(brick_size - 1));
 
-			// Inner DDA: distance per voxel along each axis
-			vec3 tDeltaInner = abs(vec3(1.0) / (direction * float(g_volume_size) / VOLUME_SCALE));
+			// Inner DDA: distance per voxel along each axis (one voxel = voxel_world_size)
+			vec3 tDeltaInner = abs(vec3(g_voxel_world_size) / direction);
 
 			// Distance to next voxel boundary
 			vec3 voxel_world_min = voxelToWorld(brick_origin_voxel + vec3(local_coord));
