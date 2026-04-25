@@ -65,7 +65,8 @@ void BrickmapPaletteRenderer::RegisterPasses(
 		VK_FORMAT_R8_UINT,
 		VK_SAMPLE_COUNT_1_BIT,
 		VK_IMAGE_TYPE_3D,
-		VK_IMAGE_USAGE_TRANSFER_DST_BIT
+		VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+		Lifetime::Persistent  // holds uploaded .vox data; no producer pass refills it
 	});
 
 	m_brickmap_buffer = graph.CreateBuffer("brickmap_palette_data", {
@@ -99,7 +100,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 
 	// Compute pass: generate voxels into volume
 	graph.AddComputePass("Brickmap Palette Generate")
-		.Write(m_volume)
+		.Write(m_volume, ResourceUsage::StorageWrite)
 		.SetPipeline([this]() {
 			ComputePipelineDesc d;
 			d.compSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_generate.comp.spv";
@@ -131,8 +132,8 @@ void BrickmapPaletteRenderer::RegisterPasses(
 
 	// Compute pass: build brickmap from voxel volume
 	graph.AddComputePass("Brickmap Palette Build")
-		.Read(m_volume)
-		.Write(m_brickmap_buffer)
+		.Read(m_volume, ResourceUsage::StorageRead)
+		.Write(m_brickmap_buffer, ResourceUsage::StorageWrite)
 		.SetPipeline([this]() {
 			ComputePipelineDesc d;
 			d.compSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_build.comp.spv";
@@ -179,7 +180,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(resolveTarget)
-		.Read(m_brickmap_buffer)
+		.Read(m_brickmap_buffer, ResourceUsage::StorageRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_trace.vert.spv";
@@ -238,16 +239,17 @@ void BrickmapPaletteRenderer::RegisterPasses(
 }
 
 void BrickmapPaletteRenderer::OnPostCompile(RenderGraph& graph) {
-	// Apply any pending .vox upload now that the graph has allocated resources.
-	if (m_pending_vox) {
-		m_vox_active = true;
+	// Re-apply the loaded .vox to the freshly-allocated volume. Runs on every
+	// graph rebuild, including window-triggered swapchain resizes — without
+	// this, a window resize would leave the volume empty and Generate would
+	// be re-enabled by default, drawing the procedural sphere into the
+	// .vox-sized volume instead of the loaded model.
+	if (m_loaded_vox) {
 		graph.SetPassEnabled("Brickmap Palette Generate", false);
-		UploadVolumeData(m_pending_vox->volume.data());
-		m_palette->Upload(m_pending_vox->palette.data());
-		spdlog::get("Render")->info("BrickmapPaletteRenderer: Uploaded pending .vox ({}x{}x{}, volume={}x{}x{})",
-			m_pending_vox->sizeX, m_pending_vox->sizeY, m_pending_vox->sizeZ,
-			m_pending_vox->volumeSize.x, m_pending_vox->volumeSize.y, m_pending_vox->volumeSize.z);
-		m_pending_vox.reset();
+		UploadVolumeData(m_loaded_vox->volume.data());
+		m_palette->Upload(m_loaded_vox->palette.data());
+		spdlog::get("Render")->debug("BrickmapPaletteRenderer: Re-applied loaded .vox ({}x{}x{})",
+			m_loaded_vox->volumeSize.x, m_loaded_vox->volumeSize.y, m_loaded_vox->volumeSize.z);
 	}
 }
 
@@ -297,9 +299,9 @@ void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
 
 	if (m_vox_file_path.empty()) {
 		// Switch back to procedural mode
-		if (m_vox_active) {
+		if (m_loaded_vox) {
 			logger->info("BrickmapPaletteRenderer: Restoring procedural mode");
-			m_vox_active = false;
+			m_loaded_vox.reset();
 			glm::uvec3 procSize(128, 128, 128);
 			if (m_volume_size != procSize) {
 				m_volume_size = procSize;
@@ -318,29 +320,27 @@ void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
 		return;
 	}
 
-	if (model->volumeSize != m_volume_size) {
-		// Volume size changed — need graph rebuild. The pending model is
-		// applied in OnPostCompile once the new graph is compiled.
-		m_volume_size = model->volumeSize;
-		m_pending_vox = std::move(*model);
+	bool sizeChanged = (model->volumeSize != m_volume_size);
+	m_volume_size = model->volumeSize;
+	m_loaded_vox = std::move(*model);
+
+	if (sizeChanged) {
+		// Volume size changed — need graph rebuild. OnPostCompile re-uploads
+		// from m_loaded_vox after the new graph is compiled.
 		logger->info("BrickmapPaletteRenderer: Volume resize to {}x{}x{}, rebuilding graph",
 			m_volume_size.x, m_volume_size.y, m_volume_size.z);
 		if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 		return;
 	}
 
-	// Same size — upload directly.
-	m_vox_active = true;
+	// Same size — upload directly to the existing volume.
 	m_graph->SetPassEnabled("Brickmap Palette Generate", false);
-
-	UploadVolumeData(model->volume.data());
-	m_palette->Upload(model->palette.data());
-
+	UploadVolumeData(m_loaded_vox->volume.data());
+	m_palette->Upload(m_loaded_vox->palette.data());
 	m_graph->RecreatePipelines();
 
-	logger->info("BrickmapPaletteRenderer: Loaded .vox model ({}x{}x{}, volume={}x{}x{})",
-		model->sizeX, model->sizeY, model->sizeZ,
-		model->volumeSize.x, model->volumeSize.y, model->volumeSize.z);
+	logger->info("BrickmapPaletteRenderer: Loaded .vox model (volume={}x{}x{})",
+		m_loaded_vox->volumeSize.x, m_loaded_vox->volumeSize.y, m_loaded_vox->volumeSize.z);
 }
 
 void BrickmapPaletteRenderer::UploadVolumeData(const uint8_t* data) {

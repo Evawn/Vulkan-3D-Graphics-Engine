@@ -17,9 +17,23 @@
 #include "ComputePipeline.h"
 
 // ---- Handles ----
+//
+// `gen` guards against use-after-Clear: every Clear() bumps the graph's gen
+// counter and stamps it into resources at creation time. Get*() asserts the
+// handle's gen matches the resource's, so a stale handle from a prior graph
+// build fires immediately instead of silently aliasing an unrelated resource.
 
-struct ImageHandle { uint32_t id = UINT32_MAX; };
-struct BufferHandle { uint32_t id = UINT32_MAX; };
+struct ImageHandle  { uint32_t id = UINT32_MAX; uint32_t gen = 0; };
+struct BufferHandle { uint32_t id = UINT32_MAX; uint32_t gen = 0; };
+
+// ---- Lifetime ----
+//
+// Transient: rebuilt on Resize() (default). Persistent: survives Resize() —
+// use for resources holding data that no producer pass refills (e.g. uploaded
+// .vox volumes). Imported is tracked separately by the `imported` bool on the
+// resource since imported resources have completely different metadata.
+
+enum class Lifetime { Transient, Persistent };
 
 // ---- Descriptors ----
 
@@ -30,11 +44,13 @@ struct ImageDesc {
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 	VkImageType imageType = VK_IMAGE_TYPE_2D;
 	VkImageUsageFlags extraUsage = 0; // ORed into auto-derived usage flags
+	Lifetime lifetime = Lifetime::Transient;
 };
 
 struct BufferDesc {
 	VkDeviceSize size;
 	VkBufferUsageFlags usage = 0; // User-specified base usage (e.g., VERTEX_BUFFER_BIT)
+	Lifetime lifetime = Lifetime::Transient;
 };
 
 // ---- Enums ----
@@ -42,6 +58,25 @@ struct BufferDesc {
 enum class PassType { Graphics, Compute };
 enum class LoadOp { Clear, Load, DontCare };
 enum class StoreOp { Store, DontCare };
+
+// ---- Resource usage ----
+//
+// How a Read()/Write() declaration intends to use the resource. The graph maps
+// each usage to (image layout, access mask, pipeline stage) so barrier
+// synthesis is precise instead of always-conservative. `Default` keeps legacy
+// behavior (compute = GENERAL + COMPUTE; graphics fragment = SHADER_READ_ONLY +
+// VERTEX|FRAGMENT) so unmigrated call sites are unchanged.
+
+enum class ResourceUsage {
+	Default,
+	SampledRead,    // sampled image / combined image sampler
+	StorageRead,    // storage image / buffer read
+	StorageWrite,   // storage image / buffer write
+	UniformRead,    // UBO
+	VertexBuffer,
+	IndexBuffer,
+	IndirectArg,    // VkCmdDraw*Indirect / VkCmdDispatchIndirect
+};
 
 // ---- Pipeline descriptions (graph-owned) ----
 //
@@ -97,6 +132,7 @@ struct ImageResource {
 	std::string name;
 	ImageDesc desc;
 	bool imported = false;
+	uint32_t gen = 0;  // matched against ImageHandle::gen on Get*()
 
 	VkFormat format = VK_FORMAT_UNDEFINED;
 	VkImageLayout externalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -113,6 +149,7 @@ struct BufferResource {
 	std::string name;
 	BufferDesc desc;
 	bool imported = false;
+	uint32_t gen = 0;  // matched against BufferHandle::gen on Get*()
 
 	std::shared_ptr<VWrap::Buffer> buffer;
 

@@ -90,6 +90,11 @@ private:
 
 	bool m_compiled = false;
 
+	// Generation counters bumped on Clear(); stamped onto every new
+	// ImageHandle/BufferHandle so stale handles fail the gen check in Get*().
+	uint32_t m_imageGen = 1;
+	uint32_t m_bufferGen = 1;
+
 	// Internal helpers
 	void AccumulateUsageFlags();
 	void AllocateTransientResources();

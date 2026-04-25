@@ -28,9 +28,9 @@ public:
 		ImageHandle target, LoadOp load, StoreOp store,
 		float depth = 1.0f, uint32_t stencil = 0);
 	GraphicsPassBuilder& SetResolveTarget(ImageHandle target);
-	GraphicsPassBuilder& Read(ImageHandle resource);
-	GraphicsPassBuilder& Read(BufferHandle resource);
-	GraphicsPassBuilder& Write(BufferHandle resource);
+	GraphicsPassBuilder& Read(ImageHandle resource, ResourceUsage usage = ResourceUsage::Default);
+	GraphicsPassBuilder& Read(BufferHandle resource, ResourceUsage usage = ResourceUsage::Default);
+	GraphicsPassBuilder& Write(BufferHandle resource, ResourceUsage usage = ResourceUsage::Default);
 	GraphicsPassBuilder& SetRecord(std::function<void(PassContext&)> fn);
 
 	// Hand the graph a factory that produces the desc for this pass's pipeline.
@@ -54,6 +54,7 @@ private:
 
 	// Buffer writes
 	std::vector<BufferHandle> m_writeBuffers;
+	std::vector<ResourceUsage> m_writeBufferUsages;  // parallel to m_writeBuffers
 
 	// Resolve target
 	ImageHandle m_resolveTarget;

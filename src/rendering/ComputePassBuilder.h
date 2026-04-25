@@ -6,10 +6,10 @@ class ComputePassBuilder : public PassBuilderBase {
 public:
 	ComputePassBuilder(const std::string& name, RenderGraph& graph);
 
-	ComputePassBuilder& Read(ImageHandle resource);
-	ComputePassBuilder& Read(BufferHandle resource);
-	ComputePassBuilder& Write(ImageHandle resource);
-	ComputePassBuilder& Write(BufferHandle resource);
+	ComputePassBuilder& Read(ImageHandle resource, ResourceUsage usage = ResourceUsage::Default);
+	ComputePassBuilder& Read(BufferHandle resource, ResourceUsage usage = ResourceUsage::Default);
+	ComputePassBuilder& Write(ImageHandle resource, ResourceUsage usage = ResourceUsage::Default);
+	ComputePassBuilder& Write(BufferHandle resource, ResourceUsage usage = ResourceUsage::Default);
 	ComputePassBuilder& SetRecord(std::function<void(PassContext&)> fn);
 
 	// Hand the graph a factory that produces the desc for this pass's compute
@@ -22,6 +22,8 @@ private:
 
 	std::vector<ImageHandle> m_writeImages;
 	std::vector<BufferHandle> m_writeBuffers;
+	std::vector<ResourceUsage> m_writeImageUsages;
+	std::vector<ResourceUsage> m_writeBufferUsages;
 
 	// Pipeline ownership: the graph builds the VkPipeline during Compile.
 	std::function<ComputePipelineDesc()> m_pipelineDescFactory;

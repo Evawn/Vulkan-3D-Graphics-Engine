@@ -39,18 +39,21 @@ GraphicsPassBuilder& GraphicsPassBuilder::SetResolveTarget(ImageHandle target) {
 	return *this;
 }
 
-GraphicsPassBuilder& GraphicsPassBuilder::Read(ImageHandle resource) {
+GraphicsPassBuilder& GraphicsPassBuilder::Read(ImageHandle resource, ResourceUsage usage) {
 	m_readImages.push_back(resource);
+	m_readImageUsages.push_back(usage);
 	return *this;
 }
 
-GraphicsPassBuilder& GraphicsPassBuilder::Read(BufferHandle resource) {
+GraphicsPassBuilder& GraphicsPassBuilder::Read(BufferHandle resource, ResourceUsage usage) {
 	m_readBuffers.push_back(resource);
+	m_readBufferUsages.push_back(usage);
 	return *this;
 }
 
-GraphicsPassBuilder& GraphicsPassBuilder::Write(BufferHandle resource) {
+GraphicsPassBuilder& GraphicsPassBuilder::Write(BufferHandle resource, ResourceUsage usage) {
 	m_writeBuffers.push_back(resource);
+	m_writeBufferUsages.push_back(usage);
 	return *this;
 }
 

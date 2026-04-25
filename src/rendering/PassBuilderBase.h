@@ -32,6 +32,8 @@ protected:
 
 	std::vector<ImageHandle> m_readImages;
 	std::vector<BufferHandle> m_readBuffers;
+	std::vector<ResourceUsage> m_readImageUsages;   // parallel to m_readImages
+	std::vector<ResourceUsage> m_readBufferUsages;  // parallel to m_readBuffers
 	std::function<void(PassContext&)> m_recordFn;
 	std::shared_ptr<BindingTable> m_bindings;
 };

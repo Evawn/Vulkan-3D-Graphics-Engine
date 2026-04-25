@@ -6,6 +6,14 @@
 #include <algorithm>
 #include <cassert>
 
+// File-local: lookup the per-handle usage in the parallel usage vector. Pass
+// builders may have shorter usage vectors if older code paths skipped them; in
+// that case, fall back to ResourceUsage::Default so existing call sites remain
+// unchanged.
+static ResourceUsage UsageAt(const std::vector<ResourceUsage>& v, size_t i) {
+	return (i < v.size()) ? v[i] : ResourceUsage::Default;
+}
+
 // =====================================================================
 // RenderGraph — Resource creation
 // =====================================================================
@@ -16,12 +24,14 @@ RenderGraph::RenderGraph(std::shared_ptr<VWrap::Device> device, std::shared_ptr<
 ImageHandle RenderGraph::CreateImage(const std::string& name, const ImageDesc& desc) {
 	ImageHandle handle;
 	handle.id = static_cast<uint32_t>(m_images.size());
+	handle.gen = m_imageGen;
 
 	ImageResource res;
 	res.name = name;
 	res.desc = desc;
 	res.format = desc.format;
 	res.imported = false;
+	res.gen = m_imageGen;
 	m_images.push_back(std::move(res));
 
 	return handle;
@@ -30,11 +40,13 @@ ImageHandle RenderGraph::CreateImage(const std::string& name, const ImageDesc& d
 BufferHandle RenderGraph::CreateBuffer(const std::string& name, const BufferDesc& desc) {
 	BufferHandle handle;
 	handle.id = static_cast<uint32_t>(m_buffers.size());
+	handle.gen = m_bufferGen;
 
 	BufferResource res;
 	res.name = name;
 	res.desc = desc;
 	res.imported = false;
+	res.gen = m_bufferGen;
 	res.usageFlags = desc.usage;
 	m_buffers.push_back(std::move(res));
 
@@ -46,10 +58,12 @@ BufferHandle RenderGraph::ImportBuffer(const std::string& name,
                                        VkDeviceSize size) {
 	BufferHandle handle;
 	handle.id = static_cast<uint32_t>(m_buffers.size());
+	handle.gen = m_bufferGen;
 
 	BufferResource res;
 	res.name = name;
 	res.imported = true;
+	res.gen = m_bufferGen;
 	res.buffer = buffer;
 	res.desc.size = size;
 	m_buffers.push_back(std::move(res));
@@ -63,10 +77,12 @@ ImageHandle RenderGraph::ImportImage(const std::string& name,
                                      VkExtent2D extent) {
 	ImageHandle handle;
 	handle.id = static_cast<uint32_t>(m_images.size());
+	handle.gen = m_imageGen;
 
 	ImageResource res;
 	res.name = name;
 	res.imported = true;
+	res.gen = m_imageGen;
 	res.view = view;
 	res.format = format;
 	res.externalLayout = externalLayout;
@@ -112,48 +128,65 @@ void RenderGraph::SetPassEnabled(const std::string& name, bool enabled) {
 // RenderGraph — Resource access
 // =====================================================================
 
+// Validates handle.id is in-range AND handle.gen matches the resource's gen.
+// A mismatched gen means the handle outlived a Clear() — fail loudly so the
+// regression surfaces immediately instead of silently aliasing a new resource.
+static inline void AssertImageHandle(ImageHandle h, const std::vector<ImageResource>& images) {
+	assert(h.id < images.size() && "ImageHandle index out of range");
+	assert(images[h.id].gen == h.gen && "ImageHandle stale (graph was rebuilt)");
+}
+static inline void AssertBufferHandle(BufferHandle h, const std::vector<BufferResource>& buffers) {
+	assert(h.id < buffers.size() && "BufferHandle index out of range");
+	assert(buffers[h.id].gen == h.gen && "BufferHandle stale (graph was rebuilt)");
+}
+
 const ImageResource& RenderGraph::GetImageResource(ImageHandle handle) const {
-	assert(handle.id < m_images.size());
+	AssertImageHandle(handle, m_images);
 	return m_images[handle.id];
 }
 
 std::shared_ptr<VWrap::ImageView> RenderGraph::GetImageView(ImageHandle handle) const {
+	AssertImageHandle(handle, m_images);
 	return m_images[handle.id].view;
 }
 
 VkImage RenderGraph::GetVkImage(ImageHandle handle) const {
+	AssertImageHandle(handle, m_images);
 	return m_images[handle.id].image->Get();
 }
 
 std::shared_ptr<VWrap::Image> RenderGraph::GetImage(ImageHandle handle) const {
+	AssertImageHandle(handle, m_images);
 	return m_images[handle.id].image;
 }
 
 ImageDesc RenderGraph::GetImageDesc(ImageHandle handle) const {
+	AssertImageHandle(handle, m_images);
 	return m_images[handle.id].desc;
 }
 
 VkFormat RenderGraph::GetImageFormat(ImageHandle handle) const {
+	AssertImageHandle(handle, m_images);
 	return m_images[handle.id].format;
 }
 
 const BufferResource& RenderGraph::GetBufferResource(BufferHandle handle) const {
-	assert(handle.id < m_buffers.size());
+	AssertBufferHandle(handle, m_buffers);
 	return m_buffers[handle.id];
 }
 
 std::shared_ptr<VWrap::Buffer> RenderGraph::GetBuffer(BufferHandle handle) const {
-	assert(handle.id < m_buffers.size());
+	AssertBufferHandle(handle, m_buffers);
 	return m_buffers[handle.id].buffer;
 }
 
 VkBuffer RenderGraph::GetVkBuffer(BufferHandle handle) const {
-	assert(handle.id < m_buffers.size());
+	AssertBufferHandle(handle, m_buffers);
 	return m_buffers[handle.id].buffer->Get();
 }
 
 void RenderGraph::UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageView> view) {
-	assert(handle.id < m_images.size());
+	AssertImageHandle(handle, m_images);
 	assert(m_images[handle.id].imported);
 	m_images[handle.id].view = view;
 
@@ -279,16 +312,38 @@ void RenderGraph::AccumulateUsageFlags() {
 				m_images[pass.m_resolveTarget.id].usageFlags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 			}
 
-			// Sampled reads
-			for (auto& img : pass.m_readImages) {
-				if (img.id < m_images.size())
-					m_images[img.id].usageFlags |= VK_IMAGE_USAGE_SAMPLED_BIT;
+			// Image reads
+			for (size_t r = 0; r < pass.m_readImages.size(); r++) {
+				const auto& img = pass.m_readImages[r];
+				if (img.id >= m_images.size()) continue;
+				ResourceUsage usage = UsageAt(pass.m_readImageUsages, r);
+				m_images[img.id].usageFlags |= (usage == ResourceUsage::StorageRead)
+					? VK_IMAGE_USAGE_STORAGE_BIT
+					: VK_IMAGE_USAGE_SAMPLED_BIT;
 			}
 
-			// Buffer reads/writes
-			for (auto& buf : pass.m_readBuffers) {
-				if (buf.id < m_buffers.size())
+			// Buffer reads
+			for (size_t r = 0; r < pass.m_readBuffers.size(); r++) {
+				const auto& buf = pass.m_readBuffers[r];
+				if (buf.id >= m_buffers.size()) continue;
+				ResourceUsage usage = UsageAt(pass.m_readBufferUsages, r);
+				switch (usage) {
+				case ResourceUsage::UniformRead:
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+					break;
+				case ResourceUsage::VertexBuffer:
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+					break;
+				case ResourceUsage::IndexBuffer:
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+					break;
+				case ResourceUsage::IndirectArg:
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+					break;
+				default:
 					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+					break;
+				}
 			}
 			for (auto& buf : pass.m_writeBuffers) {
 				if (buf.id < m_buffers.size())
@@ -298,21 +353,39 @@ void RenderGraph::AccumulateUsageFlags() {
 		else if (ref.type == PassType::Compute) {
 			auto& pass = *m_computePasses[ref.index];
 
-			for (auto& img : pass.m_readImages) {
-				if (img.id < m_images.size())
-					m_images[img.id].usageFlags |= VK_IMAGE_USAGE_STORAGE_BIT;
+			for (size_t r = 0; r < pass.m_readImages.size(); r++) {
+				const auto& img = pass.m_readImages[r];
+				if (img.id >= m_images.size()) continue;
+				ResourceUsage usage = UsageAt(pass.m_readImageUsages, r);
+				m_images[img.id].usageFlags |= (usage == ResourceUsage::SampledRead)
+					? VK_IMAGE_USAGE_SAMPLED_BIT
+					: VK_IMAGE_USAGE_STORAGE_BIT;
 			}
-			for (auto& img : pass.m_writeImages) {
+			for (size_t w = 0; w < pass.m_writeImages.size(); w++) {
+				const auto& img = pass.m_writeImages[w];
 				if (img.id < m_images.size())
 					m_images[img.id].usageFlags |= VK_IMAGE_USAGE_STORAGE_BIT;
 			}
 
-			// Buffer reads/writes
-			for (auto& buf : pass.m_readBuffers) {
-				if (buf.id < m_buffers.size())
+			// Buffer reads
+			for (size_t r = 0; r < pass.m_readBuffers.size(); r++) {
+				const auto& buf = pass.m_readBuffers[r];
+				if (buf.id >= m_buffers.size()) continue;
+				ResourceUsage usage = UsageAt(pass.m_readBufferUsages, r);
+				switch (usage) {
+				case ResourceUsage::UniformRead:
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+					break;
+				case ResourceUsage::IndirectArg:
+					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+					break;
+				default:
 					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+					break;
+				}
 			}
-			for (auto& buf : pass.m_writeBuffers) {
+			for (size_t w = 0; w < pass.m_writeBuffers.size(); w++) {
+				const auto& buf = pass.m_writeBuffers[w];
 				if (buf.id < m_buffers.size())
 					m_buffers[buf.id].usageFlags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 			}
@@ -529,6 +602,82 @@ void RenderGraph::RecreatePipelines() {
 	}
 }
 
+// Map a (usage, pass-type) pair to image (layout, access, stage). Returns the
+// legacy values when usage==Default so unmigrated call sites are unchanged.
+static void ImageReadParams(ResourceUsage usage, PassType pass,
+                            VkImageLayout& outLayout, VkAccessFlags& outAccess,
+                            VkPipelineStageFlags& outStage) {
+	if (pass == PassType::Compute) {
+		switch (usage) {
+		case ResourceUsage::SampledRead:
+			outLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			outAccess = VK_ACCESS_SHADER_READ_BIT;
+			outStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			return;
+		case ResourceUsage::StorageRead:
+		case ResourceUsage::Default:
+		default:
+			outLayout = VK_IMAGE_LAYOUT_GENERAL;
+			outAccess = VK_ACCESS_SHADER_READ_BIT;
+			outStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+			return;
+		}
+	}
+	// Graphics
+	switch (usage) {
+	case ResourceUsage::StorageRead:
+		outLayout = VK_IMAGE_LAYOUT_GENERAL;
+		outAccess = VK_ACCESS_SHADER_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		return;
+	case ResourceUsage::SampledRead:
+	case ResourceUsage::Default:
+	default:
+		outLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		outAccess = VK_ACCESS_SHADER_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		return;
+	}
+}
+
+static void BufferReadParams(ResourceUsage usage, PassType pass,
+                             VkAccessFlags& outAccess, VkPipelineStageFlags& outStage) {
+	if (pass == PassType::Compute) {
+		outAccess = VK_ACCESS_SHADER_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+		if (usage == ResourceUsage::IndirectArg) {
+			outAccess = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+			outStage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+		}
+		return;
+	}
+	switch (usage) {
+	case ResourceUsage::VertexBuffer:
+		outAccess = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+		return;
+	case ResourceUsage::IndexBuffer:
+		outAccess = VK_ACCESS_INDEX_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+		return;
+	case ResourceUsage::IndirectArg:
+		outAccess = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+		return;
+	case ResourceUsage::UniformRead:
+		outAccess = VK_ACCESS_UNIFORM_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		return;
+	case ResourceUsage::StorageRead:
+	case ResourceUsage::SampledRead:
+	case ResourceUsage::Default:
+	default:
+		outAccess = VK_ACCESS_SHADER_READ_BIT;
+		outStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		return;
+	}
+}
+
 void RenderGraph::ComputeBarriers() {
 	m_barriers.clear();
 	m_barriers.resize(m_executionOrder.size());
@@ -547,9 +696,13 @@ void RenderGraph::ComputeBarriers() {
 		VkAccessFlags access;
 	};
 	std::vector<WriterInfo> lastImageWriter(m_images.size(), { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 });
-
-	// Buffer writer tracking
 	std::vector<WriterInfo> lastBufferWriter(m_buffers.size(), { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0 });
+
+	// Drop "sentinel-source" barriers: if a resource has not yet been written
+	// in this frame, there's no producer to sync against, so emitting a barrier
+	// from TOP_OF_PIPE/0 is wasted work.
+	std::vector<bool> imageWritten(m_images.size(), false);
+	std::vector<bool> bufferWritten(m_buffers.size(), false);
 
 	for (size_t i = 0; i < m_executionOrder.size(); i++) {
 		const auto& ref = m_executionOrder[i];
@@ -557,32 +710,41 @@ void RenderGraph::ComputeBarriers() {
 		if (ref.type == PassType::Compute) {
 			auto& pass = *m_computePasses[ref.index];
 
-			// Image read barriers: ensure previous writes to the image are
-			// made visible before this compute pass reads it, and transition
-			// to GENERAL (the only layout compute shaders can sample/load from
-			// as a storage image).
-			for (const auto& img : pass.m_readImages) {
-				VkImageLayout required = VK_IMAGE_LAYOUT_GENERAL;
+			// Image reads
+			for (size_t r = 0; r < pass.m_readImages.size(); r++) {
+				const auto& img = pass.m_readImages[r];
+				ResourceUsage usage = UsageAt(pass.m_readImageUsages, r);
+				VkImageLayout required;
+				VkAccessFlags dstAccess;
+				VkPipelineStageFlags dstStage;
+				ImageReadParams(usage, PassType::Compute, required, dstAccess, dstStage);
+
+				bool layoutMatches = (currentLayout[img.id] == required);
+				bool noProducer = !imageWritten[img.id];
+				if (layoutMatches && noProducer) continue;
+
 				ImageBarrier barrier;
 				barrier.image = img;
-				barrier.srcStage = lastImageWriter[img.id].stage;
-				barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-				barrier.srcAccess = lastImageWriter[img.id].access;
-				barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
+				barrier.srcStage = imageWritten[img.id] ? lastImageWriter[img.id].stage
+				                                       : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+				barrier.dstStage = dstStage;
+				barrier.srcAccess = imageWritten[img.id] ? lastImageWriter[img.id].access : 0;
+				barrier.dstAccess = dstAccess;
 				barrier.oldLayout = currentLayout[img.id];
 				barrier.newLayout = required;
 				m_barriers[i].imageBarriers.push_back(barrier);
 				currentLayout[img.id] = required;
 			}
 
-			// Image write barriers
+			// Image writes — emit transition to GENERAL only if layout differs.
 			for (const auto& img : pass.m_writeImages) {
 				if (currentLayout[img.id] != VK_IMAGE_LAYOUT_GENERAL) {
 					ImageBarrier barrier;
 					barrier.image = img;
-					barrier.srcStage = lastImageWriter[img.id].stage;
+					barrier.srcStage = imageWritten[img.id] ? lastImageWriter[img.id].stage
+					                                       : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 					barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-					barrier.srcAccess = lastImageWriter[img.id].access;
+					barrier.srcAccess = imageWritten[img.id] ? lastImageWriter[img.id].access : 0;
 					barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
 					barrier.oldLayout = currentLayout[img.id];
 					barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -596,81 +758,120 @@ void RenderGraph::ComputeBarriers() {
 					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 					VK_ACCESS_SHADER_WRITE_BIT
 				};
+				imageWritten[img.id] = true;
 				currentLayout[img.id] = VK_IMAGE_LAYOUT_GENERAL;
 			}
 
-			// Buffer write barriers
-			for (const auto& buf : pass.m_writeBuffers) {
-				BufferBarrier barrier;
-				barrier.buffer = buf;
-				barrier.srcStage = lastBufferWriter[buf.id].stage;
-				barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-				barrier.srcAccess = lastBufferWriter[buf.id].access;
-				barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
-				m_barriers[i].bufferBarriers.push_back(barrier);
+			// Buffer writes
+			for (size_t w = 0; w < pass.m_writeBuffers.size(); w++) {
+				const auto& buf = pass.m_writeBuffers[w];
+				if (bufferWritten[buf.id]) {
+					BufferBarrier barrier;
+					barrier.buffer = buf;
+					barrier.srcStage = lastBufferWriter[buf.id].stage;
+					barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+					barrier.srcAccess = lastBufferWriter[buf.id].access;
+					barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
+					m_barriers[i].bufferBarriers.push_back(barrier);
+				}
 
 				lastBufferWriter[buf.id] = {
 					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 					VK_ACCESS_SHADER_WRITE_BIT
 				};
+				bufferWritten[buf.id] = true;
 			}
 
-			// Buffer read barriers
-			for (const auto& buf : pass.m_readBuffers) {
+			// Buffer reads
+			for (size_t r = 0; r < pass.m_readBuffers.size(); r++) {
+				const auto& buf = pass.m_readBuffers[r];
+				if (!bufferWritten[buf.id]) continue;  // no producer to sync against
+
+				ResourceUsage usage = UsageAt(pass.m_readBufferUsages, r);
+				VkAccessFlags dstAccess;
+				VkPipelineStageFlags dstStage;
+				BufferReadParams(usage, PassType::Compute, dstAccess, dstStage);
+
 				BufferBarrier barrier;
 				barrier.buffer = buf;
 				barrier.srcStage = lastBufferWriter[buf.id].stage;
-				barrier.dstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+				barrier.dstStage = dstStage;
 				barrier.srcAccess = lastBufferWriter[buf.id].access;
-				barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
+				barrier.dstAccess = dstAccess;
 				m_barriers[i].bufferBarriers.push_back(barrier);
 			}
 		}
 		else if (ref.type == PassType::Graphics) {
 			auto& pass = *m_graphicsPasses[ref.index];
 
-			// Image read barriers
-			for (const auto& img : pass.m_readImages) {
-				VkImageLayout required = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-				if (currentLayout[img.id] != required) {
-					ImageBarrier barrier;
-					barrier.image = img;
-					barrier.srcStage = lastImageWriter[img.id].stage;
-					barrier.dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-					barrier.srcAccess = lastImageWriter[img.id].access;
-					barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
-					barrier.oldLayout = currentLayout[img.id];
-					barrier.newLayout = required;
-					m_barriers[i].imageBarriers.push_back(barrier);
-					currentLayout[img.id] = required;
+			// Image reads
+			for (size_t r = 0; r < pass.m_readImages.size(); r++) {
+				const auto& img = pass.m_readImages[r];
+				ResourceUsage usage = UsageAt(pass.m_readImageUsages, r);
+				VkImageLayout required;
+				VkAccessFlags dstAccess;
+				VkPipelineStageFlags dstStage;
+				ImageReadParams(usage, PassType::Graphics, required, dstAccess, dstStage);
+
+				bool layoutMatches = (currentLayout[img.id] == required);
+				bool noProducer = !imageWritten[img.id];
+				if (layoutMatches && noProducer) continue;
+				if (layoutMatches) {
+					// Read-after-read: layout already correct, no producer to sync.
+					// (If imageWritten became true via a prior pass that already
+					//  laid out + made-visible the data, we'd still want a barrier
+					//  on the stage front; keep the safer path of emitting it.)
 				}
+
+				ImageBarrier barrier;
+				barrier.image = img;
+				barrier.srcStage = imageWritten[img.id] ? lastImageWriter[img.id].stage
+				                                       : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+				barrier.dstStage = dstStage;
+				barrier.srcAccess = imageWritten[img.id] ? lastImageWriter[img.id].access : 0;
+				barrier.dstAccess = dstAccess;
+				barrier.oldLayout = currentLayout[img.id];
+				barrier.newLayout = required;
+				m_barriers[i].imageBarriers.push_back(barrier);
+				currentLayout[img.id] = required;
 			}
 
-			// Buffer read barriers (vertex/fragment shader SSBOs)
-			for (const auto& buf : pass.m_readBuffers) {
+			// Buffer reads (vertex/fragment shader SSBOs / UBOs / vertex+index)
+			for (size_t r = 0; r < pass.m_readBuffers.size(); r++) {
+				const auto& buf = pass.m_readBuffers[r];
+				if (!bufferWritten[buf.id]) continue;
+
+				ResourceUsage usage = UsageAt(pass.m_readBufferUsages, r);
+				VkAccessFlags dstAccess;
+				VkPipelineStageFlags dstStage;
+				BufferReadParams(usage, PassType::Graphics, dstAccess, dstStage);
+
 				BufferBarrier barrier;
 				barrier.buffer = buf;
 				barrier.srcStage = lastBufferWriter[buf.id].stage;
-				barrier.dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+				barrier.dstStage = dstStage;
 				barrier.srcAccess = lastBufferWriter[buf.id].access;
-				barrier.dstAccess = VK_ACCESS_SHADER_READ_BIT;
+				barrier.dstAccess = dstAccess;
 				m_barriers[i].bufferBarriers.push_back(barrier);
 			}
 
-			// Buffer write barriers
+			// Buffer writes
 			for (const auto& buf : pass.m_writeBuffers) {
-				BufferBarrier barrier;
-				barrier.buffer = buf;
-				barrier.srcStage = lastBufferWriter[buf.id].stage;
-				barrier.dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-				barrier.srcAccess = lastBufferWriter[buf.id].access;
-				barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
-				m_barriers[i].bufferBarriers.push_back(barrier);
+				if (bufferWritten[buf.id]) {
+					BufferBarrier barrier;
+					barrier.buffer = buf;
+					barrier.srcStage = lastBufferWriter[buf.id].stage;
+					barrier.dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+					barrier.srcAccess = lastBufferWriter[buf.id].access;
+					barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
+					m_barriers[i].bufferBarriers.push_back(barrier);
+				}
 
 				lastBufferWriter[buf.id] = {
 					VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					VK_ACCESS_SHADER_WRITE_BIT
 				};
+				bufferWritten[buf.id] = true;
 			}
 
 			for (const auto& ca : pass.m_colorAttachments) {
@@ -681,6 +882,7 @@ void RenderGraph::ComputeBarriers() {
 						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 					};
+					imageWritten[ca.target.id] = true;
 				}
 			}
 
@@ -690,6 +892,7 @@ void RenderGraph::ComputeBarriers() {
 					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
 				};
+				imageWritten[pass.m_depthTarget.id] = true;
 			}
 
 			if (pass.m_hasResolve && pass.m_resolveTarget.id < m_images.size()) {
@@ -699,6 +902,7 @@ void RenderGraph::ComputeBarriers() {
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 				};
+				imageWritten[pass.m_resolveTarget.id] = true;
 			}
 		}
 	}
@@ -867,10 +1071,9 @@ void RenderGraph::Resize(VkExtent2D newExtent) {
 
 	for (auto& res : m_images) {
 		if (res.imported) continue;
-		// Preserve 3D volumes across resize — their contents (e.g. uploaded
-		// .vox data) would otherwise be wiped and there's no producer pass
-		// running every frame to refill them once Generate is disabled.
-		if (res.desc.imageType == VK_IMAGE_TYPE_3D) continue;
+		// Persistent resources keep their VkImage across Resize — used for data
+		// that no producer pass refills (e.g. uploaded .vox volumes).
+		if (res.desc.lifetime == Lifetime::Persistent) continue;
 		res.image.reset();
 		res.view.reset();
 		res.usageFlags = 0;
@@ -884,7 +1087,7 @@ void RenderGraph::Resize(VkExtent2D newExtent) {
 
 	for (auto& res : m_images) {
 		if (res.imported) continue;
-		if (res.desc.imageType == VK_IMAGE_TYPE_3D) continue;
+		if (res.desc.lifetime == Lifetime::Persistent) continue;
 		res.desc.width = newExtent.width;
 		res.desc.height = newExtent.height;
 	}
@@ -905,4 +1108,9 @@ void RenderGraph::Clear() {
 	m_executionOrder.clear();
 	m_barriers.clear();
 	m_compiled = false;
+
+	// Bump generation counters so any handle that survives this Clear() fails
+	// the gen check in subsequent Get*() calls.
+	m_imageGen++;
+	m_bufferGen++;
 }

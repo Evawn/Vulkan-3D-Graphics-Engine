@@ -46,11 +46,12 @@ private:
 	// Dynamic per-axis volume sizing (procedural defaults to uvec3(128); .vox fits per-axis)
 	glm::uvec3 m_volume_size = glm::uvec3(128, 128, 128);
 
-	// .vox file import state
+	// .vox file import state. m_loaded_vox holds the active .vox model for as
+	// long as it's loaded — OnPostCompile re-applies it on every graph rebuild
+	// (e.g. after a window resize), so the volume always matches the file.
 	std::string m_vox_file_path;
 	bool m_pending_reload = false;
-	bool m_vox_active = false;
-	std::optional<VoxModel> m_pending_vox;
+	std::optional<VoxModel> m_loaded_vox;
 	RenderGraph* m_graph = nullptr;
 
 	// Shared, non-owning pointer to renderer-owned lighting state. Captured from

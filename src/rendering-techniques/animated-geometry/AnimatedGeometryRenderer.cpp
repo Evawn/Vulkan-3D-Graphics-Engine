@@ -113,7 +113,7 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(resolveTarget)
-		.Read(m_volume)
+		.Read(m_volume, ResourceUsage::SampledRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_trace.vert.spv";
