@@ -21,14 +21,6 @@ void MeshRasterizer::RegisterPasses(
 	m_camera = ctx.camera;
 	m_graph = &graph;
 
-	auto desc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
-		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
-		.Build(ctx.maxFramesInFlight);
-	m_descriptor_set_layout = desc.layout;
-	m_descriptor_pool = desc.pool;
-	m_descriptor_sets = desc.sets;
-
 	m_sampler = VWrap::Sampler::Create(m_device);
 
 	m_model_path = std::string(config::ASSET_DIR) + "/models/indoor plant_02.obj";
@@ -56,8 +48,16 @@ void MeshRasterizer::RegisterPasses(
 		CreateVertexBuffer();
 		CreateIndexBuffer();
 	}
-	CreateUniformBuffers();
-	WriteDescriptors();
+	CreateUniformBuffers(ctx.maxFramesInFlight);
+
+	// Binding table: per-frame UBO at binding 0 + texture sampler at binding 1.
+	m_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
+	m_bindings->AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.BindUniformBufferPerFrame(0, m_uniform_buffers, sizeof(UniformBufferObject))
+		.BindExternalSampledImage(1, m_texture_image_view, m_sampler,
+		                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	m_bindings->Build();
 
 	graph.AddGraphicsPass("Mesh Scene")
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
@@ -67,7 +67,7 @@ void MeshRasterizer::RegisterPasses(
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/shader_rast.vert.spv";
 			d.fragSpvPath = std::string(config::SHADER_DIR) + "/shader_rast.frag.spv";
-			d.descriptorSetLayout = m_descriptor_set_layout;
+			d.descriptorSetLayout = m_bindings->GetLayout();
 
 			auto binding = VWrap::Vertex::getBindingDescription();
 			auto attrs = VWrap::Vertex::getAttributeDescriptions();
@@ -90,16 +90,17 @@ void MeshRasterizer::RegisterPasses(
 			auto vk_cmd = ctx.cmd->Get();
 			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.graphicsPipeline->Get());
 
-			std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[ctx.frameIndex]->Get() };
+			VkDescriptorSet ds = m_bindings->GetSet(ctx.frameIndex)->Get();
 			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				ctx.graphicsPipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
+				ctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
 			VkBuffer vertexBuffers[] = { m_vertex_buffer->Get() };
 			VkDeviceSize offsets[] = { 0 };
 			vkCmdBindVertexBuffers(vk_cmd, 0, 1, vertexBuffers, offsets);
 			vkCmdBindIndexBuffer(vk_cmd, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
 			vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
-		});
+		})
+		.SetBindings(m_bindings);
 }
 
 void MeshRasterizer::CreateVertexBuffer() {
@@ -146,9 +147,8 @@ void MeshRasterizer::CreateIndexBuffer() {
 	command_buffer->EndAndSubmit();
 }
 
-void MeshRasterizer::CreateUniformBuffers() {
+void MeshRasterizer::CreateUniformBuffers(uint32_t frames) {
 	VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-	auto frames = m_descriptor_sets.size();
 	m_uniform_buffers.resize(frames);
 	m_uniform_buffers_mapped.resize(frames);
 
@@ -163,36 +163,12 @@ void MeshRasterizer::CreateUniformBuffers() {
 }
 
 void MeshRasterizer::WriteDescriptors() {
-	for (size_t i = 0; i < m_descriptor_sets.size(); i++) {
-		VkDescriptorBufferInfo bufferInfo{};
-		bufferInfo.buffer = m_uniform_buffers[i]->Get();
-		bufferInfo.offset = 0;
-		bufferInfo.range = sizeof(UniformBufferObject);
-
-		VkDescriptorImageInfo imageInfo{};
-		imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		imageInfo.imageView = m_texture_image_view->Get();
-		imageInfo.sampler = m_sampler->Get();
-
-		std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
-		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[0].descriptorCount = 1;
-		descriptorWrites[0].dstBinding = 0;
-		descriptorWrites[0].dstSet = m_descriptor_sets[i]->Get();
-		descriptorWrites[0].dstArrayElement = 0;
-		descriptorWrites[0].pBufferInfo = &bufferInfo;
-		descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-
-		descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[1].descriptorCount = 1;
-		descriptorWrites[1].dstBinding = 1;
-		descriptorWrites[1].dstSet = m_descriptor_sets[i]->Get();
-		descriptorWrites[1].dstArrayElement = 0;
-		descriptorWrites[1].pImageInfo = &imageInfo;
-		descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-
-		vkUpdateDescriptorSets(m_device->Get(), static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
-	}
+	// Texture-reload entry point: rebind the (new) image view through the
+	// existing BindingTable and re-run vkUpdateDescriptorSets.
+	if (!m_bindings || !m_graph) return;
+	m_bindings->ReplaceExternalSampledImage(1, m_texture_image_view, m_sampler,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	m_bindings->Update(*m_graph);
 }
 
 void MeshRasterizer::LoadModel() {

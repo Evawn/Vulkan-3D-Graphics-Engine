@@ -2,7 +2,7 @@
 
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
-#include "DescriptorSetBuilder.h"
+#include "BindingTable.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
 #include "VoxLoader.h"
@@ -31,20 +31,10 @@ private:
 	// Shared 256-entry palette texture + its sampler.
 	std::unique_ptr<PaletteResource> m_palette;
 
-	// Generate descriptors (compute: writes volume) — pipeline owned by graph.
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_compute_descriptor_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_compute_descriptor_pool;
-	std::shared_ptr<VWrap::DescriptorSet> m_compute_descriptor_set;
-
-	// Build descriptors (compute: reads volume, writes brickmap buffer) — pipeline owned by graph.
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_build_descriptor_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_build_descriptor_pool;
-	std::shared_ptr<VWrap::DescriptorSet> m_build_descriptor_set;
-
-	// Graphics descriptors (per-frame) — pipeline owned by graph.
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_graphics_descriptor_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_graphics_descriptor_pool;
-	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_graphics_descriptor_sets;
+	// Descriptor wiring is owned by BindingTables; pipelines by the graph.
+	std::shared_ptr<BindingTable> m_compute_bindings;
+	std::shared_ptr<BindingTable> m_build_bindings;
+	std::shared_ptr<BindingTable> m_graphics_bindings;
 
 	// Tunable parameters
 	int m_shape = 0;
@@ -92,6 +82,8 @@ public:
 	void PerformReload(const RenderContext& ctx) override;
 	bool NeedsRebuild() const override { return m_needs_rebuild; }
 
+	// Post-Compile hook: applies any pending .vox upload now that graph resources
+	// are allocated. Descriptor wiring is handled automatically by BindingTable.
 	void WriteGraphDescriptors(RenderGraph& graph) override;
 
 	std::vector<std::string> GetShaderPaths() const override;

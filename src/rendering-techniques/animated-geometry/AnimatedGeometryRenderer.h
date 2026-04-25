@@ -2,7 +2,7 @@
 
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
-#include "DescriptorSetBuilder.h"
+#include "BindingTable.h"
 #include "PaletteResource.h"
 #include "SceneLighting.h"
 #include <chrono>
@@ -37,15 +37,10 @@ private:
 	// LINEAR sampler can't be reused.
 	std::shared_ptr<VWrap::Sampler> m_volume_sampler;
 
-	// Generate (compute: writes volume) — pipeline owned by graph.
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_compute_descriptor_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_compute_descriptor_pool;
-	std::shared_ptr<VWrap::DescriptorSet> m_compute_descriptor_set;
-
-	// Trace (graphics: reads volume + palette, fullscreen quad) — pipeline owned by graph.
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_graphics_descriptor_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_graphics_descriptor_pool;
-	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_graphics_descriptor_sets;
+	// Descriptor wiring is owned by BindingTables; the graph re-applies them on
+	// Compile() and on Resize(). Pipelines are also graph-owned.
+	std::shared_ptr<BindingTable> m_compute_bindings;
+	std::shared_ptr<BindingTable> m_graphics_bindings;
 
 	// Tunable parameters.
 	int m_pattern = 0;
@@ -73,8 +68,6 @@ public:
 
 	void Shutdown() override {}
 	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override;
-
-	void WriteGraphDescriptors(RenderGraph& graph) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipeline(const RenderContext& ctx) override;

@@ -46,9 +46,6 @@ void AnimatedGeometryRenderer::RegisterPasses(
 	glm::uvec3 vs = m_volume_size;
 	logger->info("AnimatedGeometryRenderer: volume={}x{}x{}", vs.x, vs.y, vs.z);
 
-	// 3D storage image for voxel volume (R8_UINT: material index per voxel).
-	// Both compute (write) and graphics (sampled read) bits are added by the
-	// graph automatically based on pass declarations.
 	m_volume = graph.CreateImage("animated_geometry_volume", {
 		vs.x, vs.y, vs.z,
 		VK_FORMAT_R8_UINT,
@@ -57,22 +54,28 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		0
 	});
 
-	// Build descriptor layouts up front so the pipeline desc factories can
-	// capture the layout shared_ptrs.
-	auto computeDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
-		.Build(1);
-	m_compute_descriptor_layout = computeDesc.layout;
-	m_compute_descriptor_pool = computeDesc.pool;
-	m_compute_descriptor_set = computeDesc.sets[0];
+	// Palette + volume sampler: external resources the technique owns. Built
+	// here so binding-table sources can capture them.
+	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
+	m_palette->Create();
+	if (!m_volume_sampler) {
+		m_volume_sampler = VWrap::Sampler::CreateNearestClamp(m_device);
+	}
 
-	auto gfxDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+	// Compute binding table: storage image (volume).
+	m_compute_bindings = std::make_shared<BindingTable>(m_device, 1);
+	m_compute_bindings->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
+		.BindGraphStorageImage(0, m_volume);
+	m_compute_bindings->Build();
+
+	// Graphics binding table: volume sampled (graph-managed) + palette sampled (external).
+	m_graphics_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
+	m_graphics_bindings->AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
-		.Build(ctx.maxFramesInFlight);
-	m_graphics_descriptor_layout = gfxDesc.layout;
-	m_graphics_descriptor_pool = gfxDesc.pool;
-	m_graphics_descriptor_sets = gfxDesc.sets;
+		.BindGraphSampledImage(0, m_volume, m_volume_sampler)
+		.BindExternalSampledImage(1, m_palette->GetImageView(), m_palette->GetSampler(),
+		                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	m_graphics_bindings->Build();
 
 	// Compute pass: write procedural animated voxels into the volume each frame.
 	graph.AddComputePass("Animated Geometry Generate")
@@ -80,7 +83,7 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		.SetPipeline([this]() {
 			ComputePipelineDesc d;
 			d.compSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_generate.comp.spv";
-			d.descriptorSetLayout = m_compute_descriptor_layout;
+			d.descriptorSetLayout = m_compute_bindings->GetLayout();
 			VkPushConstantRange r{};
 			r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 			r.offset = 0;
@@ -91,7 +94,7 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		.SetRecord([this, vs](PassContext& ctx) {
 			ctx.cmd->CmdBindComputePipeline(ctx.computePipeline);
 			ctx.cmd->CmdBindComputeDescriptorSets(ctx.computePipeline->GetLayout(),
-				{ m_compute_descriptor_set->Get() });
+				{ m_compute_bindings->GetSet(0)->Get() });
 			AnimatedGeometryGeneratePC pc{};
 			pc.pattern = m_pattern;
 			auto now = std::chrono::steady_clock::now();
@@ -103,7 +106,8 @@ void AnimatedGeometryRenderer::RegisterPasses(
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 			auto cdiv = [](uint32_t a, uint32_t b) { return (a + b - 1) / b; };
 			ctx.cmd->CmdDispatch(cdiv(vs.x, 4), cdiv(vs.y, 4), cdiv(vs.z, 4));
-		});
+		})
+		.SetBindings(m_compute_bindings);
 
 	// Graphics pass: single-level DDA fragment shader.
 	graph.AddGraphicsPass("Animated Geometry Trace")
@@ -115,7 +119,7 @@ void AnimatedGeometryRenderer::RegisterPasses(
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_trace.vert.spv";
 			d.fragSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_trace.frag.spv";
-			d.descriptorSetLayout = m_graphics_descriptor_layout;
+			d.descriptorSetLayout = m_graphics_bindings->GetLayout();
 			VkPushConstantRange r{};
 			r.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 			r.offset = 0;
@@ -130,7 +134,7 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		.SetRecord([this, vs](PassContext& ctx) {
 			auto vk_cmd = ctx.cmd->Get();
 			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.graphicsPipeline->Get());
-			VkDescriptorSet ds = m_graphics_descriptor_sets[ctx.frameIndex]->Get();
+			VkDescriptorSet ds = m_graphics_bindings->GetSet(ctx.frameIndex)->Get();
 			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 				ctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
@@ -164,73 +168,14 @@ void AnimatedGeometryRenderer::RegisterPasses(
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(AnimatedGeometryTracePC), &pc);
 
 			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
-		});
-
-	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
-	m_palette->Create();
-
-	// NEAREST sampler for the integer R8_UINT volume.
-	if (!m_volume_sampler) {
-		m_volume_sampler = VWrap::Sampler::CreateNearestClamp(m_device);
-	}
+		})
+		.SetBindings(m_graphics_bindings);
 
 	logger->debug("AnimatedGeometryRenderer: Initialized via RegisterPasses");
 }
 
-void AnimatedGeometryRenderer::WriteGraphDescriptors(RenderGraph& graph) {
-	auto volumeView = graph.GetImageView(m_volume);
-
-	// Generate: storage image in GENERAL layout.
-	{
-		VkDescriptorImageInfo imageInfo{};
-		imageInfo.imageView = volumeView->Get();
-		imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-		VkWriteDescriptorSet write{};
-		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		write.dstSet = m_compute_descriptor_set->Get();
-		write.dstBinding = 0;
-		write.descriptorCount = 1;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		write.pImageInfo = &imageInfo;
-
-		vkUpdateDescriptorSets(m_device->Get(), 1, &write, 0, nullptr);
-	}
-
-	// Graphics: volume (sampled) + palette per frame.
-	for (auto& ds : m_graphics_descriptor_sets) {
-		VkDescriptorImageInfo volumeInfo{};
-		volumeInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		volumeInfo.imageView = volumeView->Get();
-		volumeInfo.sampler = m_volume_sampler->Get();
-
-		VkDescriptorImageInfo paletteInfo{};
-		paletteInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		paletteInfo.imageView = m_palette->GetImageView()->Get();
-		paletteInfo.sampler = m_palette->GetSampler()->Get();
-
-		VkWriteDescriptorSet writes[2]{};
-		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[0].dstSet = ds->Get();
-		writes[0].dstBinding = 0;
-		writes[0].descriptorCount = 1;
-		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[0].pImageInfo = &volumeInfo;
-
-		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[1].dstSet = ds->Get();
-		writes[1].dstBinding = 1;
-		writes[1].descriptorCount = 1;
-		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[1].pImageInfo = &paletteInfo;
-
-		vkUpdateDescriptorSets(m_device->Get(), 2, writes, 0, nullptr);
-	}
-}
-
 void AnimatedGeometryRenderer::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
 	m_extent = newExtent;
-	WriteGraphDescriptors(graph);
 }
 
 std::vector<std::string> AnimatedGeometryRenderer::GetShaderPaths() const {
@@ -242,8 +187,7 @@ std::vector<std::string> AnimatedGeometryRenderer::GetShaderPaths() const {
 }
 
 void AnimatedGeometryRenderer::RecreatePipeline(const RenderContext& ctx) {
-	// Pipelines are owned by the graph. Application calls graph.RecreatePipelines()
-	// directly during hot-reload; this override stays empty until §2.1 deletes it.
+	// Pipelines are owned by the graph.
 }
 
 std::vector<TechniqueParameter>& AnimatedGeometryRenderer::GetParameters() {

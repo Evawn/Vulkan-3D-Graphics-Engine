@@ -21,7 +21,6 @@ public:
 		ImageHandle input,
 		VkExtent2D extent) override;
 
-	void WriteGraphDescriptors(RenderGraph& graph) override;
 	std::vector<TechniqueParameter>& GetParameters() override;
 	std::vector<std::string> GetShaderPaths() const override;
 	void RecreatePipelines() override;

@@ -1,11 +1,9 @@
 #pragma once
 
 #include "RenderGraphTypes.h"
+#include "BindingTable.h"
 #include "Device.h"
 #include "Sampler.h"
-#include "DescriptorSetLayout.h"
-#include "DescriptorPool.h"
-#include "DescriptorSet.h"
 #include <functional>
 #include <memory>
 #include <string>
@@ -38,10 +36,10 @@ struct FullscreenPassDesc {
 
 // ---- The pass itself ----
 //
-// Owns the descriptor layout/pool/sets and the per-frame descriptor writes for
-// the fullscreen pass. Pipeline ownership lives in the graph (built post-Compile
-// against the canonical render pass, rebuilt on hot-reload via
-// RenderGraph::RecreatePipelines()).
+// Just a thin convenience wrapper now: builds a BindingTable for the sampled
+// inputs, registers the pass with the graph, and hands the graph the pipeline
+// desc factory. Pipeline ownership lives in the graph; descriptor writes are
+// auto-applied by the graph after Compile()/Resize().
 class FullscreenPass {
 public:
 	// Per-draw callback invoked between BindDescriptorSets and Draw. Use it to
@@ -56,17 +54,6 @@ public:
 		const FullscreenPassDesc& desc,
 		PushFn pushFn);
 
-	// Re-bind every sampled input to its current graph image view. Call this
-	// from PostProcessEffect::WriteGraphDescriptors and on resize.
-	void WriteDescriptors(RenderGraph& graph);
-
 private:
-	std::shared_ptr<VWrap::Device> m_device;
-
-	std::vector<ImageHandle> m_inputs;
-	std::shared_ptr<VWrap::Sampler> m_sampler;
-
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_descriptorLayout;
-	std::shared_ptr<VWrap::DescriptorPool> m_descriptorPool;
-	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_descriptorSets;
+	std::shared_ptr<BindingTable> m_bindings;
 };

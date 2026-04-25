@@ -1,9 +1,8 @@
 #pragma once
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
-#include "DescriptorSetBuilder.h"
+#include "BindingTable.h"
 #include "Buffer.h"
-#include "Pipeline.h"
 #include "Image.h"
 #include "ImageView.h"
 #include "Sampler.h"
@@ -43,9 +42,7 @@ private:
 	std::vector<std::shared_ptr<VWrap::Buffer>> m_uniform_buffers;
 	std::vector<void*> m_uniform_buffers_mapped;
 
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_descriptor_set_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_descriptor_pool;
-	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_descriptor_sets;
+	std::shared_ptr<BindingTable> m_bindings;
 
 	// Pipeline owned by the graph; rebuilt on hot-reload + wireframe toggle.
 	RenderGraph* m_graph = nullptr;
@@ -68,7 +65,7 @@ private:
 
 	void CreateVertexBuffer();
 	void CreateIndexBuffer();
-	void CreateUniformBuffers();
+	void CreateUniformBuffers(uint32_t frames);
 	void WriteDescriptors();
 	void LoadModel();
 	void ReloadModel(const std::string& newPath);

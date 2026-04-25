@@ -79,10 +79,6 @@ ImageHandle LensFlareEffect::RegisterPasses(
 	return m_output;
 }
 
-void LensFlareEffect::WriteGraphDescriptors(RenderGraph& graph) {
-	m_pass->WriteDescriptors(graph);
-}
-
 std::vector<TechniqueParameter>& LensFlareEffect::GetParameters() {
 	if (m_parameters.empty()) {
 		m_parameters = {

@@ -96,6 +96,7 @@ private:
 	void CreateRenderPasses();
 	void CreateFramebuffers();
 	void CreatePipelines();
+	void UpdateBindings();
 	void ComputeBarriers();
 
 	void BuildGraphicsPipeline(GraphicsPassBuilder& pass);

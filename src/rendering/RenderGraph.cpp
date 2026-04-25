@@ -1,4 +1,5 @@
 #include "RenderGraph.h"
+#include "BindingTable.h"
 #include "GPUProfiler.h"
 #include "Utils.h"
 #include <spdlog/spdlog.h>
@@ -508,6 +509,15 @@ void RenderGraph::CreatePipelines() {
 	}
 }
 
+void RenderGraph::UpdateBindings() {
+	for (auto& gfx : m_graphicsPasses) {
+		if (gfx->m_bindings) gfx->m_bindings->Update(*this);
+	}
+	for (auto& comp : m_computePasses) {
+		if (comp->m_bindings) comp->m_bindings->Update(*this);
+	}
+}
+
 void RenderGraph::RecreatePipelines() {
 	auto logger = spdlog::get("Render");
 	logger->info("RenderGraph: Recreating pipelines");
@@ -705,6 +715,7 @@ void RenderGraph::Compile() {
 	CreateFramebuffers();
 	CreatePipelines();
 	ComputeBarriers();
+	UpdateBindings();
 
 	m_compiled = true;
 	logger->info("RenderGraph: Compiled successfully");

@@ -104,13 +104,6 @@ ImageHandle BloomEffect::RegisterPasses(
 	return m_output;
 }
 
-void BloomEffect::WriteGraphDescriptors(RenderGraph& graph) {
-	m_brightPass->WriteDescriptors(graph);
-	m_blurHPass->WriteDescriptors(graph);
-	m_blurVPass->WriteDescriptors(graph);
-	m_compositePass->WriteDescriptors(graph);
-}
-
 std::vector<TechniqueParameter>& BloomEffect::GetParameters() {
 	if (m_parameters.empty()) {
 		m_parameters = {
