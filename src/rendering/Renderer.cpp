@@ -59,9 +59,10 @@ void Renderer::Build(
 
 	m_graph.Compile();
 
-	// Post-compile: techniques and effects write descriptors for graph-allocated images
-	technique->WriteGraphDescriptors(m_graph);
-	m_postProcess.WriteGraphDescriptors(m_graph);
+	// Post-compile hook: techniques run any one-shot work that needs the graph's
+	// allocated resources (e.g. seeding a storage image). Descriptor writes are
+	// already handled by BindingTable.
+	technique->OnPostCompile(m_graph);
 }
 
 void Renderer::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
@@ -86,8 +87,7 @@ void Renderer::OnSwapchainResize(
 void Renderer::OnViewportResize(VkExtent2D newExtent, RenderTechnique* technique) {
 	m_offscreenExtent = newExtent;
 	m_graph.Resize(newExtent);
-	technique->WriteGraphDescriptors(m_graph);
-	technique->OnResize(newExtent, m_graph);
+	(void)technique;
 	m_postProcess.OnResize(newExtent, m_graph);
 }
 

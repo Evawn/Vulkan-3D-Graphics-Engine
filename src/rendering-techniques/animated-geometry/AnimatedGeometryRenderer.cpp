@@ -38,7 +38,6 @@ void AnimatedGeometryRenderer::RegisterPasses(
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
 	m_graphics_pool = ctx.graphicsPool;
-	m_extent = ctx.extent;
 	m_camera = ctx.camera;
 	m_lighting = ctx.lighting;
 	m_start_time = std::chrono::steady_clock::now();
@@ -174,20 +173,12 @@ void AnimatedGeometryRenderer::RegisterPasses(
 	logger->debug("AnimatedGeometryRenderer: Initialized via RegisterPasses");
 }
 
-void AnimatedGeometryRenderer::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
-	m_extent = newExtent;
-}
-
 std::vector<std::string> AnimatedGeometryRenderer::GetShaderPaths() const {
 	return {
 		std::string(config::SHADER_DIR) + "/animated_geometry_generate.comp.spv",
 		std::string(config::SHADER_DIR) + "/animated_geometry_trace.vert.spv",
 		std::string(config::SHADER_DIR) + "/animated_geometry_trace.frag.spv"
 	};
-}
-
-void AnimatedGeometryRenderer::RecreatePipeline(const RenderContext& ctx) {
-	// Pipelines are owned by the graph.
 }
 
 std::vector<TechniqueParameter>& AnimatedGeometryRenderer::GetParameters() {

@@ -19,7 +19,6 @@ private:
 	std::shared_ptr<VWrap::Device> m_device;
 	std::shared_ptr<VWrap::Allocator> m_allocator;
 	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
-	VkExtent2D m_extent{};
 	std::shared_ptr<Camera> m_camera;
 
 	// Graph-managed 128^3 3D storage image (R8_UINT: material index per voxel)
@@ -49,8 +48,7 @@ private:
 
 	// .vox file import state
 	std::string m_vox_file_path;
-	bool m_needs_reload = false;
-	bool m_needs_rebuild = false;
+	bool m_pending_reload = false;
 	bool m_vox_active = false;
 	std::optional<VoxModel> m_pending_vox;
 	RenderGraph* m_graph = nullptr;
@@ -66,7 +64,7 @@ private:
 	void UploadVolumeData(const uint8_t* data);
 
 public:
-	std::string GetName() const override { return "Brickmap Palette Renderer"; }
+	std::string GetDisplayName() const override { return "Brickmap Palette Renderer"; }
 
 	void RegisterPasses(
 		RenderGraph& graph,
@@ -75,19 +73,13 @@ public:
 		ImageHandle depthTarget,
 		ImageHandle resolveTarget) override;
 
-	void Shutdown() override {}
-	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override;
-
-	bool NeedsReload() const override { return m_needs_reload; }
-	void PerformReload(const RenderContext& ctx) override;
-	bool NeedsRebuild() const override { return m_needs_rebuild; }
+	void Reload(const RenderContext& ctx) override;
 
 	// Post-Compile hook: applies any pending .vox upload now that graph resources
 	// are allocated. Descriptor wiring is handled automatically by BindingTable.
-	void WriteGraphDescriptors(RenderGraph& graph) override;
+	void OnPostCompile(RenderGraph& graph) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
-	void RecreatePipeline(const RenderContext& ctx) override;
 
 	std::vector<TechniqueParameter>& GetParameters() override;
 	FrameStats GetFrameStats() const override;

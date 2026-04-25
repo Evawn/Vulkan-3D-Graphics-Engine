@@ -12,26 +12,27 @@ void InspectorPanel::SetRenderers(
 }
 
 static void DrawTechniqueParameter(TechniqueParameter& param) {
+	bool changed = false;
 	switch (param.type) {
 	case TechniqueParameter::Float:
-		ImGui::SliderFloat(param.label.c_str(), static_cast<float*>(param.data), param.min, param.max);
+		changed = ImGui::SliderFloat(param.label.c_str(), static_cast<float*>(param.data), param.min, param.max);
 		break;
 	case TechniqueParameter::Int:
-		ImGui::SliderInt(param.label.c_str(), static_cast<int*>(param.data), (int)param.min, (int)param.max);
+		changed = ImGui::SliderInt(param.label.c_str(), static_cast<int*>(param.data), (int)param.min, (int)param.max);
 		break;
 	case TechniqueParameter::Bool:
-		ImGui::Checkbox(param.label.c_str(), static_cast<bool*>(param.data));
+		changed = ImGui::Checkbox(param.label.c_str(), static_cast<bool*>(param.data));
 		break;
 	case TechniqueParameter::Color3:
-		ImGui::ColorEdit3(param.label.c_str(), static_cast<float*>(param.data));
+		changed = ImGui::ColorEdit3(param.label.c_str(), static_cast<float*>(param.data));
 		break;
 	case TechniqueParameter::Color4:
-		ImGui::ColorEdit4(param.label.c_str(), static_cast<float*>(param.data));
+		changed = ImGui::ColorEdit4(param.label.c_str(), static_cast<float*>(param.data));
 		break;
 	case TechniqueParameter::Enum: {
 		int* val = static_cast<int*>(param.data);
 		if (!param.enumLabels.empty()) {
-			ImGui::Combo(param.label.c_str(), val, param.enumLabels.data(), (int)param.enumLabels.size());
+			changed = ImGui::Combo(param.label.c_str(), val, param.enumLabels.data(), (int)param.enumLabels.size());
 		}
 		break;
 	}
@@ -53,9 +54,11 @@ static void DrawTechniqueParameter(TechniqueParameter& param) {
 				}
 			}
 		}
-		break;
+		// File handles its own change channel via onFileChanged; skip onChanged.
+		return;
 	}
 	}
+	if (changed && param.onChanged) param.onChanged();
 }
 
 void InspectorPanel::Draw() {
@@ -64,11 +67,11 @@ void InspectorPanel::Draw() {
 	// === Technique ===
 	if (ImGui::CollapsingHeader("Technique", ImGuiTreeNodeFlags_DefaultOpen)) {
 		if (m_renderers && m_active_index) {
-			std::string currentName = (*m_renderers)[*m_active_index]->GetName();
+			std::string currentName = (*m_renderers)[*m_active_index]->GetDisplayName();
 			if (ImGui::BeginCombo("##technique", currentName.c_str())) {
 				for (size_t i = 0; i < m_renderers->size(); i++) {
 					bool selected = (i == *m_active_index);
-					std::string name = (*m_renderers)[i]->GetName();
+					std::string name = (*m_renderers)[i]->GetDisplayName();
 					if (ImGui::Selectable(name.c_str(), selected)) {
 						if (i != *m_active_index && m_switch_callback) {
 							m_switch_callback(i);
@@ -124,7 +127,7 @@ void InspectorPanel::Draw() {
 		for (size_t i = 0; i < m_post_process->GetEffectCount(); i++) {
 			auto* fx = m_post_process->GetEffect(i);
 			ImGui::PushID(static_cast<int>(i));
-			if (ImGui::TreeNodeEx(fx->GetName().c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (ImGui::TreeNodeEx(fx->GetDisplayName().c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
 				auto& params = fx->GetParameters();
 				if (params.empty()) {
 					ImGui::TextColored(UIStyle::kTextDim, "No parameters");

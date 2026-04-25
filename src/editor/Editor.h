@@ -51,7 +51,6 @@ public:
 	void SetReloadCallback(std::function<void()> cb);
 	void SetSwitchCallback(std::function<void(size_t)> cb);
 	void SetScreenshotCallback(std::function<void()> cb);
-	void SetWireframeCallback(std::function<void()> cb);
 
 	// Queries
 	bool ViewportWasResized() const;

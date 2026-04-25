@@ -1,7 +1,7 @@
 #pragma once
 
 #include "RenderGraphTypes.h"
-#include "RenderTechnique.h"
+#include "Inspectable.h"
 #include "SceneLighting.h"
 #include "Device.h"
 #include "Allocator.h"
@@ -32,11 +32,13 @@ struct PostProcessContext {
 // Contract: RegisterPasses() takes an input scene-image handle and returns the
 // handle of the final image this effect produced. The chain threads the outputs
 // of one effect into the next.
-class PostProcessEffect {
+class PostProcessEffect : public IInspectable {
 public:
 	virtual ~PostProcessEffect() = default;
 
+	// Display name for the inspector (also exposed as GetName for legacy callers).
 	virtual std::string GetName() const = 0;
+	std::string GetDisplayName() const override { return GetName(); }
 
 	// Register all passes + allocate owned resources. Called once per graph build.
 	virtual ImageHandle RegisterPasses(
@@ -45,24 +47,16 @@ public:
 		ImageHandle input,
 		VkExtent2D extent) = 0;
 
-	// Called after graph.Compile(), when graph-allocated image views are available.
-	virtual void WriteGraphDescriptors(RenderGraph& graph) {}
-
-	// Called when the offscreen viewport is resized. Descriptors usually need a
-	// re-write because graph image views are recreated.
-	virtual void OnResize(VkExtent2D newExtent, RenderGraph& graph) { (void)newExtent; WriteGraphDescriptors(graph); }
-
-	// Exposed for ImGui — same mechanism as RenderTechnique.
-	virtual std::vector<TechniqueParameter>& GetParameters() {
-		static std::vector<TechniqueParameter> empty; return empty;
+	// Called when the offscreen viewport is resized. Default: no-op (BindingTable
+	// re-applies descriptors automatically; effects only need to override if they
+	// hold extra view-dependent state).
+	virtual void OnResize(VkExtent2D newExtent, RenderGraph& graph) {
+		(void)newExtent; (void)graph;
 	}
 
 	// SPV paths compiled by this effect — lets the shader hot-reload machinery
-	// know what to recompile. Matches RenderTechnique::GetShaderPaths().
+	// know what to recompile.
 	virtual std::vector<std::string> GetShaderPaths() const { return {}; }
-
-	// Recreate pipelines after a hot-reload. Optional override.
-	virtual void RecreatePipelines() {}
 
 	bool IsEnabled() const { return m_enabled; }
 	void SetEnabled(bool v) { m_enabled = v; }

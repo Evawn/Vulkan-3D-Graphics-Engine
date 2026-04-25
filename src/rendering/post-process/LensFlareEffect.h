@@ -23,7 +23,6 @@ public:
 
 	std::vector<TechniqueParameter>& GetParameters() override;
 	std::vector<std::string> GetShaderPaths() const override;
-	void RecreatePipelines() override;
 
 private:
 	std::shared_ptr<Camera> m_camera;

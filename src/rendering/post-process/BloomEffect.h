@@ -23,11 +23,9 @@ public:
 
 	std::vector<TechniqueParameter>& GetParameters() override;
 	std::vector<std::string> GetShaderPaths() const override;
-	void RecreatePipelines() override;
 
 private:
-	// Image handles threaded through the chain. m_input is captured from the
-	// argument so WriteGraphDescriptors can rebind it after graph.Compile().
+	// Image handles threaded through the chain.
 	ImageHandle m_input;
 	ImageHandle m_bright;
 	ImageHandle m_blurH;

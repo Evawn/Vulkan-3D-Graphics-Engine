@@ -16,7 +16,6 @@ void MeshRasterizer::RegisterPasses(
 {
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
-	m_extent = ctx.extent;
 	m_graphics_pool = ctx.graphicsPool;
 	m_camera = ctx.camera;
 	m_graph = &graph;
@@ -345,7 +344,7 @@ void MeshRasterizer::ReloadTexture(const std::string& newPath) {
 		m_texture_path.compare(m_texture_path.size() - 4, 4, ".mtl") == 0)
 	{
 		m_mtl_path = m_texture_path;
-		m_needs_reload = true;
+		m_pending_model_reload = true;
 		return;
 	}
 
@@ -361,15 +360,15 @@ void MeshRasterizer::ReloadTexture(const std::string& newPath) {
 	WriteDescriptors();
 }
 
-void MeshRasterizer::PerformReload(const RenderContext& ctx) {
+void MeshRasterizer::Reload(const RenderContext& ctx) {
 	// Process texture first — if it's an MTL, ReloadTexture stores m_mtl_path
-	// and sets m_needs_reload so the model reload below picks it up.
-	if (m_needs_texture_reload) {
-		m_needs_texture_reload = false;
+	// and flips m_pending_model_reload so the model reload below picks it up.
+	if (m_pending_texture_reload) {
+		m_pending_texture_reload = false;
 		ReloadTexture(m_texture_path);
 	}
-	if (m_needs_reload) {
-		m_needs_reload = false;
+	if (m_pending_model_reload) {
+		m_pending_model_reload = false;
 		ReloadModel(m_model_path);
 	}
 }
@@ -432,17 +431,23 @@ std::vector<std::string> MeshRasterizer::GetShaderPaths() const {
 	};
 }
 
-void MeshRasterizer::RecreatePipeline(const RenderContext& ctx) {
-	// Pipelines are owned by the graph. Application calls graph.RecreatePipelines()
-	// directly during hot-reload; this override stays empty until §2.1 deletes it.
-}
-
 std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {
 	if (m_parameters.empty()) {
 		m_parameters = {
 			{ "Rotation Speed", TechniqueParameter::Float, &m_rotation_speed, 0.0f, 10.0f },
 			{ "Model Scale", TechniqueParameter::Float, &m_model_scale, 0.1f, 5.0f },
 		};
+
+		// Wireframe toggle: re-evaluates the pipeline factory (which closes over
+		// m_wireframe) so the rasterizer state observes the new value.
+		TechniqueParameter wireframe;
+		wireframe.label = "Wireframe";
+		wireframe.type = TechniqueParameter::Bool;
+		wireframe.data = &m_wireframe;
+		wireframe.onChanged = [this]() {
+			if (m_eventSink) m_eventSink({AppEventType::RecreatePipelines});
+		};
+		m_parameters.push_back(std::move(wireframe));
 
 		TechniqueParameter modelFile;
 		modelFile.label = "Model";
@@ -451,7 +456,8 @@ std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {
 		modelFile.fileFilters = {"obj"};
 		modelFile.fileFilterDesc = "OBJ Models";
 		modelFile.onFileChanged = [this](const std::string&) {
-			m_needs_reload = true;
+			m_pending_model_reload = true;
+			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
 		};
 		m_parameters.push_back(std::move(modelFile));
 
@@ -462,7 +468,8 @@ std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {
 		texFile.fileFilters = {"png", "jpg", "jpeg", "bmp", "tga", "mtl"};
 		texFile.fileFilterDesc = "Images";
 		texFile.onFileChanged = [this](const std::string&) {
-			m_needs_texture_reload = true;
+			m_pending_texture_reload = true;
+			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
 		};
 		m_parameters.push_back(std::move(texFile));
 	}
@@ -471,8 +478,4 @@ std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {
 
 FrameStats MeshRasterizer::GetFrameStats() const {
 	return { 1, static_cast<uint32_t>(m_vertices.size()), static_cast<uint32_t>(m_indices.size()) };
-}
-
-void MeshRasterizer::SetWireframe(bool enabled) {
-	m_wireframe = enabled;
 }

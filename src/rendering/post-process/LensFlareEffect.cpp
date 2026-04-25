@@ -97,7 +97,3 @@ std::vector<std::string> LensFlareEffect::GetShaderPaths() const {
 		ShaderPath("lens_flare.frag.spv"),
 	};
 }
-
-void LensFlareEffect::RecreatePipelines() {
-	// Graph owns the pipeline; no per-effect work needed.
-}

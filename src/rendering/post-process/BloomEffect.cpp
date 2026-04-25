@@ -125,10 +125,3 @@ std::vector<std::string> BloomEffect::GetShaderPaths() const {
 		ShaderPath("bloom_composite.frag.spv"),
 	};
 }
-
-void BloomEffect::RecreatePipelines() {
-	// Pipelines are owned by the graph; RenderGraph::RecreatePipelines() rebuilds
-	// them. Keeping the override empty rather than removing it because
-	// PostProcessEffect::RecreatePipelines is still part of the interface during
-	// the §1.5 migration.
-}

@@ -120,10 +120,6 @@ void Editor::SetScreenshotCallback(std::function<void()> cb) {
 	m_inspector.SetScreenshotCallback(std::move(cb));
 }
 
-void Editor::SetWireframeCallback(std::function<void()> cb) {
-	m_metrics.SetWireframeCallback(std::move(cb));
-}
-
 bool Editor::ViewportWasResized() const {
 	// const_cast needed because WasResized() is non-const (it resets the flag)
 	return const_cast<ViewportPanel&>(m_viewport).WasResized();

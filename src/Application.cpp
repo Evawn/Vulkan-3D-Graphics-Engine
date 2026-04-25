@@ -45,6 +45,12 @@ void Application::Init() {
 	m_renderers.push_back(std::make_unique<MeshRasterizer>());
 	m_active_renderer_index = 0;
 
+	// Wire each technique's event sink so it can post AppEvents (reload, rebuild,
+	// pipeline recreate) without polling flags.
+	for (auto& tech : m_renderers) {
+		tech->SetEventSink([this](AppEvent e) { PushEvent(e); });
+	}
+
 	BuildRenderGraph();
 
 	spdlog::get("App")->debug("Creating GPU profiler...");
@@ -85,13 +91,6 @@ void Application::Init() {
 	});
 	m_editor.SetScreenshotCallback([this]() {
 		PushEvent({AppEventType::CaptureScreenshot});
-	});
-	m_editor.SetWireframeCallback([this]() {
-		vkDeviceWaitIdle(m_vk.device->Get());
-		// The active technique's pipeline-desc factory closes over its wireframe
-		// flag; rebuilding pipelines re-evaluates the factory and observes the
-		// new value.
-		m_renderer.GetGraph().RecreatePipelines();
 	});
 
 	m_state = AppState::Running;
@@ -177,53 +176,66 @@ void Application::PushEvent(AppEvent event) {
 	m_events.push_back(event);
 }
 
-void Application::ProcessEvents() {
-	if (m_events.empty()) return;
+static bool EventNeedsDeviceIdle(AppEventType type) {
+	switch (type) {
+		case AppEventType::HotReloadShaders:
+		case AppEventType::SwitchRenderer:
+		case AppEventType::DpiChanged:
+		case AppEventType::ReloadTechnique:
+		case AppEventType::RebuildGraph:
+		case AppEventType::RecreatePipelines:
+			return true;
+		case AppEventType::CaptureScreenshot:
+			return false;
+	}
+	return false;
+}
 
-	// GPU-mutating events require device idle
-	bool needs_idle = false;
-	for (const auto& e : m_events) {
-		if (e.type == AppEventType::HotReloadShaders ||
-			e.type == AppEventType::SwitchRenderer ||
-			e.type == AppEventType::DpiChanged) {
-			needs_idle = true;
+void Application::DispatchEvent(const AppEvent& event) {
+	switch (event.type) {
+		case AppEventType::HotReloadShaders:
+			HotReloadShaders();
 			break;
+		case AppEventType::SwitchRenderer:
+			SwitchRenderer(event.index);
+			break;
+		case AppEventType::DpiChanged:
+			m_editor.OnDpiChanged(event.scale);
+			break;
+		case AppEventType::CaptureScreenshot:
+			CaptureScreenshot();
+			break;
+		case AppEventType::ReloadTechnique:
+			m_renderers[m_active_renderer_index]->Reload(BuildRenderContext());
+			break;
+		case AppEventType::RebuildGraph:
+			m_editor.RemoveSceneTexture();
+			BuildRenderGraph();
+			break;
+		case AppEventType::RecreatePipelines:
+			m_renderer.GetGraph().RecreatePipelines();
+			break;
+	}
+}
+
+void Application::ProcessEvents() {
+	// Drain in a loop: dispatched events (e.g. ReloadTechnique → RebuildGraph)
+	// can post follow-ups, and we want them handled in the same tick.
+	while (!m_events.empty()) {
+		auto batch = std::move(m_events);
+		m_events.clear();
+
+		bool needs_idle = false;
+		for (const auto& e : batch) {
+			if (EventNeedsDeviceIdle(e.type)) { needs_idle = true; break; }
 		}
-	}
-	if (needs_idle) {
-		vkDeviceWaitIdle(m_vk.device->Get());
-	}
-
-	for (const auto& event : m_events) {
-		switch (event.type) {
-			case AppEventType::HotReloadShaders:
-				HotReloadShaders();
-				break;
-			case AppEventType::SwitchRenderer:
-				SwitchRenderer(event.index);
-				break;
-			case AppEventType::DpiChanged:
-				m_editor.OnDpiChanged(event.scale);
-				break;
-			case AppEventType::CaptureScreenshot:
-				CaptureScreenshot();
-				break;
+		if (needs_idle) {
+			vkDeviceWaitIdle(m_vk.device->Get());
 		}
-	}
-	m_events.clear();
 
-	// Check for deferred technique reloads (e.g., model file changed via File parameter)
-	auto& technique = m_renderers[m_active_renderer_index];
-	if (technique->NeedsReload()) {
-		vkDeviceWaitIdle(m_vk.device->Get());
-		technique->PerformReload(BuildRenderContext());
-	}
-
-	// Check if technique needs a full graph rebuild (e.g., volume size changed)
-	if (technique->NeedsRebuild()) {
-		vkDeviceWaitIdle(m_vk.device->Get());
-		m_editor.RemoveSceneTexture();
-		BuildRenderGraph();
+		for (const auto& event : batch) {
+			DispatchEvent(event);
+		}
 	}
 }
 
@@ -308,13 +320,13 @@ void Application::SwitchRenderer(size_t index) {
 	if (index >= m_renderers.size() || index == m_active_renderer_index) return;
 
 	auto logger = spdlog::get("App");
-	logger->info("Switching renderer to: {}", m_renderers[index]->GetName());
+	logger->info("Switching renderer to: {}", m_renderers[index]->GetDisplayName());
 
 	m_editor.RemoveSceneTexture();
 	m_active_renderer_index = index;
 	BuildRenderGraph();
 
-	logger->info("Switched to: {}", m_renderers[index]->GetName());
+	logger->info("Switched to: {}", m_renderers[index]->GetDisplayName());
 }
 
 void Application::CaptureScreenshot() {

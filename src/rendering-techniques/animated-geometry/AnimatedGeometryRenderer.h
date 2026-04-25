@@ -23,7 +23,6 @@ private:
 	std::shared_ptr<VWrap::Device> m_device;
 	std::shared_ptr<VWrap::Allocator> m_allocator;
 	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
-	VkExtent2D m_extent{};
 	std::shared_ptr<Camera> m_camera;
 
 	// Graph-managed 128^3 3D storage image (R8_UINT material indices).
@@ -57,7 +56,7 @@ private:
 	std::vector<TechniqueParameter> m_parameters;
 
 public:
-	std::string GetName() const override { return "Animated Geometry Renderer"; }
+	std::string GetDisplayName() const override { return "Animated Geometry Renderer"; }
 
 	void RegisterPasses(
 		RenderGraph& graph,
@@ -66,11 +65,7 @@ public:
 		ImageHandle depthTarget,
 		ImageHandle resolveTarget) override;
 
-	void Shutdown() override {}
-	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override;
-
 	std::vector<std::string> GetShaderPaths() const override;
-	void RecreatePipeline(const RenderContext& ctx) override;
 
 	std::vector<TechniqueParameter>& GetParameters() override;
 	FrameStats GetFrameStats() const override;

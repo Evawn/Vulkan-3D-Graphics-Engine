@@ -45,13 +45,11 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
 	m_graphics_pool = ctx.graphicsPool;
-	m_extent = ctx.extent;
 	m_camera = ctx.camera;
 	m_lighting = ctx.lighting;
 	m_start_time = std::chrono::steady_clock::now();
 
 	m_graph = &graph;
-	m_needs_rebuild = false;
 
 	glm::uvec3 vs = m_volume_size;
 	glm::uvec3 grid_dim = vs / 8u;
@@ -239,7 +237,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	logger->debug("BrickmapPaletteRenderer: Initialized via RegisterPasses");
 }
 
-void BrickmapPaletteRenderer::WriteGraphDescriptors(RenderGraph& graph) {
+void BrickmapPaletteRenderer::OnPostCompile(RenderGraph& graph) {
 	// Apply any pending .vox upload now that the graph has allocated resources.
 	if (m_pending_vox) {
 		m_vox_active = true;
@@ -253,10 +251,6 @@ void BrickmapPaletteRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 	}
 }
 
-void BrickmapPaletteRenderer::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
-	m_extent = newExtent;
-}
-
 std::vector<std::string> BrickmapPaletteRenderer::GetShaderPaths() const {
 	return {
 		std::string(config::SHADER_DIR) + "/brickmap_palette_generate.comp.spv",
@@ -264,10 +258,6 @@ std::vector<std::string> BrickmapPaletteRenderer::GetShaderPaths() const {
 		std::string(config::SHADER_DIR) + "/brickmap_palette_trace.vert.spv",
 		std::string(config::SHADER_DIR) + "/brickmap_palette_trace.frag.spv"
 	};
-}
-
-void BrickmapPaletteRenderer::RecreatePipeline(const RenderContext& ctx) {
-	// Pipelines are owned by the graph.
 }
 
 std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
@@ -288,7 +278,8 @@ std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
 		voxFile.fileFilters = {"vox"};
 		voxFile.fileFilterDesc = "MagicaVoxel Models";
 		voxFile.onFileChanged = [this](const std::string&) {
-			m_needs_reload = true;
+			m_pending_reload = true;
+			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
 		};
 		m_parameters.push_back(std::move(voxFile));
 	}
@@ -299,8 +290,9 @@ FrameStats BrickmapPaletteRenderer::GetFrameStats() const {
 	return { 3, 4, 0 };
 }
 
-void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
-	m_needs_reload = false;
+void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
+	if (!m_pending_reload) return;
+	m_pending_reload = false;
 	auto logger = spdlog::get("Render");
 
 	if (m_vox_file_path.empty()) {
@@ -311,7 +303,7 @@ void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
 			glm::uvec3 procSize(128, 128, 128);
 			if (m_volume_size != procSize) {
 				m_volume_size = procSize;
-				m_needs_rebuild = true;
+				if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 			} else {
 				m_graph->SetPassEnabled("Brickmap Palette Generate", true);
 				m_palette->RestoreDefault();
@@ -328,12 +320,12 @@ void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
 
 	if (model->volumeSize != m_volume_size) {
 		// Volume size changed — need graph rebuild. The pending model is
-		// applied in BindingTable::Update flow once the new graph is compiled.
+		// applied in OnPostCompile once the new graph is compiled.
 		m_volume_size = model->volumeSize;
 		m_pending_vox = std::move(*model);
-		m_needs_rebuild = true;
 		logger->info("BrickmapPaletteRenderer: Volume resize to {}x{}x{}, rebuilding graph",
 			m_volume_size.x, m_volume_size.y, m_volume_size.z);
+		if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 		return;
 	}
 

@@ -23,9 +23,6 @@ private:
 	std::vector<std::unique_ptr<RenderTechnique>>* m_renderers = nullptr;
 	size_t* m_active_index = nullptr;
 
-	// Wireframe
-	std::function<void()> m_wireframe_callback;
-
 	// VMA
 	VmaAllocator m_allocator = VK_NULL_HANDLE;
 	uint32_t m_heap_count = 0;
@@ -43,7 +40,6 @@ private:
 public:
 	void Update(float fps, float gpuTimeMs, float frameTimeMs);
 	void SetRenderers(std::vector<std::unique_ptr<RenderTechnique>>* renderers, size_t* activeIndex);
-	void SetWireframeCallback(std::function<void()> cb) { m_wireframe_callback = std::move(cb); }
 	void SetAllocator(VmaAllocator allocator, uint32_t heapCount);
 	void Draw();
 };

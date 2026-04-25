@@ -74,12 +74,6 @@ void MetricsPanel::Draw() {
 			ImGui::TextColored(UIStyle::kTextDim, "Indices");
 			ImGui::SameLine(0, 3);
 			ImGui::Text("%u", stats.indices);
-
-			bool wireframe = renderer->GetWireframe();
-			if (ImGui::Checkbox("Wireframe", &wireframe)) {
-				renderer->SetWireframe(wireframe);
-				if (m_wireframe_callback) m_wireframe_callback();
-			}
 		}
 	}
 

@@ -26,7 +26,6 @@ public:
 	// Returns the final image handle to feed into the UI pass.
 	ImageHandle Register(RenderGraph& graph, ImageHandle sceneInput, VkExtent2D extent);
 
-	void WriteGraphDescriptors(RenderGraph& graph);
 	void OnResize(VkExtent2D newExtent, RenderGraph& graph);
 
 	size_t GetEffectCount() const { return m_effects.size(); }
@@ -34,7 +33,6 @@ public:
 	const PostProcessEffect* GetEffect(size_t i) const { return m_effects[i].get(); }
 
 	std::vector<std::string> GetShaderPaths() const;
-	void RecreatePipelines();
 
 private:
 	PostProcessContext m_ctx{};

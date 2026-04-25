@@ -44,9 +44,7 @@ private:
 
 	std::shared_ptr<BindingTable> m_bindings;
 
-	// Pipeline owned by the graph; rebuilt on hot-reload + wireframe toggle.
 	RenderGraph* m_graph = nullptr;
-	VkExtent2D m_extent;
 
 	// Tunable parameters
 	float m_rotation_speed = 0.0f;
@@ -58,8 +56,8 @@ private:
 	std::string m_model_path;
 	std::string m_texture_path;
 	std::string m_mtl_path;  // User-selected MTL (may differ from OBJ's mtllib)
-	bool m_needs_reload = false;
-	bool m_needs_texture_reload = false;
+	bool m_pending_model_reload = false;
+	bool m_pending_texture_reload = false;
 
 	std::vector<TechniqueParameter> m_parameters;
 
@@ -74,7 +72,7 @@ private:
 	void UpdateUniformBuffer(uint32_t frame);
 
 public:
-	std::string GetName() const override { return "Mesh Rasterizer"; }
+	std::string GetDisplayName() const override { return "Mesh Rasterizer"; }
 
 	void RegisterPasses(
 		RenderGraph& graph,
@@ -83,17 +81,10 @@ public:
 		ImageHandle depthTarget,
 		ImageHandle resolveTarget) override;
 
-	void Shutdown() override {}
-	void OnResize(VkExtent2D newExtent, RenderGraph& graph) override { m_extent = newExtent; }
-
 	std::vector<std::string> GetShaderPaths() const override;
-	void RecreatePipeline(const RenderContext& ctx) override;
 
 	std::vector<TechniqueParameter>& GetParameters() override;
 	FrameStats GetFrameStats() const override;
-	void SetWireframe(bool enabled) override;
-	bool GetWireframe() const override { return m_wireframe; }
 
-	bool NeedsReload() const override { return m_needs_reload || m_needs_texture_reload; }
-	void PerformReload(const RenderContext& ctx) override;
+	void Reload(const RenderContext& ctx) override;
 };

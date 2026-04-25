@@ -11,6 +11,8 @@
 #include "CommandBuffer.h"
 #include "RenderPass.h"
 #include "Camera.h"
+#include "Inspectable.h"
+#include "AppEvent.h"
 
 class RenderGraph;
 struct ImageHandle;
@@ -27,34 +29,13 @@ struct RenderContext {
 	SceneLighting* lighting = nullptr;  // shared, non-owning; renderer-owned state
 };
 
-struct TechniqueParameter {
-	enum Type { Float, Int, Bool, Color3, Color4, Enum, File };
-	std::string label;
-	Type type;
-	void* data = nullptr;
-	float min = 0.0f;
-	float max = 1.0f;
-	std::vector<const char*> enumLabels;
-
-	// File type fields
-	std::string* filePath = nullptr;
-	std::vector<std::string> fileFilters;                  // e.g. {"obj"}
-	std::string fileFilterDesc;                            // e.g. "3D Models"
-	std::function<void(const std::string&)> onFileChanged;
-};
-
-struct FrameStats {
-	uint32_t drawCalls = 0;
-	uint32_t vertices = 0;
-	uint32_t indices = 0;
-};
-
-class RenderTechnique {
+class RenderTechnique : public IInspectable {
 public:
 	virtual ~RenderTechnique() = default;
 
-	virtual std::string GetName() const = 0;
+	// IInspectable: GetDisplayName, GetParameters
 
+	// ---- Rendering ----
 	virtual void RegisterPasses(
 		RenderGraph& graph,
 		const RenderContext& ctx,
@@ -62,29 +43,21 @@ public:
 		ImageHandle depthTarget,
 		ImageHandle resolveTarget) = 0;
 
-	virtual void Shutdown() = 0;
-	virtual void OnResize(VkExtent2D newExtent, RenderGraph& graph) = 0;
+	// Called once after graph.Compile(); resources allocated by the graph are now
+	// available. BindingTable handles descriptor writes automatically — this hook
+	// is for one-shot post-compile work like seeding storage buffers/images.
+	virtual void OnPostCompile(RenderGraph& graph) { (void)graph; }
 
+	// ---- Hot-reload + metrics ----
 	virtual std::vector<std::string> GetShaderPaths() const = 0;
-	virtual void RecreatePipeline(const RenderContext& ctx) = 0;
-
-	// Called after graph.Compile() to write descriptors referencing graph-owned images.
-	virtual void WriteGraphDescriptors(RenderGraph& graph) {}
-
-	virtual std::vector<TechniqueParameter>& GetParameters() {
-		static std::vector<TechniqueParameter> empty;
-		return empty;
-	}
-
 	virtual FrameStats GetFrameStats() const { return {}; }
 
-	virtual void SetWireframe(bool enabled) { (void)enabled; }
-	virtual bool GetWireframe() const { return false; }
+	// ---- Reload (event-driven; Application reposts ReloadTechnique back here) ----
+	void SetEventSink(std::function<void(AppEvent)> sink) { m_eventSink = std::move(sink); }
+	virtual void Reload(const RenderContext& ctx) { (void)ctx; }
 
-	// Deferred reload support (for file parameter changes)
-	virtual bool NeedsReload() const { return false; }
-	virtual void PerformReload(const RenderContext& ctx) { (void)ctx; }
-
-	// Graph rebuild support (for resource size changes)
-	virtual bool NeedsRebuild() const { return false; }
+protected:
+	// Push events back to the application — request reload, request rebuild,
+	// request pipeline recreate, etc. Set once by Application after construction.
+	std::function<void(AppEvent)> m_eventSink;
 };

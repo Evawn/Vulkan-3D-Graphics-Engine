@@ -14,6 +14,7 @@
 #include "MeshRasterizer.h"
 #include "BrickmapPaletteRenderer.h"
 #include "AnimatedGeometryRenderer.h"
+#include "AppEvent.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <vector>
@@ -33,14 +34,6 @@ const bool ENABLE_VALIDATION_LAYERS = true;
 // APPLICATION STATE -----------------------------------------------------------------------------------------
 
 enum class AppState { Initializing, Running, ShuttingDown };
-
-enum class AppEventType { HotReloadShaders, SwitchRenderer, DpiChanged, CaptureScreenshot };
-
-struct AppEvent {
-	AppEventType type;
-	size_t index = 0;      // SwitchRenderer
-	float scale = 1.0f;    // DpiChanged
-};
 
 class Application {
 
@@ -83,6 +76,7 @@ private:
 	std::vector<AppEvent> m_events;
 	void PushEvent(AppEvent event);
 	void ProcessEvents();
+	void DispatchEvent(const AppEvent& event);
 
 public:
 	void Run();

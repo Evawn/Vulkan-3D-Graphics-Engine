@@ -10,13 +10,6 @@ ImageHandle PostProcessChain::Register(RenderGraph& graph, ImageHandle sceneInpu
 	return current;
 }
 
-void PostProcessChain::WriteGraphDescriptors(RenderGraph& graph) {
-	for (auto& effect : m_effects) {
-		if (!effect->IsEnabled()) continue;
-		effect->WriteGraphDescriptors(graph);
-	}
-}
-
 void PostProcessChain::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
 	for (auto& effect : m_effects) {
 		if (!effect->IsEnabled()) continue;
@@ -31,10 +24,4 @@ std::vector<std::string> PostProcessChain::GetShaderPaths() const {
 		all.insert(all.end(), paths.begin(), paths.end());
 	}
 	return all;
-}
-
-void PostProcessChain::RecreatePipelines() {
-	for (auto& effect : m_effects) {
-		effect->RecreatePipelines();
-	}
 }
