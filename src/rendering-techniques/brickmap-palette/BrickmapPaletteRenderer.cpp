@@ -3,24 +3,6 @@
 #include "config.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
-#include <cmath>
-
-// Convert HSV (h in [0,360), s,v in [0,1]) to RGB bytes
-static void hsvToRgb(float h, float s, float v, uint8_t& r, uint8_t& g, uint8_t& b) {
-	float c = v * s;
-	float x = c * (1.0f - std::fabs(std::fmod(h / 60.0f, 2.0f) - 1.0f));
-	float m = v - c;
-	float rf, gf, bf;
-	if (h < 60)       { rf = c; gf = x; bf = 0; }
-	else if (h < 120) { rf = x; gf = c; bf = 0; }
-	else if (h < 180) { rf = 0; gf = c; bf = x; }
-	else if (h < 240) { rf = 0; gf = x; bf = c; }
-	else if (h < 300) { rf = x; gf = 0; bf = c; }
-	else               { rf = c; gf = 0; bf = x; }
-	r = static_cast<uint8_t>((rf + m) * 255.0f);
-	g = static_cast<uint8_t>((gf + m) * 255.0f);
-	b = static_cast<uint8_t>((bf + m) * 255.0f);
-}
 
 // Per-axis dims kept as 3 scalars to sidestep std430 vec3 alignment rules.
 struct BrickmapPaletteGeneratePC {
@@ -51,65 +33,6 @@ struct BrickmapPaletteTracePC {
 };
 static_assert(sizeof(BrickmapPaletteTracePC) == 144,
 	"BrickmapPaletteTracePC must stay in std140 layout — 144 bytes");
-
-void BrickmapPaletteRenderer::CreatePaletteTexture() {
-	// 256-entry RGBA palette: index 0 = empty, 1-9 = shape colors
-	std::array<uint8_t, 256 * 4> palette{};
-
-	const uint8_t colors[][4] = {
-		{   0,   0,   0,   0 },   // 0: empty (never sampled)
-		{ 230,  60,  60, 255 },   // 1: red (sphere)
-		{  60, 180,  60, 255 },   // 2: green (torus)
-		{  60,  60, 230, 255 },   // 3: blue (box frame)
-		{ 230, 230,  60, 255 },   // 4: yellow (cylinder)
-		{ 230, 130,  60, 255 },   // 5: orange (cone)
-		{ 180,  60, 230, 255 },   // 6: purple (octahedron)
-		{  60, 230, 230, 255 },   // 7: cyan (gyroid)
-		{ 230,  60, 180, 255 },   // 8: pink (sine blob)
-		{ 180, 180, 180, 255 },   // 9: gray (menger sponge)
-	};
-
-	for (int i = 0; i < 10; i++) {
-		std::memcpy(&palette[i * 4], colors[i], 4);
-	}
-	// Fill indices 10-255 with a full HSV rainbow (high saturation, full value)
-	for (int i = 10; i < 256; i++) {
-		float hue = static_cast<float>(i - 10) / 246.0f * 360.0f;
-		hsvToRgb(hue, 0.85f, 0.95f, palette[i * 4 + 0], palette[i * 4 + 1], palette[i * 4 + 2]);
-		palette[i * 4 + 3] = 255;
-	}
-
-	VkDeviceSize imageSize = 256 * 4;
-	auto staging = VWrap::Buffer::CreateStaging(m_allocator, imageSize);
-	void* data = staging->Map();
-	std::memcpy(data, palette.data(), imageSize);
-	staging->Unmap();
-
-	VWrap::ImageCreateInfo info{};
-	info.width = 256;
-	info.height = 1;
-	info.depth = 1;
-	info.format = VK_FORMAT_R8G8B8A8_UNORM;
-	info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	info.properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	info.mip_levels = 1;
-	info.samples = VK_SAMPLE_COUNT_1_BIT;
-	info.image_type = VK_IMAGE_TYPE_2D;
-
-	m_palette_image = VWrap::Image::Create(m_allocator, info);
-
-	auto cmd = VWrap::CommandBuffer::Create(m_graphics_pool);
-	cmd->BeginSingle();
-	cmd->CmdTransitionImageLayout(m_palette_image, VK_FORMAT_R8G8B8A8_UNORM,
-		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	cmd->CmdCopyBufferToImage(staging, m_palette_image, 256, 1, 1);
-	cmd->CmdTransitionImageLayout(m_palette_image, VK_FORMAT_R8G8B8A8_UNORM,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	cmd->EndAndSubmit();
-
-	m_palette_image_view = VWrap::ImageView::Create(m_device, m_palette_image, VK_IMAGE_ASPECT_COLOR_BIT);
-}
 
 void BrickmapPaletteRenderer::RegisterPasses(
 	RenderGraph& graph,
@@ -299,11 +222,9 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	logger->debug("BrickmapPaletteRenderer: Creating graphics pipeline...");
 	CreateGraphicsPipeline();
 
-	logger->debug("BrickmapPaletteRenderer: Creating sampler...");
-	m_sampler = VWrap::Sampler::Create(m_device);
-
-	logger->debug("BrickmapPaletteRenderer: Creating palette texture...");
-	CreatePaletteTexture();
+	logger->debug("BrickmapPaletteRenderer: Creating palette resource...");
+	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
+	m_palette->Create();
 
 	logger->debug("BrickmapPaletteRenderer: Initialized via RegisterPasses");
 }
@@ -318,7 +239,7 @@ void BrickmapPaletteRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 		m_vox_active = true;
 		graph.SetPassEnabled("Brickmap Palette Generate", false);
 		UploadVolumeData(m_pending_vox->volume.data());
-		UploadPalette(m_pending_vox->palette.data());
+		m_palette->Upload(m_pending_vox->palette.data());
 		spdlog::get("Render")->info("BrickmapPaletteRenderer: Uploaded pending .vox ({}x{}x{}, volume={}x{}x{})",
 			m_pending_vox->sizeX, m_pending_vox->sizeY, m_pending_vox->sizeZ,
 			m_pending_vox->volumeSize.x, m_pending_vox->volumeSize.y, m_pending_vox->volumeSize.z);
@@ -380,8 +301,8 @@ void BrickmapPaletteRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 
 		VkDescriptorImageInfo paletteInfo{};
 		paletteInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		paletteInfo.imageView = m_palette_image_view->Get();
-		paletteInfo.sampler = m_sampler->Get();
+		paletteInfo.imageView = m_palette->GetImageView()->Get();
+		paletteInfo.sampler = m_palette->GetSampler()->Get();
 
 		VkWriteDescriptorSet writes[2]{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -508,7 +429,7 @@ void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
 				m_needs_rebuild = true; // graph rebuild will re-enable generate pass
 			} else {
 				m_graph->SetPassEnabled("Brickmap Palette Generate", true);
-				CreatePaletteTexture();
+				m_palette->RestoreDefault();
 			}
 		}
 		return;
@@ -535,7 +456,7 @@ void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
 	m_graph->SetPassEnabled("Brickmap Palette Generate", false);
 
 	UploadVolumeData(model->volume.data());
-	UploadPalette(model->palette.data());
+	m_palette->Upload(model->palette.data());
 
 	// Recompile shaders + rebuild pipelines so the refreshed model is visible immediately
 	RecreatePipeline(ctx);
@@ -566,20 +487,3 @@ void BrickmapPaletteRenderer::UploadVolumeData(const uint8_t* data) {
 	cmd->EndAndSubmit();
 }
 
-void BrickmapPaletteRenderer::UploadPalette(const uint8_t* rgbaData) {
-	VkDeviceSize imageSize = 256 * 4;
-
-	auto staging = VWrap::Buffer::CreateStaging(m_allocator, imageSize);
-	void* mapped = staging->Map();
-	std::memcpy(mapped, rgbaData, imageSize);
-	staging->Unmap();
-
-	auto cmd = VWrap::CommandBuffer::Create(m_graphics_pool);
-	cmd->BeginSingle();
-	cmd->CmdTransitionImageLayout(m_palette_image, VK_FORMAT_R8G8B8A8_UNORM,
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	cmd->CmdCopyBufferToImage(staging, m_palette_image, 256, 1, 1);
-	cmd->CmdTransitionImageLayout(m_palette_image, VK_FORMAT_R8G8B8A8_UNORM,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	cmd->EndAndSubmit();
-}

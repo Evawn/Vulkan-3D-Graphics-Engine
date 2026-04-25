@@ -5,14 +5,13 @@
 #include "DescriptorSetBuilder.h"
 #include "ComputePipeline.h"
 #include "Pipeline.h"
-#include "Sampler.h"
-#include "Image.h"
-#include "ImageView.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
 #include "VoxLoader.h"
+#include "PaletteResource.h"
 #include "SceneLighting.h"
 #include <chrono>
+#include <memory>
 #include <glm/glm.hpp>
 
 class RenderGraph;
@@ -32,11 +31,8 @@ private:
 	BufferHandle m_brickmap_buffer;
 	VkBuffer m_brickmap_vk_buffer = VK_NULL_HANDLE;
 
-	std::shared_ptr<VWrap::Sampler> m_sampler;
-
-	// Palette texture (256x1 RGBA8, uploaded once)
-	std::shared_ptr<VWrap::Image> m_palette_image;
-	std::shared_ptr<VWrap::ImageView> m_palette_image_view;
+	// Shared 256-entry palette texture + its sampler.
+	std::unique_ptr<PaletteResource> m_palette;
 
 	// Generate pipeline + descriptors (compute: writes volume)
 	std::shared_ptr<VWrap::ComputePipeline> m_compute_pipeline;
@@ -86,9 +82,7 @@ private:
 	void CreateComputePipeline();
 	void CreateBuildPipeline();
 	void CreateGraphicsPipeline();
-	void CreatePaletteTexture();
 	void UploadVolumeData(const uint8_t* data);
-	void UploadPalette(const uint8_t* rgbaData);
 
 public:
 	std::string GetName() const override { return "Brickmap Palette Renderer"; }

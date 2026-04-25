@@ -1,0 +1,62 @@
+#version 450
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(r8ui, set = 0, binding = 0) uniform writeonly uimage3D volume;
+
+layout(push_constant) uniform PC {
+	int pattern;
+	float time;
+	int volume_size_x;
+	int volume_size_y;
+	int volume_size_z;
+} pc;
+
+const float PI = 3.14159265;
+
+void main() {
+	ivec3 coord = ivec3(gl_GlobalInvocationID);
+	ivec3 volume_size = ivec3(pc.volume_size_x, pc.volume_size_y, pc.volume_size_z);
+	if (any(greaterThanEqual(coord, volume_size))) return;
+
+	// Normalize to [-0.5, 0.5] cube (preserves shape if volume is non-cubic).
+	float normDim = float(max(max(volume_size.x, volume_size.y), volume_size.z));
+	vec3 p = (vec3(coord) + 0.5 - vec3(volume_size) * 0.5) / normDim;
+	float t = pc.time;
+	bool filled = false;
+	uint matIdx = 0u;
+
+	if (pc.pattern == 0) {
+		// Wobble Sphere — radius pulses with time, hue rolls along Y over time.
+		float r = 0.35 + 0.05 * sin(t * 2.0);
+		filled = length(p) < r;
+		if (filled) {
+			float h = (length(p) / max(r, 1e-3)) * 0.7 + 0.3 * sin(t + p.y * 8.0);
+			matIdx = 10u + uint(fract(h) * 245.0);
+		}
+	} else if (pc.pattern == 1) {
+		// Plasma — animated sine field, hue mapped from field value.
+		float a = sin(p.x * 8.0 + t);
+		float b = sin(p.y * 8.0 - t * 1.3);
+		float c = sin(p.z * 8.0 + t * 0.7);
+		float v = (a + b + c) / 3.0;
+		filled = abs(v) < 0.4 && length(p) < 0.48;
+		if (filled) {
+			matIdx = 10u + uint(fract(v * 0.5 + 0.5 + t * 0.1) * 245.0);
+		}
+	} else {
+		// Wave Field — animated heightmap as a thin slab in Y.
+		float h = 0.15 * sin(p.x * 12.0 + t * 2.0)
+		        + 0.10 * cos(p.z * 9.0  - t * 1.7)
+		        + 0.05 * sin((p.x + p.z) * 18.0 + t);
+		filled = p.y < h && p.y > h - 0.04;
+		if (filled) {
+			matIdx = 10u + uint(fract(h * 4.0 + t * 0.05) * 245.0);
+		}
+	}
+
+	if (filled && matIdx == 0u) {
+		matIdx = uint(pc.pattern + 1);
+	}
+	imageStore(volume, coord, uvec4(matIdx, 0, 0, 0));
+}

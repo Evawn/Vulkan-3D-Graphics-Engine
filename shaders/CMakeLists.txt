@@ -4,6 +4,9 @@ file(GLOB SHADER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.comp"
 )
 
+# Shared GLSL helpers consumed via #include. Re-trigger compiles when an include changes.
+file(GLOB SHADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include/*.glsl")
+
 set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
@@ -15,8 +18,8 @@ foreach(SHADER ${SHADER_SOURCES})
 
     add_custom_command(
         OUTPUT ${SPV_OUTPUT}
-        COMMAND ${Vulkan_GLSLC_EXECUTABLE} ${SHADER} -o ${SPV_OUTPUT}
-        DEPENDS ${SHADER}
+        COMMAND ${Vulkan_GLSLC_EXECUTABLE} -I "${CMAKE_CURRENT_SOURCE_DIR}/include" ${SHADER} -o ${SPV_OUTPUT}
+        DEPENDS ${SHADER} ${SHADER_INCLUDES}
         COMMENT "Compiling shader: ${SHADER_NAME}"
         VERBATIM
     )

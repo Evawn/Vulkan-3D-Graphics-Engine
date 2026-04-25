@@ -30,8 +30,8 @@ void MeshRasterizer::RegisterPasses(
 
 	m_sampler = VWrap::Sampler::Create(m_device);
 
-	m_model_path = std::string(config::ASSET_DIR) + "/models/viking_room.obj";
-	m_texture_path = std::string(config::ASSET_DIR) + "/textures/viking_room.png";
+	m_model_path = std::string(config::ASSET_DIR) + "/models/indoor plant_02.obj";
+	m_texture_path = std::string(config::ASSET_DIR) + "/textures/indoor plant_02_COL.jpg";
 
 	auto logger = spdlog::get("Render");
 

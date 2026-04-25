@@ -19,7 +19,8 @@ CompileResult Compile(const std::string& sourcePath, const std::string& outputPa
 	CompileResult result{};
 	result.spvPath = outputPath;
 
-	std::string cmd = std::string(config::GLSLC_PATH) + " \"" + sourcePath + "\" -o \"" + outputPath + "\" 2>&1";
+	std::string includeDir = std::string(config::SHADER_SRC_DIR) + "/include";
+	std::string cmd = std::string(config::GLSLC_PATH) + " -I \"" + includeDir + "\" \"" + sourcePath + "\" -o \"" + outputPath + "\" 2>&1";
 
 	auto logger = spdlog::get("Render");
 	logger->info("Compiling shader: {}", sourcePath);

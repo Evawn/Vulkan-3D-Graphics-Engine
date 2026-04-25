@@ -31,9 +31,6 @@ layout(set = 0, binding = 1) uniform sampler2D palette_sampler;
 
 layout(location = 0) out vec4 outColor;
 
-const float PI_OVER_2 = asin(1.0);
-const vec4 HORIZON_COLOR = vec4(0.8, 0.9, 1.0, 1.0);
-
 // Cached from header — set once in main()
 uvec3 g_volume_size;
 uvec3 g_grid_dim;
@@ -47,24 +44,6 @@ vec3  g_half_extents;       // = vec3(vs) * g_voxel_world_size * 0.5
 
 vec3 worldToVoxel(vec3 p) { return (p + g_half_extents) / g_voxel_world_size; }
 vec3 voxelToWorld(vec3 p) { return p * g_voxel_world_size - g_half_extents; }
-
-vec4 missColor(vec3 direction) {
-	float dotProd = clamp(dot(direction, vec3(0.0, 0.0, 1.0)), -1.0, 1.0);
-	float theta = acos(dotProd) / PI_OVER_2;
-	vec4 sky = vec4(pc.skyColor, 1.0);
-	vec4 base;
-	if (theta < 1.0) base = sky * (1.0 - theta) + HORIZON_COLOR * theta;
-	else base = HORIZON_COLOR * (2.0 - theta);
-
-	// Sun disk: soft-edge mask over the sky. Mask edge width is a small fraction
-	// of the cosine space so the disk edge matches the apparent angular size
-	// regardless of how large the sun is configured.
-	float sunDot = dot(direction, pc.sunDirection);
-	float edge = max(1e-4, (1.0 - pc.sunCosHalfAngle) * 0.25);
-	float mask = smoothstep(pc.sunCosHalfAngle - edge, pc.sunCosHalfAngle + edge, sunDot);
-	vec3 disk = pc.sunColor * pc.sunIntensity;
-	return vec4(mix(base.rgb, disk, mask), 1.0);
-}
 
 uint brickVoxelMaterial(uint brick_index, ivec3 local) {
 	int linear = local.z * 64 + local.y * 8 + local.x;
@@ -95,6 +74,26 @@ uint sampleVoxel(ivec3 brick_cell, ivec3 local) {
 	if (brick_index == 0xFFFFFFFFu) return 0u;
 	return brickVoxelMaterial(brick_index, actual_local);
 }
+
+// Required by voxel_ao.glsl. Decomposes a flat voxel coord into (brick_cell, local)
+// and walks the brickmap; returns true iff the voxel is non-empty.
+bool isSolidAt(ivec3 voxelCoord) {
+	if (any(lessThan(voxelCoord, ivec3(0))) ||
+	    any(greaterThanEqual(voxelCoord, ivec3(g_volume_size)))) return false;
+	int bs = int(g_brick_size);
+	ivec3 brick_cell = voxelCoord / bs;
+	ivec3 local = voxelCoord - brick_cell * bs;
+	int gx  = int(g_grid_dim.x);
+	int gxy = int(g_grid_dim.x * g_grid_dim.y);
+	int grid_idx = brick_cell.x + brick_cell.y * gx + brick_cell.z * gxy;
+	uint brick_index = bm_data[8 + grid_idx];
+	if (brick_index == 0xFFFFFFFFu) return false;
+	return brickVoxelMaterial(brick_index, local) != 0u;
+}
+
+#include "sky.glsl"
+#include "voxel_ao.glsl"
+#include "lighting.glsl"
 
 struct Hit {
 	bool  hit;
@@ -267,51 +266,6 @@ Hit trace(vec3 rayOrigin, vec3 direction) {
 	return h;
 }
 
-// Minecraft-style vertex AO: 3 solid neighbors ⇒ darkest, 0 ⇒ fully lit.
-// side1+side2 both solid forces max darkness regardless of diagonal.
-float vertexAO(float s1, float s2, float c) {
-	if (s1 + s2 == 2.0) return 0.0;
-	return 1.0 - (s1 + s2 + c) / 3.0;
-}
-
-// Bilinear corner AO over the hit face. Samples three neighbors per corner in
-// the +N half-space (the empty side the ray came from) and interpolates using
-// the hit's fractional position on the face.
-float cornerAO(ivec3 brick_cell, ivec3 local, bvec3 face, ivec3 step_sign, vec3 hitPos) {
-	// Outward normal (unit integer) = -step_sign on the face axis.
-	ivec3 N = -step_sign * ivec3(face);
-
-	// Tangent axes — pick the two whose face component is false.
-	ivec3 t1, t2;
-	if (face.x)      { t1 = ivec3(0,1,0); t2 = ivec3(0,0,1); }
-	else if (face.y) { t1 = ivec3(1,0,0); t2 = ivec3(0,0,1); }
-	else             { t1 = ivec3(1,0,0); t2 = ivec3(0,1,0); }
-
-	// Fractional position on the face in [0,1] along each tangent.
-	vec3 p_v = worldToVoxel(hitPos);
-	vec3 brick_origin_v = vec3(brick_cell) * float(g_brick_size);
-	vec3 inVoxel = p_v - brick_origin_v - vec3(local);
-	float fb = clamp(dot(inVoxel, vec3(t1)), 0.0, 1.0);
-	float fc = clamp(dot(inVoxel, vec3(t2)), 0.0, 1.0);
-
-	float v[4];
-	for (int s1 = 0; s1 <= 1; s1++) {
-		for (int s2 = 0; s2 <= 1; s2++) {
-			ivec3 dt1 = (s1 == 0 ? -t1 : t1);
-			ivec3 dt2 = (s2 == 0 ? -t2 : t2);
-			float side1 = sampleVoxel(brick_cell, local + N + dt1)       != 0u ? 1.0 : 0.0;
-			float side2 = sampleVoxel(brick_cell, local + N + dt2)       != 0u ? 1.0 : 0.0;
-			float diag  = sampleVoxel(brick_cell, local + N + dt1 + dt2) != 0u ? 1.0 : 0.0;
-			v[s1 * 2 + s2] = vertexAO(side1, side2, diag);
-		}
-	}
-
-	// Bilinear: v[0]=low-low, v[1]=low-high, v[2]=high-low, v[3]=high-high.
-	float ao_lowB  = mix(v[0], v[1], fc);
-	float ao_highB = mix(v[2], v[3], fc);
-	return mix(ao_lowB, ao_highB, fb);
-}
-
 void main() {
 	// Read brickmap header (8-uint layout)
 	g_volume_size = uvec3(bm_data[0], bm_data[1], bm_data[2]);
@@ -344,7 +298,8 @@ void main() {
 	// Corner AO (skip the lookups entirely when disabled)
 	float ao = 1.0;
 	if (pc.aoStrength > 0.0) {
-		float raw = cornerAO(h.brick_cell, h.local, h.face, h.step_sign, hitPos);
+		ivec3 hitVoxel = h.brick_cell * int(g_brick_size) + h.local;
+		float raw = cornerAO(hitVoxel, h.face, h.step_sign, hitPos);
 		ao = mix(1.0, raw, pc.aoStrength);
 	}
 
@@ -361,11 +316,7 @@ void main() {
 		shadow_iters = sh.total_iters;
 	}
 
-	vec3 ambient = pc.skyColor * pc.ambientIntensity * ao;
-	vec3 direct  = pc.sunColor * pc.sunIntensity * NdotL * shadow;
-	vec3 lit = albedo.rgb * (ambient + direct);
-
-	vec4 color = vec4(lit, 1.0);
+	vec4 color = vec4(shadeLit(albedo.rgb, ao, NdotL, shadow), 1.0);
 	if (pc.debugColor != 0) {
 		color -= vec4(vec3(float(h.total_iters + shadow_iters) / 250.0), 0.0);
 	}

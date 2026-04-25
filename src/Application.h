@@ -11,13 +11,9 @@
 #include "Camera.h"
 #include "RenderTechnique.h"
 #include "Renderer.h"
-#include "DDATracer.h"
 #include "MeshRasterizer.h"
-#include "ComputeTest.h"
-#include "SVORenderer.h"
-#include "SVOBackup.h"
-#include "BrickmapRenderer.h"
 #include "BrickmapPaletteRenderer.h"
+#include "AnimatedGeometryRenderer.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
 #include <vector>
