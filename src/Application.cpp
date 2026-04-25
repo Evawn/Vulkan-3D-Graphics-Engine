@@ -88,8 +88,10 @@ void Application::Init() {
 	});
 	m_editor.SetWireframeCallback([this]() {
 		vkDeviceWaitIdle(m_vk.device->Get());
-		auto ctx = BuildRenderContext();
-		m_renderers[m_active_renderer_index]->RecreatePipeline(ctx);
+		// The active technique's pipeline-desc factory closes over its wireframe
+		// flag; rebuilding pipelines re-evaluates the factory and observes the
+		// new value.
+		m_renderer.GetGraph().RecreatePipelines();
 	});
 
 	m_state = AppState::Running;
@@ -122,13 +124,8 @@ void Application::BuildRenderGraph() {
 			m_editor.CmdDraw(ctx.cmd);
 		});
 
-	// Techniques create their graphics pipeline inside RegisterPasses using
-	// the render pass returned by GetRenderPassPtr(), but Compile() later
-	// resets each graphics pass's VkRenderPass and creates a fresh one.
-	// Recreate pipelines now so they bind against the post-Compile render pass.
-	auto ctx = BuildRenderContext();
-	m_renderers[m_active_renderer_index]->RecreatePipeline(ctx);
-	m_renderer.GetPostProcess().RecreatePipelines();
+	// Pipelines are owned by the graph and built inside Compile() against the
+	// canonical render passes — no post-build pipeline recreation needed.
 
 	m_editor.RegisterSceneTexture(m_renderer.GetFinalSceneView());
 
@@ -302,9 +299,8 @@ void Application::HotReloadShaders() {
 		return;
 	}
 
-	auto ctx = BuildRenderContext();
-	renderer->RecreatePipeline(ctx);
-	m_renderer.GetPostProcess().RecreatePipelines();
+	// One graph-level call rebuilds every owned pipeline (technique + effects).
+	m_renderer.GetGraph().RecreatePipelines();
 	logger->info("Pipeline recreated successfully");
 }
 

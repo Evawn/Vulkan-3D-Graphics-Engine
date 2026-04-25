@@ -12,6 +12,9 @@
 #include "ImageView.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
+#include "DescriptorSetLayout.h"
+#include "Pipeline.h"
+#include "ComputePipeline.h"
 
 // ---- Handles ----
 
@@ -40,12 +43,52 @@ enum class PassType { Graphics, Compute };
 enum class LoadOp { Clear, Load, DontCare };
 enum class StoreOp { Store, DontCare };
 
+// ---- Pipeline descriptions (graph-owned) ----
+//
+// Techniques no longer construct VkPipelines directly. They hand the graph a
+// description of the pipeline they want; the graph instantiates it after
+// Compile() against the canonical render pass.
+
+struct GraphicsPipelineDesc {
+	// SPV paths. The graph re-reads these on every (re)build, so hot-reload
+	// flows through naturally.
+	std::string vertSpvPath;
+	std::string fragSpvPath;
+
+	std::shared_ptr<VWrap::DescriptorSetLayout> descriptorSetLayout;
+	std::vector<VkPushConstantRange> pushConstantRanges;
+
+	// Owned vertex-input storage. The graph builds VkPipelineVertexInputStateCreateInfo
+	// from these vectors at pipeline-create time so the underlying storage stays alive.
+	std::vector<VkVertexInputBindingDescription> vertexBindings;
+	std::vector<VkVertexInputAttributeDescription> vertexAttributes;
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+
+	// Owned dynamic-state storage. Empty == no dynamic state.
+	std::vector<VkDynamicState> dynamicStates;
+};
+
+struct ComputePipelineDesc {
+	std::string compSpvPath;
+	std::shared_ptr<VWrap::DescriptorSetLayout> descriptorSetLayout;
+	std::vector<VkPushConstantRange> pushConstantRanges;
+};
+
 // ---- Pass Context ----
 
 struct PassContext {
 	std::shared_ptr<VWrap::CommandBuffer> cmd;
 	uint32_t frameIndex;
 	VkExtent2D extent;
+
+	// Set by the graph before the record callback runs. Whichever pointer is
+	// populated depends on the pass type; stays null if SetPipeline() wasn't
+	// called (e.g. the UI pass uses ImGui's internal pipeline).
+	std::shared_ptr<VWrap::Pipeline> graphicsPipeline;
+	std::shared_ptr<VWrap::ComputePipeline> computePipeline;
 };
 
 // ---- Internal resource storage ----

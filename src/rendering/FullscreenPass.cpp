@@ -23,12 +23,8 @@ std::unique_ptr<FullscreenPass> FullscreenPass::Build(
 {
 	auto fp = std::make_unique<FullscreenPass>();
 	fp->m_device = device;
-	fp->m_extent = extent;
-	fp->m_maxFramesInFlight = maxFramesInFlight;
 	fp->m_inputs = desc.sampledInputs;
 	fp->m_sampler = desc.sampler;
-	fp->m_fragShaderSpv = desc.fragShaderSpv;
-	fp->m_pushConstantSize = desc.pushConstantSize;
 
 	// Descriptor layout: one COMBINED_IMAGE_SAMPLER binding per input.
 	{
@@ -42,46 +38,50 @@ std::unique_ptr<FullscreenPass> FullscreenPass::Build(
 		fp->m_descriptorSets = res.sets;
 	}
 
-	// Register the graphics pass with the graph. Capture clear color into the
-	// SetColorAttachment overload that takes per-channel floats.
+	// Register the graphics pass with the graph.
 	auto& builder = graph.AddGraphicsPass(desc.name)
 		.SetColorAttachment(desc.output, desc.loadOp, desc.storeOp,
 			desc.clearColor.float32[0], desc.clearColor.float32[1],
 			desc.clearColor.float32[2], desc.clearColor.float32[3]);
 	for (auto h : desc.sampledInputs) builder.Read(h);
 
+	// Pipeline desc factory: re-evaluated each (re)build so SPV is freshly read.
+	uint32_t pushSize = desc.pushConstantSize;
+	std::string fragSpv = ShaderPath(desc.fragShaderSpv);
+	std::string vertSpv = std::string(config::SHADER_DIR) + "/post_fullscreen.vert.spv";
+	auto descLayout = fp->m_descriptorLayout;
+
+	builder.SetPipeline([vertSpv, fragSpv, pushSize, descLayout]() {
+		GraphicsPipelineDesc d{};
+		d.vertSpvPath = vertSpv;
+		d.fragSpvPath = fragSpv;
+		d.descriptorSetLayout = descLayout;
+		if (pushSize > 0) {
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+			r.offset = 0;
+			r.size = pushSize;
+			d.pushConstantRanges.push_back(r);
+		}
+		// Fullscreen quad: empty vertex input, triangle strip, no cull, no depth.
+		d.inputAssembly = PipelineDefaults::TriangleStrip();
+		d.rasterizer = PipelineDefaults::NoCullFill();
+		d.depthStencil = PipelineDefaults::NoDepthTest();
+		d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+		return d;
+	});
+
 	FullscreenPass* fpRaw = fp.get();
 	builder.SetRecord([fpRaw, push = std::move(pushFn)](PassContext& ctx) mutable {
-		ctx.cmd->CmdBindGraphicsPipeline(fpRaw->m_pipeline);
+		ctx.cmd->CmdBindGraphicsPipeline(ctx.graphicsPipeline);
 		ctx.cmd->CmdBindGraphicsDescriptorSets(
-			fpRaw->m_pipeline->GetLayout(),
+			ctx.graphicsPipeline->GetLayout(),
 			{ fpRaw->m_descriptorSets[ctx.frameIndex]->Get() });
-		if (push) push(ctx, fpRaw->m_pipeline->GetLayout());
+		if (push) push(ctx, ctx.graphicsPipeline->GetLayout());
 		ctx.cmd->CmdDraw(4, 1, 0, 0);
 	});
 
-	fp->m_renderPass = builder.GetRenderPassPtr();
-	fp->RecreatePipeline();
 	return fp;
-}
-
-void FullscreenPass::RecreatePipeline() {
-	if (!m_renderPass) return;
-
-	auto vertCode = VWrap::readFile(std::string(config::SHADER_DIR) + "/post_fullscreen.vert.spv");
-	auto fragCode = VWrap::readFile(ShaderPath(m_fragShaderSpv));
-
-	std::vector<VkPushConstantRange> ranges;
-	if (m_pushConstantSize > 0) {
-		VkPushConstantRange r{};
-		r.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-		r.offset = 0;
-		r.size = m_pushConstantSize;
-		ranges.push_back(r);
-	}
-
-	auto info = PipelineDefaults::FullscreenQuad(m_renderPass, m_descriptorLayout, m_extent, ranges);
-	m_pipeline = VWrap::Pipeline::Create(m_device, info, vertCode, fragCode);
 }
 
 void FullscreenPass::WriteDescriptors(RenderGraph& graph) {

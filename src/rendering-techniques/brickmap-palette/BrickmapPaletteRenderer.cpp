@@ -81,12 +81,51 @@ void BrickmapPaletteRenderer::RegisterPasses(
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
 	});
 
+	// Build all descriptor layouts up front so the pipeline desc factories have
+	// stable shared_ptrs to capture.
+	logger->debug("BrickmapPaletteRenderer: Creating generate descriptors...");
+	auto computeDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
+		.Build(1);
+	m_compute_descriptor_layout = computeDesc.layout;
+	m_compute_descriptor_pool = computeDesc.pool;
+	m_compute_descriptor_set = computeDesc.sets[0];
+
+	logger->debug("BrickmapPaletteRenderer: Creating build descriptors...");
+	auto buildDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		.Build(1);
+	m_build_descriptor_layout = buildDesc.layout;
+	m_build_descriptor_pool = buildDesc.pool;
+	m_build_descriptor_set = buildDesc.sets[0];
+
+	logger->debug("BrickmapPaletteRenderer: Creating graphics descriptors...");
+	auto gfxDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.Build(ctx.maxFramesInFlight);
+	m_graphics_descriptor_layout = gfxDesc.layout;
+	m_graphics_descriptor_pool = gfxDesc.pool;
+	m_graphics_descriptor_sets = gfxDesc.sets;
+
 	// Compute pass: generate voxels into volume
 	graph.AddComputePass("Brickmap Palette Generate")
 		.Write(m_volume)
+		.SetPipeline([this]() {
+			ComputePipelineDesc d;
+			d.compSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_generate.comp.spv";
+			d.descriptorSetLayout = m_compute_descriptor_layout;
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			r.offset = 0;
+			r.size = sizeof(BrickmapPaletteGeneratePC);
+			d.pushConstantRanges = { r };
+			return d;
+		})
 		.SetRecord([this, vs](PassContext& ctx) {
-			ctx.cmd->CmdBindComputePipeline(m_compute_pipeline);
-			ctx.cmd->CmdBindComputeDescriptorSets(m_compute_pipeline->GetLayout(),
+			ctx.cmd->CmdBindComputePipeline(ctx.computePipeline);
+			ctx.cmd->CmdBindComputeDescriptorSets(ctx.computePipeline->GetLayout(),
 				{ m_compute_descriptor_set->Get() });
 			BrickmapPaletteGeneratePC pc{};
 			pc.shape = m_shape;
@@ -95,7 +134,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 			pc.volume_size_x = static_cast<int>(vs.x);
 			pc.volume_size_y = static_cast<int>(vs.y);
 			pc.volume_size_z = static_cast<int>(vs.z);
-			vkCmdPushConstants(ctx.cmd->Get(), m_compute_pipeline->GetLayout(),
+			vkCmdPushConstants(ctx.cmd->Get(), ctx.computePipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 			// local_size = 4; dispatch per-axis (ceil-div so small axes get ≥1 group)
 			auto cdiv = [](uint32_t a, uint32_t b) { return (a + b - 1) / b; };
@@ -106,6 +145,17 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	graph.AddComputePass("Brickmap Palette Build")
 		.Read(m_volume)
 		.Write(m_brickmap_buffer)
+		.SetPipeline([this]() {
+			ComputePipelineDesc d;
+			d.compSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_build.comp.spv";
+			d.descriptorSetLayout = m_build_descriptor_layout;
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			r.offset = 0;
+			r.size = sizeof(BrickmapPaletteBuildPC);
+			d.pushConstantRanges = { r };
+			return d;
+		})
 		.SetRecord([this, vs, grid_dim](PassContext& ctx) {
 			auto vk_cmd = ctx.cmd->Get();
 
@@ -122,15 +172,15 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 				0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
-			ctx.cmd->CmdBindComputePipeline(m_build_pipeline);
-			ctx.cmd->CmdBindComputeDescriptorSets(m_build_pipeline->GetLayout(),
+			ctx.cmd->CmdBindComputePipeline(ctx.computePipeline);
+			ctx.cmd->CmdBindComputeDescriptorSets(ctx.computePipeline->GetLayout(),
 				{ m_build_descriptor_set->Get() });
 			BrickmapPaletteBuildPC pc{};
 			pc.volume_size_x = static_cast<int>(vs.x);
 			pc.volume_size_y = static_cast<int>(vs.y);
 			pc.volume_size_z = static_cast<int>(vs.z);
 			pc.brick_size = 8;
-			vkCmdPushConstants(vk_cmd, m_build_pipeline->GetLayout(),
+			vkCmdPushConstants(vk_cmd, ctx.computePipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 			// local_size = 4; dispatch per-axis grid cells (ceil-div)
 			auto cdiv = [](uint32_t a, uint32_t b) { return (a + b - 1) / b; };
@@ -138,17 +188,33 @@ void BrickmapPaletteRenderer::RegisterPasses(
 		});
 
 	// Graphics pass: brickmap two-level DDA ray-march with palette colors
-	auto& gfx = graph.AddGraphicsPass("Brickmap Palette Trace")
+	graph.AddGraphicsPass("Brickmap Palette Trace")
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(resolveTarget)
 		.Read(m_brickmap_buffer)
+		.SetPipeline([this]() {
+			GraphicsPipelineDesc d{};
+			d.vertSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_trace.vert.spv";
+			d.fragSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_trace.frag.spv";
+			d.descriptorSetLayout = m_graphics_descriptor_layout;
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+			r.offset = 0;
+			r.size = sizeof(BrickmapPaletteTracePC);
+			d.pushConstantRanges = { r };
+			d.inputAssembly = PipelineDefaults::TriangleStrip();
+			d.rasterizer = PipelineDefaults::NoCullFill();
+			d.depthStencil = PipelineDefaults::NoDepthTest();
+			d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			return d;
+		})
 		.SetRecord([this](PassContext& ctx) {
 			auto vk_cmd = ctx.cmd->Get();
-			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphics_pipeline->Get());
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.graphicsPipeline->Get());
 			VkDescriptorSet ds = m_graphics_descriptor_sets[ctx.frameIndex]->Get();
 			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				m_graphics_pipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
+				ctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
 			BrickmapPaletteTracePC pc{};
 			pc.NDCtoWorld = m_camera->GetNDCtoWorldMatrix();
@@ -176,51 +242,11 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				pc.shadowsEnabled = 0;
 			}
 			pc._pad0 = 0;
-			vkCmdPushConstants(vk_cmd, m_graphics_pipeline->GetLayout(),
+			vkCmdPushConstants(vk_cmd, ctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BrickmapPaletteTracePC), &pc);
 
 			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
 		});
-
-	// Generate descriptors (1 storage image)
-	logger->debug("BrickmapPaletteRenderer: Creating generate descriptors...");
-	auto computeDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
-		.Build(1);
-	m_compute_descriptor_layout = computeDesc.layout;
-	m_compute_descriptor_pool = computeDesc.pool;
-	m_compute_descriptor_set = computeDesc.sets[0];
-
-	logger->debug("BrickmapPaletteRenderer: Creating generate pipeline...");
-	CreateComputePipeline();
-
-	// Build descriptors (storage image + storage buffer)
-	logger->debug("BrickmapPaletteRenderer: Creating build descriptors...");
-	auto buildDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
-		.AddBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
-		.Build(1);
-	m_build_descriptor_layout = buildDesc.layout;
-	m_build_descriptor_pool = buildDesc.pool;
-	m_build_descriptor_set = buildDesc.sets[0];
-
-	logger->debug("BrickmapPaletteRenderer: Creating build pipeline...");
-	CreateBuildPipeline();
-
-	// Graphics descriptors (per-frame: brickmap buffer + palette sampler)
-	logger->debug("BrickmapPaletteRenderer: Creating graphics descriptors...");
-	auto gfxDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)
-		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
-		.Build(ctx.maxFramesInFlight);
-	m_graphics_descriptor_layout = gfxDesc.layout;
-	m_graphics_descriptor_pool = gfxDesc.pool;
-	m_graphics_descriptor_sets = gfxDesc.sets;
-
-	m_render_pass = gfx.GetRenderPassPtr();
-
-	logger->debug("BrickmapPaletteRenderer: Creating graphics pipeline...");
-	CreateGraphicsPipeline();
 
 	logger->debug("BrickmapPaletteRenderer: Creating palette resource...");
 	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
@@ -323,45 +349,6 @@ void BrickmapPaletteRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 	}
 }
 
-void BrickmapPaletteRenderer::CreateComputePipeline() {
-	auto comp_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/brickmap_palette_generate.comp.spv");
-
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(BrickmapPaletteGeneratePC);
-
-	m_compute_pipeline = VWrap::ComputePipeline::Create(
-		m_device, m_compute_descriptor_layout, { pushRange }, comp_code);
-}
-
-void BrickmapPaletteRenderer::CreateBuildPipeline() {
-	auto comp_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/brickmap_palette_build.comp.spv");
-
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(BrickmapPaletteBuildPC);
-
-	m_build_pipeline = VWrap::ComputePipeline::Create(
-		m_device, m_build_descriptor_layout, { pushRange }, comp_code);
-}
-
-void BrickmapPaletteRenderer::CreateGraphicsPipeline() {
-	auto vert_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/brickmap_palette_trace.vert.spv");
-	auto frag_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/brickmap_palette_trace.frag.spv");
-
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(BrickmapPaletteTracePC);
-
-	auto create_info = PipelineDefaults::FullscreenQuad(
-		m_render_pass, m_graphics_descriptor_layout, m_extent, { pushRange });
-
-	m_graphics_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_code, frag_code);
-}
-
 void BrickmapPaletteRenderer::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
 	m_extent = newExtent;
 	WriteGraphDescriptors(graph);
@@ -377,12 +364,8 @@ std::vector<std::string> BrickmapPaletteRenderer::GetShaderPaths() const {
 }
 
 void BrickmapPaletteRenderer::RecreatePipeline(const RenderContext& ctx) {
-	m_graphics_pipeline.reset();
-	m_compute_pipeline.reset();
-	m_build_pipeline.reset();
-	CreateComputePipeline();
-	CreateBuildPipeline();
-	CreateGraphicsPipeline();
+	// Pipelines are owned by the graph. Application calls graph.RecreatePipelines()
+	// directly during hot-reload; this override stays empty until §2.1 deletes it.
 }
 
 std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
@@ -458,8 +441,9 @@ void BrickmapPaletteRenderer::PerformReload(const RenderContext& ctx) {
 	UploadVolumeData(model->volume.data());
 	m_palette->Upload(model->palette.data());
 
-	// Recompile shaders + rebuild pipelines so the refreshed model is visible immediately
-	RecreatePipeline(ctx);
+	// Recompile pipelines so the refreshed model is visible immediately. The
+	// graph re-reads SPV and rebuilds every owned pipeline.
+	m_graph->RecreatePipelines();
 
 	logger->info("BrickmapPaletteRenderer: Loaded .vox model ({}x{}x{}, volume={}x{}x{})",
 		model->sizeX, model->sizeY, model->sizeZ,
@@ -486,4 +470,3 @@ void BrickmapPaletteRenderer::UploadVolumeData(const uint8_t* data) {
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	cmd->EndAndSubmit();
 }
-

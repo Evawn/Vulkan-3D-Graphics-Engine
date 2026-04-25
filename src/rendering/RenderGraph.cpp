@@ -449,6 +449,76 @@ void RenderGraph::CreateFramebuffers() {
 	}
 }
 
+void RenderGraph::BuildGraphicsPipeline(GraphicsPassBuilder& pass) {
+	if (!pass.m_pipelineDescFactory) return;
+	auto desc = pass.m_pipelineDescFactory();
+
+	auto vertCode = VWrap::readFile(desc.vertSpvPath);
+	auto fragCode = VWrap::readFile(desc.fragSpvPath);
+
+	// Rebuild pointer-bearing create infos against owned storage in `desc`.
+	VkPipelineVertexInputStateCreateInfo vi{};
+	vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vi.vertexBindingDescriptionCount = static_cast<uint32_t>(desc.vertexBindings.size());
+	vi.pVertexBindingDescriptions = desc.vertexBindings.empty() ? nullptr : desc.vertexBindings.data();
+	vi.vertexAttributeDescriptionCount = static_cast<uint32_t>(desc.vertexAttributes.size());
+	vi.pVertexAttributeDescriptions = desc.vertexAttributes.empty() ? nullptr : desc.vertexAttributes.data();
+
+	VkPipelineDynamicStateCreateInfo ds{};
+	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	ds.dynamicStateCount = static_cast<uint32_t>(desc.dynamicStates.size());
+	ds.pDynamicStates = desc.dynamicStates.empty() ? nullptr : desc.dynamicStates.data();
+
+	VkExtent2D extent{};
+	if (!pass.m_colorAttachments.empty()) {
+		const auto& res = m_images[pass.m_colorAttachments[0].target.id];
+		extent = { res.desc.width, res.desc.height };
+	}
+
+	VWrap::PipelineCreateInfo info{};
+	info.extent = extent;
+	info.render_pass = pass.m_renderPass;
+	info.descriptor_set_layout = desc.descriptorSetLayout;
+	info.vertex_input_info = vi;
+	info.input_assembly = desc.inputAssembly;
+	info.dynamic_state = ds;
+	info.rasterizer = desc.rasterizer;
+	info.depth_stencil = desc.depthStencil;
+	info.push_constant_ranges = desc.pushConstantRanges;
+	info.subpass = 0;
+	info.colorAttachmentCount = static_cast<uint32_t>(pass.m_colorAttachments.size());
+
+	pass.m_pipeline = VWrap::Pipeline::Create(m_device, info, vertCode, fragCode);
+}
+
+void RenderGraph::BuildComputePipeline(ComputePassBuilder& pass) {
+	if (!pass.m_pipelineDescFactory) return;
+	auto desc = pass.m_pipelineDescFactory();
+	auto code = VWrap::readFile(desc.compSpvPath);
+	pass.m_pipeline = VWrap::ComputePipeline::Create(
+		m_device, desc.descriptorSetLayout, desc.pushConstantRanges, code);
+}
+
+void RenderGraph::CreatePipelines() {
+	for (auto& gfx : m_graphicsPasses) {
+		BuildGraphicsPipeline(*gfx);
+	}
+	for (auto& comp : m_computePasses) {
+		BuildComputePipeline(*comp);
+	}
+}
+
+void RenderGraph::RecreatePipelines() {
+	auto logger = spdlog::get("Render");
+	logger->info("RenderGraph: Recreating pipelines");
+	for (auto& gfx : m_graphicsPasses) {
+		BuildGraphicsPipeline(*gfx);
+	}
+	for (auto& comp : m_computePasses) {
+		BuildComputePipeline(*comp);
+	}
+}
+
 void RenderGraph::ComputeBarriers() {
 	m_barriers.clear();
 	m_barriers.resize(m_executionOrder.size());
@@ -633,6 +703,7 @@ void RenderGraph::Compile() {
 	AllocateTransientResources();
 	CreateRenderPasses();
 	CreateFramebuffers();
+	CreatePipelines();
 	ComputeBarriers();
 
 	m_compiled = true;
@@ -746,6 +817,7 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 				ctx.cmd = cmd;
 				ctx.frameIndex = frameIndex;
 				ctx.extent = extent;
+				ctx.graphicsPipeline = pass.m_pipeline;
 				pass.m_recordFn(ctx);
 			}
 
@@ -765,6 +837,7 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 				ctx.cmd = cmd;
 				ctx.frameIndex = frameIndex;
 				ctx.extent = extent;
+				ctx.computePipeline = pass.m_pipeline;
 				pass.m_recordFn(ctx);
 			}
 		}

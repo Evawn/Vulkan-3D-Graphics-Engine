@@ -3,11 +3,9 @@
 #include "RenderGraphTypes.h"
 #include "Device.h"
 #include "Sampler.h"
-#include "Pipeline.h"
 #include "DescriptorSetLayout.h"
 #include "DescriptorPool.h"
 #include "DescriptorSet.h"
-#include "RenderPass.h"
 #include <functional>
 #include <memory>
 #include <string>
@@ -23,8 +21,9 @@ class RenderGraph;
 //   - one fragment shader (the vertex shader is always post_fullscreen.vert.spv)
 //   - an optional push-constant block on the FRAGMENT stage
 //
-// The graph handles barriers, framebuffer creation, and final layouts. The
-// FullscreenPass handles descriptor-set wiring and pipeline construction.
+// The graph handles barriers, framebuffer creation, final layouts, and pipeline
+// construction. The FullscreenPass handles descriptor-set wiring and forwards
+// the pipeline desc to the graph.
 struct FullscreenPassDesc {
 	std::string name;
 	ImageHandle output;
@@ -39,11 +38,10 @@ struct FullscreenPassDesc {
 
 // ---- The pass itself ----
 //
-// One instance owns the pipeline, descriptor pool/sets, and a captured
-// shared_ptr to the graph's render pass. Created via Build() during the
-// effect's RegisterPasses, descriptors written via WriteDescriptors() during
-// WriteGraphDescriptors(), pipeline recreated via RecreatePipeline() during
-// hot-reload.
+// Owns the descriptor layout/pool/sets and the per-frame descriptor writes for
+// the fullscreen pass. Pipeline ownership lives in the graph (built post-Compile
+// against the canonical render pass, rebuilt on hot-reload via
+// RenderGraph::RecreatePipelines()).
 class FullscreenPass {
 public:
 	// Per-draw callback invoked between BindDescriptorSets and Draw. Use it to
@@ -62,29 +60,13 @@ public:
 	// from PostProcessEffect::WriteGraphDescriptors and on resize.
 	void WriteDescriptors(RenderGraph& graph);
 
-	// Recreate the pipeline (typically called after hot-reload). Reuses the
-	// render pass captured at Build() time, which is render-pass-compatible
-	// with whatever the graph holds after Compile() (same attachment formats,
-	// samples, and counts).
-	void RecreatePipeline();
-
-	std::shared_ptr<VWrap::RenderPass> GetRenderPass() const { return m_renderPass; }
-	std::shared_ptr<VWrap::Pipeline> GetPipeline() const { return m_pipeline; }
-
 private:
 	std::shared_ptr<VWrap::Device> m_device;
-	VkExtent2D m_extent{};
-	uint32_t m_maxFramesInFlight = 0;
 
 	std::vector<ImageHandle> m_inputs;
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
-	std::string m_fragShaderSpv;
-	uint32_t m_pushConstantSize = 0;
-
-	std::shared_ptr<VWrap::RenderPass> m_renderPass;
 	std::shared_ptr<VWrap::DescriptorSetLayout> m_descriptorLayout;
 	std::shared_ptr<VWrap::DescriptorPool> m_descriptorPool;
 	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_descriptorSets;
-	std::shared_ptr<VWrap::Pipeline> m_pipeline;
 };

@@ -3,8 +3,6 @@
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
 #include "DescriptorSetBuilder.h"
-#include "ComputePipeline.h"
-#include "Pipeline.h"
 #include "PaletteResource.h"
 #include "SceneLighting.h"
 #include <chrono>
@@ -24,7 +22,6 @@ class AnimatedGeometryRenderer : public RenderTechnique {
 private:
 	std::shared_ptr<VWrap::Device> m_device;
 	std::shared_ptr<VWrap::Allocator> m_allocator;
-	std::shared_ptr<VWrap::RenderPass> m_render_pass;
 	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
 	VkExtent2D m_extent{};
 	std::shared_ptr<Camera> m_camera;
@@ -40,14 +37,12 @@ private:
 	// LINEAR sampler can't be reused.
 	std::shared_ptr<VWrap::Sampler> m_volume_sampler;
 
-	// Generate (compute: writes volume).
-	std::shared_ptr<VWrap::ComputePipeline> m_compute_pipeline;
+	// Generate (compute: writes volume) — pipeline owned by graph.
 	std::shared_ptr<VWrap::DescriptorSetLayout> m_compute_descriptor_layout;
 	std::shared_ptr<VWrap::DescriptorPool> m_compute_descriptor_pool;
 	std::shared_ptr<VWrap::DescriptorSet> m_compute_descriptor_set;
 
-	// Trace (graphics: reads volume + palette, fullscreen quad).
-	std::shared_ptr<VWrap::Pipeline> m_graphics_pipeline;
+	// Trace (graphics: reads volume + palette, fullscreen quad) — pipeline owned by graph.
 	std::shared_ptr<VWrap::DescriptorSetLayout> m_graphics_descriptor_layout;
 	std::shared_ptr<VWrap::DescriptorPool> m_graphics_descriptor_pool;
 	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_graphics_descriptor_sets;
@@ -65,9 +60,6 @@ private:
 	const SceneLighting* m_lighting = nullptr;
 
 	std::vector<TechniqueParameter> m_parameters;
-
-	void CreateComputePipeline();
-	void CreateGraphicsPipeline();
 
 public:
 	std::string GetName() const override { return "Animated Geometry Renderer"; }

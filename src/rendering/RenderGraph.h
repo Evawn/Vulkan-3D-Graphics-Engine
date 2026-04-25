@@ -38,6 +38,11 @@ public:
 	void Resize(VkExtent2D newExtent);
 	void Clear();
 
+	// Re-evaluate every pass's pipeline desc factory and rebuild the VkPipeline.
+	// Use for hot-reload (re-reads SPV) and for state changes that need a fresh
+	// pipeline (e.g. wireframe toggle). Render passes / framebuffers are unchanged.
+	void RecreatePipelines();
+
 	// ---- Resource Access ----
 	std::shared_ptr<VWrap::ImageView> GetImageView(ImageHandle handle) const;
 	VkImage GetVkImage(ImageHandle handle) const;
@@ -90,7 +95,11 @@ private:
 	void AllocateTransientResources();
 	void CreateRenderPasses();
 	void CreateFramebuffers();
+	void CreatePipelines();
 	void ComputeBarriers();
+
+	void BuildGraphicsPipeline(GraphicsPassBuilder& pass);
+	void BuildComputePipeline(ComputePassBuilder& pass);
 
 	VkImageLayout DetermineColorFinalLayout(size_t passOrderIndex, ImageHandle image) const;
 	VkImageLayout DetermineResolveFinalLayout(size_t passOrderIndex, ImageHandle image) const;

@@ -47,10 +47,9 @@ private:
 	std::shared_ptr<VWrap::DescriptorPool> m_descriptor_pool;
 	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_descriptor_sets;
 
-	std::shared_ptr<VWrap::Pipeline> m_pipeline;
+	// Pipeline owned by the graph; rebuilt on hot-reload + wireframe toggle.
+	RenderGraph* m_graph = nullptr;
 	VkExtent2D m_extent;
-
-	std::shared_ptr<VWrap::RenderPass> m_render_pass;
 
 	// Tunable parameters
 	float m_rotation_speed = 0.0f;
@@ -67,7 +66,6 @@ private:
 
 	std::vector<TechniqueParameter> m_parameters;
 
-	void CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass);
 	void CreateVertexBuffer();
 	void CreateIndexBuffer();
 	void CreateUniformBuffers();

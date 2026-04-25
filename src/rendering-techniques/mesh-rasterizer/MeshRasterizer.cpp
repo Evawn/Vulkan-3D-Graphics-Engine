@@ -19,6 +19,7 @@ void MeshRasterizer::RegisterPasses(
 	m_extent = ctx.extent;
 	m_graphics_pool = ctx.graphicsPool;
 	m_camera = ctx.camera;
+	m_graph = &graph;
 
 	auto desc = DescriptorSetBuilder(m_device)
 		.AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
@@ -58,20 +59,40 @@ void MeshRasterizer::RegisterPasses(
 	CreateUniformBuffers();
 	WriteDescriptors();
 
-	auto& pass = graph.AddGraphicsPass("Mesh Scene")
+	graph.AddGraphicsPass("Mesh Scene")
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(resolveTarget)
+		.SetPipeline([this]() {
+			GraphicsPipelineDesc d{};
+			d.vertSpvPath = std::string(config::SHADER_DIR) + "/shader_rast.vert.spv";
+			d.fragSpvPath = std::string(config::SHADER_DIR) + "/shader_rast.frag.spv";
+			d.descriptorSetLayout = m_descriptor_set_layout;
+
+			auto binding = VWrap::Vertex::getBindingDescription();
+			auto attrs = VWrap::Vertex::getAttributeDescriptions();
+			d.vertexBindings = { binding };
+			d.vertexAttributes = { attrs.begin(), attrs.end() };
+
+			d.inputAssembly = PipelineDefaults::TriangleList();
+			// Wireframe toggle re-enters this factory via graph.RecreatePipelines(),
+			// so the rasterizer state observes the current m_wireframe value.
+			d.rasterizer = PipelineDefaults::BackCullFill(m_wireframe);
+			d.depthStencil = PipelineDefaults::DepthTestWrite();
+			d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			return d;
+		})
 		.SetRecord([this](PassContext& ctx) {
 			UpdateUniformBuffer(ctx.frameIndex);
 
 			if (m_indices.empty() || !m_vertex_buffer || !m_index_buffer) return;
 
 			auto vk_cmd = ctx.cmd->Get();
-			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->Get());
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.graphicsPipeline->Get());
 
 			std::array<VkDescriptorSet, 1> descriptorSets = { m_descriptor_sets[ctx.frameIndex]->Get() };
-			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
+			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				ctx.graphicsPipeline->GetLayout(), 0, 1, descriptorSets.data(), 0, nullptr);
 
 			VkBuffer vertexBuffers[] = { m_vertex_buffer->Get() };
 			VkDeviceSize offsets[] = { 0 };
@@ -79,9 +100,6 @@ void MeshRasterizer::RegisterPasses(
 			vkCmdBindIndexBuffer(vk_cmd, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
 			vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
 		});
-
-	m_render_pass = pass.GetRenderPassPtr();
-	CreatePipeline(m_render_pass);
 }
 
 void MeshRasterizer::CreateVertexBuffer() {
@@ -413,35 +431,6 @@ void MeshRasterizer::CreatePlaceholderTexture() {
 	cmd->EndAndSubmit();
 }
 
-void MeshRasterizer::CreatePipeline(std::shared_ptr<VWrap::RenderPass> render_pass)
-{
-	auto vert_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_rast.vert.spv");
-	auto frag_shader_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/shader_rast.frag.spv");
-
-	auto bindingDescription = VWrap::Vertex::getBindingDescription();
-	auto attributeDescriptions = VWrap::Vertex::getAttributeDescriptions();
-
-	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInputInfo.vertexAttributeDescriptionCount = 3;
-	vertexInputInfo.vertexBindingDescriptionCount = 1;
-	vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-	vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-
-	VWrap::PipelineCreateInfo create_info{};
-	create_info.extent = m_extent;
-	create_info.render_pass = render_pass;
-	create_info.descriptor_set_layout = m_descriptor_set_layout;
-	create_info.vertex_input_info = vertexInputInfo;
-	create_info.input_assembly = PipelineDefaults::TriangleList();
-	create_info.dynamic_state = PipelineDefaults::DynamicViewportScissor();
-	create_info.rasterizer = PipelineDefaults::BackCullFill(m_wireframe);
-	create_info.depth_stencil = PipelineDefaults::DepthTestWrite();
-	create_info.push_constant_ranges = {};
-	create_info.subpass = 0;
-
-	m_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_shader_code, frag_shader_code);
-}
 
 void MeshRasterizer::UpdateUniformBuffer(uint32_t frame) {
 	m_accumulated_rotation += m_rotation_speed * 0.016f;
@@ -468,8 +457,8 @@ std::vector<std::string> MeshRasterizer::GetShaderPaths() const {
 }
 
 void MeshRasterizer::RecreatePipeline(const RenderContext& ctx) {
-	m_pipeline.reset();
-	CreatePipeline(m_render_pass);
+	// Pipelines are owned by the graph. Application calls graph.RecreatePipelines()
+	// directly during hot-reload; this override stays empty until §2.1 deletes it.
 }
 
 std::vector<TechniqueParameter>& MeshRasterizer::GetParameters() {

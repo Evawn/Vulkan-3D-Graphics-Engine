@@ -28,3 +28,8 @@ ComputePassBuilder& ComputePassBuilder::SetRecord(std::function<void(PassContext
 	m_recordFn = std::move(fn);
 	return *this;
 }
+
+ComputePassBuilder& ComputePassBuilder::SetPipeline(std::function<ComputePipelineDesc()> descFactory) {
+	m_pipelineDescFactory = std::move(descFactory);
+	return *this;
+}

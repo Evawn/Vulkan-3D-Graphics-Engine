@@ -33,8 +33,11 @@ public:
 	GraphicsPassBuilder& Write(BufferHandle resource);
 	GraphicsPassBuilder& SetRecord(std::function<void(PassContext&)> fn);
 
-	VkRenderPass GetRenderPass();
-	std::shared_ptr<VWrap::RenderPass> GetRenderPassPtr();
+	// Hand the graph a factory that produces the desc for this pass's pipeline.
+	// The graph invokes the factory after Compile() (and again on hot-reload /
+	// RecreatePipelines()), so closures may capture mutable technique state
+	// like wireframe flags — each rebuild observes the latest values.
+	GraphicsPassBuilder& SetPipeline(std::function<GraphicsPipelineDesc()> descFactory);
 
 private:
 	friend class RenderGraph;
@@ -56,10 +59,15 @@ private:
 	ImageHandle m_resolveTarget;
 	bool m_hasResolve = false;
 
-	// Created lazily by GetRenderPass / during Compile
+	// Created during Compile against the canonical attachment layouts.
 	std::shared_ptr<VWrap::RenderPass> m_renderPass;
 	std::unordered_map<VkImageView, std::shared_ptr<VWrap::Framebuffer>> m_framebufferCache;
 	std::shared_ptr<VWrap::Framebuffer> m_activeFramebuffer;
+
+	// Pipeline ownership: the graph builds the VkPipeline after CreateRenderPasses.
+	// The factory is invoked each time the pipeline is built or rebuilt.
+	std::function<GraphicsPipelineDesc()> m_pipelineDescFactory;
+	std::shared_ptr<VWrap::Pipeline> m_pipeline;
 
 	void CreateRenderPass(const std::vector<VkImageLayout>& colorFinalLayouts, VkImageLayout resolveFinalLayout);
 	void CreateFramebuffer();

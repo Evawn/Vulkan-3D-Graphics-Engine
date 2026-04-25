@@ -59,6 +59,11 @@ GraphicsPassBuilder& GraphicsPassBuilder::SetRecord(std::function<void(PassConte
 	return *this;
 }
 
+GraphicsPassBuilder& GraphicsPassBuilder::SetPipeline(std::function<GraphicsPipelineDesc()> descFactory) {
+	m_pipelineDescFactory = std::move(descFactory);
+	return *this;
+}
+
 static VkAttachmentLoadOp ToVk(LoadOp op) {
 	switch (op) {
 	case LoadOp::Clear: return VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -74,28 +79,6 @@ static VkAttachmentStoreOp ToVk(StoreOp op) {
 	case StoreOp::DontCare: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	}
 	return VK_ATTACHMENT_STORE_OP_DONT_CARE;
-}
-
-VkRenderPass GraphicsPassBuilder::GetRenderPass() {
-	if (!m_renderPass) {
-		std::vector<VkImageLayout> colorFinals;
-		for (const auto& ca : m_colorAttachments) {
-			const auto& colorRes = m_graph.GetImageResource(ca.target);
-			if (colorRes.imported) {
-				colorFinals.push_back(colorRes.externalLayout);
-			} else {
-				colorFinals.push_back(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-			}
-		}
-		VkImageLayout resolveFinal = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		CreateRenderPass(colorFinals, resolveFinal);
-	}
-	return m_renderPass->Get();
-}
-
-std::shared_ptr<VWrap::RenderPass> GraphicsPassBuilder::GetRenderPassPtr() {
-	GetRenderPass();
-	return m_renderPass;
 }
 
 void GraphicsPassBuilder::CreateRenderPass(

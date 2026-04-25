@@ -134,9 +134,8 @@ std::vector<std::string> BloomEffect::GetShaderPaths() const {
 }
 
 void BloomEffect::RecreatePipelines() {
-	if (!m_brightPass) return;
-	m_brightPass->RecreatePipeline();
-	m_blurHPass->RecreatePipeline();
-	m_blurVPass->RecreatePipeline();
-	m_compositePass->RecreatePipeline();
+	// Pipelines are owned by the graph; RenderGraph::RecreatePipelines() rebuilds
+	// them. Keeping the override empty rather than removing it because
+	// PostProcessEffect::RecreatePipelines is still part of the interface during
+	// the §1.5 migration.
 }

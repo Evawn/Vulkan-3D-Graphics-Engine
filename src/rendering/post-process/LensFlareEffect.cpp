@@ -103,5 +103,5 @@ std::vector<std::string> LensFlareEffect::GetShaderPaths() const {
 }
 
 void LensFlareEffect::RecreatePipelines() {
-	if (m_pass) m_pass->RecreatePipeline();
+	// Graph owns the pipeline; no per-effect work needed.
 }

@@ -57,12 +57,40 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		0
 	});
 
+	// Build descriptor layouts up front so the pipeline desc factories can
+	// capture the layout shared_ptrs.
+	auto computeDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
+		.Build(1);
+	m_compute_descriptor_layout = computeDesc.layout;
+	m_compute_descriptor_pool = computeDesc.pool;
+	m_compute_descriptor_set = computeDesc.sets[0];
+
+	auto gfxDesc = DescriptorSetBuilder(m_device)
+		.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		.Build(ctx.maxFramesInFlight);
+	m_graphics_descriptor_layout = gfxDesc.layout;
+	m_graphics_descriptor_pool = gfxDesc.pool;
+	m_graphics_descriptor_sets = gfxDesc.sets;
+
 	// Compute pass: write procedural animated voxels into the volume each frame.
 	graph.AddComputePass("Animated Geometry Generate")
 		.Write(m_volume)
+		.SetPipeline([this]() {
+			ComputePipelineDesc d;
+			d.compSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_generate.comp.spv";
+			d.descriptorSetLayout = m_compute_descriptor_layout;
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			r.offset = 0;
+			r.size = sizeof(AnimatedGeometryGeneratePC);
+			d.pushConstantRanges = { r };
+			return d;
+		})
 		.SetRecord([this, vs](PassContext& ctx) {
-			ctx.cmd->CmdBindComputePipeline(m_compute_pipeline);
-			ctx.cmd->CmdBindComputeDescriptorSets(m_compute_pipeline->GetLayout(),
+			ctx.cmd->CmdBindComputePipeline(ctx.computePipeline);
+			ctx.cmd->CmdBindComputeDescriptorSets(ctx.computePipeline->GetLayout(),
 				{ m_compute_descriptor_set->Get() });
 			AnimatedGeometryGeneratePC pc{};
 			pc.pattern = m_pattern;
@@ -71,24 +99,40 @@ void AnimatedGeometryRenderer::RegisterPasses(
 			pc.volume_size_x = static_cast<int>(vs.x);
 			pc.volume_size_y = static_cast<int>(vs.y);
 			pc.volume_size_z = static_cast<int>(vs.z);
-			vkCmdPushConstants(ctx.cmd->Get(), m_compute_pipeline->GetLayout(),
+			vkCmdPushConstants(ctx.cmd->Get(), ctx.computePipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 			auto cdiv = [](uint32_t a, uint32_t b) { return (a + b - 1) / b; };
 			ctx.cmd->CmdDispatch(cdiv(vs.x, 4), cdiv(vs.y, 4), cdiv(vs.z, 4));
 		});
 
 	// Graphics pass: single-level DDA fragment shader.
-	auto& gfx = graph.AddGraphicsPass("Animated Geometry Trace")
+	graph.AddGraphicsPass("Animated Geometry Trace")
 		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(resolveTarget)
 		.Read(m_volume)
+		.SetPipeline([this]() {
+			GraphicsPipelineDesc d{};
+			d.vertSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_trace.vert.spv";
+			d.fragSpvPath = std::string(config::SHADER_DIR) + "/animated_geometry_trace.frag.spv";
+			d.descriptorSetLayout = m_graphics_descriptor_layout;
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+			r.offset = 0;
+			r.size = sizeof(AnimatedGeometryTracePC);
+			d.pushConstantRanges = { r };
+			d.inputAssembly = PipelineDefaults::TriangleStrip();
+			d.rasterizer = PipelineDefaults::NoCullFill();
+			d.depthStencil = PipelineDefaults::NoDepthTest();
+			d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			return d;
+		})
 		.SetRecord([this, vs](PassContext& ctx) {
 			auto vk_cmd = ctx.cmd->Get();
-			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphics_pipeline->Get());
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.graphicsPipeline->Get());
 			VkDescriptorSet ds = m_graphics_descriptor_sets[ctx.frameIndex]->Get();
 			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				m_graphics_pipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
+				ctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
 			AnimatedGeometryTracePC pc{};
 			pc.NDCtoWorld = m_camera->GetNDCtoWorldMatrix();
@@ -116,34 +160,11 @@ void AnimatedGeometryRenderer::RegisterPasses(
 			}
 			pc._pad0 = 0;
 			pc._pad1 = 0;
-			vkCmdPushConstants(vk_cmd, m_graphics_pipeline->GetLayout(),
+			vkCmdPushConstants(vk_cmd, ctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(AnimatedGeometryTracePC), &pc);
 
 			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
 		});
-
-	// Generate descriptor: one storage image for write.
-	auto computeDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
-		.Build(1);
-	m_compute_descriptor_layout = computeDesc.layout;
-	m_compute_descriptor_pool = computeDesc.pool;
-	m_compute_descriptor_set = computeDesc.sets[0];
-
-	CreateComputePipeline();
-
-	// Graphics descriptors: volume sampler + palette sampler per frame.
-	auto gfxDesc = DescriptorSetBuilder(m_device)
-		.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
-		.AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
-		.Build(ctx.maxFramesInFlight);
-	m_graphics_descriptor_layout = gfxDesc.layout;
-	m_graphics_descriptor_pool = gfxDesc.pool;
-	m_graphics_descriptor_sets = gfxDesc.sets;
-
-	m_render_pass = gfx.GetRenderPassPtr();
-
-	CreateGraphicsPipeline();
 
 	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
 	m_palette->Create();
@@ -207,33 +228,6 @@ void AnimatedGeometryRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 	}
 }
 
-void AnimatedGeometryRenderer::CreateComputePipeline() {
-	auto comp_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/animated_geometry_generate.comp.spv");
-
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(AnimatedGeometryGeneratePC);
-
-	m_compute_pipeline = VWrap::ComputePipeline::Create(
-		m_device, m_compute_descriptor_layout, { pushRange }, comp_code);
-}
-
-void AnimatedGeometryRenderer::CreateGraphicsPipeline() {
-	auto vert_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/animated_geometry_trace.vert.spv");
-	auto frag_code = VWrap::readFile(std::string(config::SHADER_DIR) + "/animated_geometry_trace.frag.spv");
-
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(AnimatedGeometryTracePC);
-
-	auto create_info = PipelineDefaults::FullscreenQuad(
-		m_render_pass, m_graphics_descriptor_layout, m_extent, { pushRange });
-
-	m_graphics_pipeline = VWrap::Pipeline::Create(m_device, create_info, vert_code, frag_code);
-}
-
 void AnimatedGeometryRenderer::OnResize(VkExtent2D newExtent, RenderGraph& graph) {
 	m_extent = newExtent;
 	WriteGraphDescriptors(graph);
@@ -248,10 +242,8 @@ std::vector<std::string> AnimatedGeometryRenderer::GetShaderPaths() const {
 }
 
 void AnimatedGeometryRenderer::RecreatePipeline(const RenderContext& ctx) {
-	m_graphics_pipeline.reset();
-	m_compute_pipeline.reset();
-	CreateComputePipeline();
-	CreateGraphicsPipeline();
+	// Pipelines are owned by the graph. Application calls graph.RecreatePipelines()
+	// directly during hot-reload; this override stays empty until §2.1 deletes it.
 }
 
 std::vector<TechniqueParameter>& AnimatedGeometryRenderer::GetParameters() {
