@@ -465,4 +465,66 @@ namespace VWrap {
 		command_buffer->CmdTransitionImageLayout(dst_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 		command_buffer->EndAndSubmit();
 	}
+
+	// =====================================================================
+	// Graphics command wrappers (additive)
+	// =====================================================================
+
+	void CommandBuffer::CmdBindGraphicsPipeline(std::shared_ptr<Pipeline> pipeline) {
+		vkCmdBindPipeline(m_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->Get());
+	}
+
+	void CommandBuffer::CmdBindGraphicsDescriptorSets(VkPipelineLayout layout, const std::vector<VkDescriptorSet>& descriptor_sets, uint32_t first_set) {
+		if (descriptor_sets.empty()) return;
+		vkCmdBindDescriptorSets(m_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout,
+			first_set, static_cast<uint32_t>(descriptor_sets.size()), descriptor_sets.data(),
+			0, nullptr);
+	}
+
+	void CommandBuffer::CmdPushConstants(std::shared_ptr<Pipeline> pipeline, VkShaderStageFlags stages, const void* data, size_t size, uint32_t offset) {
+		vkCmdPushConstants(m_command_buffer, pipeline->GetLayout(), stages, offset, static_cast<uint32_t>(size), data);
+	}
+
+	void CommandBuffer::CmdPushConstants(std::shared_ptr<ComputePipeline> pipeline, VkShaderStageFlags stages, const void* data, size_t size, uint32_t offset) {
+		vkCmdPushConstants(m_command_buffer, pipeline->GetLayout(), stages, offset, static_cast<uint32_t>(size), data);
+	}
+
+	void CommandBuffer::CmdPushConstants(VkPipelineLayout layout, VkShaderStageFlags stages, const void* data, size_t size, uint32_t offset) {
+		vkCmdPushConstants(m_command_buffer, layout, stages, offset, static_cast<uint32_t>(size), data);
+	}
+
+	void CommandBuffer::CmdDraw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) {
+		vkCmdDraw(m_command_buffer, vertex_count, instance_count, first_vertex, first_instance);
+	}
+
+	void CommandBuffer::CmdDrawIndexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) {
+		vkCmdDrawIndexed(m_command_buffer, index_count, instance_count, first_index, vertex_offset, first_instance);
+	}
+
+	void CommandBuffer::CmdBindVertexBuffer(std::shared_ptr<Buffer> buffer, VkDeviceSize offset) {
+		VkBuffer handle = buffer->Get();
+		vkCmdBindVertexBuffers(m_command_buffer, 0, 1, &handle, &offset);
+	}
+
+	void CommandBuffer::CmdBindIndexBuffer(std::shared_ptr<Buffer> buffer, VkIndexType index_type, VkDeviceSize offset) {
+		vkCmdBindIndexBuffer(m_command_buffer, buffer->Get(), offset, index_type);
+	}
+
+	void CommandBuffer::CmdSetViewport(VkExtent2D extent) {
+		VkViewport viewport{};
+		viewport.x = 0.0f;
+		viewport.y = 0.0f;
+		viewport.width = static_cast<float>(extent.width);
+		viewport.height = static_cast<float>(extent.height);
+		viewport.minDepth = 0.0f;
+		viewport.maxDepth = 1.0f;
+		vkCmdSetViewport(m_command_buffer, 0, 1, &viewport);
+	}
+
+	void CommandBuffer::CmdSetScissor(VkExtent2D extent) {
+		VkRect2D scissor{};
+		scissor.offset = { 0, 0 };
+		scissor.extent = extent;
+		vkCmdSetScissor(m_command_buffer, 0, 1, &scissor);
+	}
 }

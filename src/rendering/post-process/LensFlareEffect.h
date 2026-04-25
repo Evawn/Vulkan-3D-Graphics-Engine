@@ -1,12 +1,8 @@
 #pragma once
 
 #include "PostProcessEffect.h"
-#include "Pipeline.h"
+#include "FullscreenPass.h"
 #include "Sampler.h"
-#include "DescriptorSetLayout.h"
-#include "DescriptorPool.h"
-#include "DescriptorSet.h"
-#include "RenderPass.h"
 #include <glm/glm.hpp>
 #include <memory>
 #include <vector>
@@ -31,25 +27,15 @@ public:
 	void RecreatePipelines() override;
 
 private:
-	void CreatePipeline();
-
-	std::shared_ptr<VWrap::Device> m_device;
 	std::shared_ptr<Camera> m_camera;
 	SceneLighting* m_lighting = nullptr;
-	VkExtent2D m_extent{};
-	uint32_t m_maxFramesInFlight = 0;
 
 	ImageHandle m_input;
 	ImageHandle m_output;
 
 	std::shared_ptr<VWrap::Sampler> m_sampler;
-	std::shared_ptr<VWrap::RenderPass> m_renderPass;
-	std::shared_ptr<VWrap::Pipeline> m_pipeline;
-	std::shared_ptr<VWrap::DescriptorSetLayout> m_layout;
-	std::shared_ptr<VWrap::DescriptorPool> m_pool;
-	std::vector<std::shared_ptr<VWrap::DescriptorSet>> m_sets;
+	std::unique_ptr<FullscreenPass> m_pass;
 
-	// Parameters
 	float m_intensity = 0.1f;
 	float m_haloRadius = 0.15f;
 	float m_ghostSpread = 0.85f;

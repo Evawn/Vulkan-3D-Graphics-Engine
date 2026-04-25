@@ -1,12 +1,8 @@
 #pragma once
 
 #include "PostProcessEffect.h"
-#include "Pipeline.h"
+#include "FullscreenPass.h"
 #include "Sampler.h"
-#include "DescriptorSetLayout.h"
-#include "DescriptorPool.h"
-#include "DescriptorSet.h"
-#include "RenderPass.h"
 #include <glm/glm.hpp>
 #include <memory>
 #include <vector>
@@ -31,24 +27,6 @@ public:
 	void RecreatePipelines() override;
 
 private:
-	// Aggregate of per-pass Vulkan objects. Each pass is a fullscreen quad
-	// reading 1-2 sampled images and writing one color attachment.
-	struct Pass {
-		std::shared_ptr<VWrap::RenderPass> renderPass;
-		std::shared_ptr<VWrap::Pipeline> pipeline;
-		std::shared_ptr<VWrap::DescriptorSetLayout> layout;
-		std::shared_ptr<VWrap::DescriptorPool> pool;
-		std::vector<std::shared_ptr<VWrap::DescriptorSet>> sets;  // one per frame-in-flight
-	};
-
-	void CreatePassPipeline(Pass& p, const std::string& fragSpv, size_t pushSize);
-
-	// Context captured at RegisterPasses — needed for pipeline recreation on
-	// hot-reload, where we only have the effect instance.
-	std::shared_ptr<VWrap::Device> m_device;
-	VkExtent2D m_extent{};
-	uint32_t m_maxFramesInFlight = 0;
-
 	// Image handles threaded through the chain. m_input is captured from the
 	// argument so WriteGraphDescriptors can rebind it after graph.Compile().
 	ImageHandle m_input;
@@ -59,10 +37,10 @@ private:
 
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
-	Pass m_brightPass;
-	Pass m_blurHPass;
-	Pass m_blurVPass;
-	Pass m_compositePass;   // uses a 2-binding descriptor layout
+	std::unique_ptr<FullscreenPass> m_brightPass;
+	std::unique_ptr<FullscreenPass> m_blurHPass;
+	std::unique_ptr<FullscreenPass> m_blurVPass;
+	std::unique_ptr<FullscreenPass> m_compositePass;
 
 	float m_threshold = 0.93f;
 	float m_knee = 0.19f;

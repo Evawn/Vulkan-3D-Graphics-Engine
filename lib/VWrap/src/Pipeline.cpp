@@ -4,8 +4,18 @@ namespace VWrap {
 
     std::shared_ptr<Pipeline> Pipeline::Create(std::shared_ptr<Device> device, const PipelineCreateInfo& create_info, const std::vector<char>& vertex_shader_code, const std::vector<char>& fragment_shader_code)
     {
+        // Build a fresh PipelineLayout from the descriptor_set_layout + push ranges
+        // in create_info. Callers that want to share a layout across pipelines should
+        // use the overload below.
+        auto layout = PipelineLayout::Create(device, create_info.descriptor_set_layout, create_info.push_constant_ranges);
+        return Create(std::move(device), std::move(layout), create_info, vertex_shader_code, fragment_shader_code);
+    }
+
+    std::shared_ptr<Pipeline> Pipeline::Create(std::shared_ptr<Device> device, std::shared_ptr<PipelineLayout> layout, const PipelineCreateInfo& create_info, const std::vector<char>& vertex_shader_code, const std::vector<char>& fragment_shader_code)
+    {
         auto ret = std::make_shared<Pipeline>();
         ret->m_device = device;
+        ret->m_pipeline_layout = std::move(layout);
 
         VkShaderModule vertShaderModule = CreateShaderModule(device, vertex_shader_code);
         VkShaderModule fragShaderModule = CreateShaderModule(device, fragment_shader_code);
@@ -47,10 +57,10 @@ namespace VWrap {
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisampling.sampleShadingEnable = VK_FALSE;
         multisampling.rasterizationSamples = create_info.render_pass->GetSamples();
-        multisampling.minSampleShading = 1.0f; // Optional
-        multisampling.pSampleMask = nullptr; // Optional
-        multisampling.alphaToCoverageEnable = VK_FALSE; // Optional
-        multisampling.alphaToOneEnable = VK_FALSE; // Optional
+        multisampling.minSampleShading = 1.0f;
+        multisampling.pSampleMask = nullptr;
+        multisampling.alphaToCoverageEnable = VK_FALSE;
+        multisampling.alphaToOneEnable = VK_FALSE;
 
         VkPipelineColorBlendAttachmentState defaultBlendAttachment{};
         defaultBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
@@ -72,25 +82,10 @@ namespace VWrap {
         colorBlending.logicOp = VK_LOGIC_OP_COPY;
         colorBlending.attachmentCount = static_cast<uint32_t>(colorBlendAttachments.size());
         colorBlending.pAttachments = colorBlendAttachments.data();
-        colorBlending.blendConstants[0] = 0.0f; // Optional
-        colorBlending.blendConstants[1] = 0.0f; // Optional
-        colorBlending.blendConstants[2] = 0.0f; // Optional
-        colorBlending.blendConstants[3] = 0.0f; // Optional
-
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-
-        std::array<VkDescriptorSetLayout, 1> descriptor_set_layout_handles = { create_info.descriptor_set_layout->Get()};
-        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptor_set_layout_handles.size());
-        pipelineLayoutInfo.pSetLayouts = descriptor_set_layout_handles.data();
-
-        pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(create_info.push_constant_ranges.size());
-        pipelineLayoutInfo.pPushConstantRanges = create_info.push_constant_ranges.data();
-
-
-        if (vkCreatePipelineLayout(device->Get(), &pipelineLayoutInfo, nullptr, &ret->m_pipeline_layout) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create pipline layout!");
-        }
+        colorBlending.blendConstants[0] = 0.0f;
+        colorBlending.blendConstants[1] = 0.0f;
+        colorBlending.blendConstants[2] = 0.0f;
+        colorBlending.blendConstants[3] = 0.0f;
 
         VkGraphicsPipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -104,7 +99,7 @@ namespace VWrap {
         pipelineInfo.pDepthStencilState = &create_info.depth_stencil;
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &create_info.dynamic_state;
-        pipelineInfo.layout = ret->m_pipeline_layout;
+        pipelineInfo.layout = ret->m_pipeline_layout->Get();
         pipelineInfo.renderPass = create_info.render_pass->Get();
         pipelineInfo.subpass = create_info.subpass;
         pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
@@ -135,8 +130,7 @@ namespace VWrap {
     Pipeline::~Pipeline() {
         if (m_pipeline != VK_NULL_HANDLE)
             vkDestroyPipeline(m_device->Get(), m_pipeline, nullptr);
-        if (m_pipeline_layout != VK_NULL_HANDLE)
-			vkDestroyPipelineLayout(m_device->Get(), m_pipeline_layout, nullptr);
+        // m_pipeline_layout is a shared_ptr — destruction is handled by PipelineLayout itself.
     }
 
 }

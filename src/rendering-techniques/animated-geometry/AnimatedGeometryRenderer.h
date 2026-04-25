@@ -38,7 +38,7 @@ private:
 	// NEAREST sampler used to read the integer volume via texelFetch. Required
 	// because R8_UINT does not support linear filtering and the palette's
 	// LINEAR sampler can't be reused.
-	VkSampler m_volume_sampler = VK_NULL_HANDLE;
+	std::shared_ptr<VWrap::Sampler> m_volume_sampler;
 
 	// Generate (compute: writes volume).
 	std::shared_ptr<VWrap::ComputePipeline> m_compute_pipeline;
@@ -71,8 +71,6 @@ private:
 
 public:
 	std::string GetName() const override { return "Animated Geometry Renderer"; }
-
-	~AnimatedGeometryRenderer();
 
 	void RegisterPasses(
 		RenderGraph& graph,

@@ -148,31 +148,12 @@ void AnimatedGeometryRenderer::RegisterPasses(
 	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
 	m_palette->Create();
 
-	// NEAREST sampler for the integer volume.
-	if (m_volume_sampler == VK_NULL_HANDLE) {
-		VkSamplerCreateInfo si{};
-		si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-		si.magFilter = VK_FILTER_NEAREST;
-		si.minFilter = VK_FILTER_NEAREST;
-		si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-		si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-		si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-		si.unnormalizedCoordinates = VK_FALSE;
-		si.compareEnable = VK_FALSE;
-		if (vkCreateSampler(m_device->Get(), &si, nullptr, &m_volume_sampler) != VK_SUCCESS) {
-			throw std::runtime_error("AnimatedGeometryRenderer: failed to create volume sampler");
-		}
+	// NEAREST sampler for the integer R8_UINT volume.
+	if (!m_volume_sampler) {
+		m_volume_sampler = VWrap::Sampler::CreateNearestClamp(m_device);
 	}
 
 	logger->debug("AnimatedGeometryRenderer: Initialized via RegisterPasses");
-}
-
-AnimatedGeometryRenderer::~AnimatedGeometryRenderer() {
-	if (m_volume_sampler != VK_NULL_HANDLE && m_device) {
-		vkDestroySampler(m_device->Get(), m_volume_sampler, nullptr);
-		m_volume_sampler = VK_NULL_HANDLE;
-	}
 }
 
 void AnimatedGeometryRenderer::WriteGraphDescriptors(RenderGraph& graph) {
@@ -200,7 +181,7 @@ void AnimatedGeometryRenderer::WriteGraphDescriptors(RenderGraph& graph) {
 		VkDescriptorImageInfo volumeInfo{};
 		volumeInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		volumeInfo.imageView = volumeView->Get();
-		volumeInfo.sampler = m_volume_sampler;
+		volumeInfo.sampler = m_volume_sampler->Get();
 
 		VkDescriptorImageInfo paletteInfo{};
 		paletteInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

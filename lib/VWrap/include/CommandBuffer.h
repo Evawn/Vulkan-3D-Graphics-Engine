@@ -9,6 +9,7 @@
 #include "Image.h"
 #include "Buffer.h"
 #include "ComputePipeline.h"
+#include "Pipeline.h"
 #include "stb_image.h"
 
 namespace VWrap {
@@ -113,6 +114,41 @@ namespace VWrap {
 
 		/// <summary> Binds descriptor sets for a compute pipeline. </summary>
 		void CmdBindComputeDescriptorSets(VkPipelineLayout layout, const std::vector<VkDescriptorSet>& descriptor_sets, uint32_t first_set = 0);
+
+		// ---- Graphics command wrappers (additive helpers) ----
+
+		/// <summary> Binds a graphics pipeline. </summary>
+		void CmdBindGraphicsPipeline(std::shared_ptr<Pipeline> pipeline);
+
+		/// <summary> Binds descriptor sets for a graphics pipeline. </summary>
+		void CmdBindGraphicsDescriptorSets(VkPipelineLayout layout, const std::vector<VkDescriptorSet>& descriptor_sets, uint32_t first_set = 0);
+
+		/// <summary> Pushes a constant block to the given graphics pipeline's layout. </summary>
+		void CmdPushConstants(std::shared_ptr<Pipeline> pipeline, VkShaderStageFlags stages, const void* data, size_t size, uint32_t offset = 0);
+
+		/// <summary> Pushes a constant block to the given compute pipeline's layout. </summary>
+		void CmdPushConstants(std::shared_ptr<ComputePipeline> pipeline, VkShaderStageFlags stages, const void* data, size_t size, uint32_t offset = 0);
+
+		/// <summary> Pushes a constant block to a raw pipeline-layout handle. </summary>
+		void CmdPushConstants(VkPipelineLayout layout, VkShaderStageFlags stages, const void* data, size_t size, uint32_t offset = 0);
+
+		/// <summary> Issues a non-indexed draw. </summary>
+		void CmdDraw(uint32_t vertex_count, uint32_t instance_count = 1, uint32_t first_vertex = 0, uint32_t first_instance = 0);
+
+		/// <summary> Issues an indexed draw. </summary>
+		void CmdDrawIndexed(uint32_t index_count, uint32_t instance_count = 1, uint32_t first_index = 0, int32_t vertex_offset = 0, uint32_t first_instance = 0);
+
+		/// <summary> Binds a single vertex buffer to binding 0 (the common case). </summary>
+		void CmdBindVertexBuffer(std::shared_ptr<Buffer> buffer, VkDeviceSize offset = 0);
+
+		/// <summary> Binds an index buffer. </summary>
+		void CmdBindIndexBuffer(std::shared_ptr<Buffer> buffer, VkIndexType index_type, VkDeviceSize offset = 0);
+
+		/// <summary> Sets a full-extent viewport (top-left at 0,0; depth 0..1). </summary>
+		void CmdSetViewport(VkExtent2D extent);
+
+		/// <summary> Sets a full-extent scissor rectangle. </summary>
+		void CmdSetScissor(VkExtent2D extent);
 
 		/// <summary> Records a general pipeline barrier with image and buffer memory barriers. </summary>
 		void CmdPipelineBarrier(
