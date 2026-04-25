@@ -7,17 +7,11 @@
 #include "VulkanContext.h"
 #include "CameraController.h"
 #include "Editor.h"
-#include "GPUProfiler.h"
 #include "Camera.h"
-#include "RenderTechnique.h"
-#include "Renderer.h"
-#include "MeshRasterizer.h"
-#include "BrickmapPaletteRenderer.h"
-#include "AnimatedGeometryRenderer.h"
-#include "AppEvent.h"
+#include "RenderingSystem.h"
 
 // STD INCLUDES ----------------------------------------------------------------------------------------------
-#include <vector>
+#include <memory>
 #include <chrono>
 #include <spdlog/spdlog.h>
 
@@ -50,33 +44,18 @@ private:
 	// RENDER PASS (kept for ImGui init compatibility)
 	std::shared_ptr<VWrap::RenderPass> m_presentation_render_pass;
 
-	// RENDERER
-	Renderer m_renderer;
-	VkExtent2D m_offscreen_extent{};
-
 	// EDITOR (UI + panels)
 	Editor m_editor;
-
-	// GPU PROFILER
-	std::shared_ptr<GPUProfiler> m_gpu_profiler;
-	GPUProfiler::PerformanceMetrics m_last_metrics{};
-
-	// RENDER GRAPH SNAPSHOT (for dev tooling panel)
-	GraphSnapshot m_graphSnapshot;
 
 	// CAMERA
 	std::shared_ptr<Camera> m_camera;
 	std::shared_ptr<CameraController> m_camera_controller;
 
-	// RENDERERS
-	std::vector<std::unique_ptr<RenderTechnique>> m_renderers;
-	size_t m_active_renderer_index = 0;
+	// RENDERING SYSTEM (owns Renderer, technique list, event queue, profiler)
+	RenderingSystem m_rendering;
 
-	// EVENT QUEUE
-	std::vector<AppEvent> m_events;
-	void PushEvent(AppEvent event);
-	void ProcessEvents();
-	void DispatchEvent(const AppEvent& event);
+	// Per-frame metrics snapshot — Editor stores a pointer, so we own the slot.
+	GPUProfiler::PerformanceMetrics m_metrics_snapshot{};
 
 public:
 	void Run();
@@ -86,11 +65,5 @@ private:
 	void InitVulkan();
 	void MainLoop();
 	void Cleanup();
-	void Resize();
-	void BuildRenderGraph();
 	void DrawFrame();
-	void HotReloadShaders();
-	void SwitchRenderer(size_t index);
-	void CaptureScreenshot();
-	RenderContext BuildRenderContext() const;
 };

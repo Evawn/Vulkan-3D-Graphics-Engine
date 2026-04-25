@@ -7,12 +7,21 @@
 #include <algorithm>
 #include <map>
 
+RenderTargetDesc MeshRasterizer::DescribeTargets(const RendererCaps& caps) const {
+	RenderTargetDesc desc{};
+	desc.color.format       = caps.swapchainFormat;
+	desc.color.samples      = caps.msaaSamples;
+	desc.color.needsResolve = (caps.msaaSamples != VK_SAMPLE_COUNT_1_BIT);
+	desc.hasDepth     = true;
+	desc.depthFormat  = caps.depthFormat;
+	desc.depthSamples = caps.msaaSamples;
+	return desc;
+}
+
 void MeshRasterizer::RegisterPasses(
 	RenderGraph& graph,
 	const RenderContext& ctx,
-	ImageHandle colorTarget,
-	ImageHandle depthTarget,
-	ImageHandle resolveTarget)
+	const TechniqueTargets& targets)
 {
 	m_device = ctx.device;
 	m_allocator = ctx.allocator;
@@ -59,9 +68,9 @@ void MeshRasterizer::RegisterPasses(
 	m_bindings->Build();
 
 	graph.AddGraphicsPass("Mesh Scene")
-		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
-		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
-		.SetResolveTarget(resolveTarget)
+		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
+		.SetResolveTarget(targets.resolve)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/shader_rast.vert.spv";

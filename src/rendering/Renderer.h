@@ -58,21 +58,22 @@ public:
 		VWrap::FrameController& fc,
 		std::function<void(PassContext&)> presentRecordFn);
 
-	// Direct access to the resolved scene image view.
-	std::shared_ptr<VWrap::ImageView> GetSceneResolveView() const;
-
 	// Access to graph resources (for screenshot capture, ImGui texture registration).
 	RenderGraph& GetGraph() { return m_graph; }
 	const RenderGraph& GetGraph() const { return m_graph; }
 
-	ImageHandle GetSceneResolve() const { return m_sceneResolve; }
-	// The final image handed to the UI pass — equals m_sceneResolve if the
-	// post-process chain is empty/fully-disabled, otherwise the output of the
-	// last enabled effect. Use this for screenshot capture and ImGui viewport
-	// registration so the user sees the post-processed result.
+	// The final image handed to the UI pass — the post-processed scene if the
+	// chain is non-empty, otherwise the technique's chosen scene-output handle
+	// (resolve target if MSAA, color target otherwise). Use this for screenshot
+	// capture and ImGui viewport registration so the user sees what the chain
+	// actually produced.
 	ImageHandle GetFinalScene() const { return m_finalScene; }
 	std::shared_ptr<VWrap::ImageView> GetFinalSceneView() const;
 	VkExtent2D GetOffscreenExtent() const { return m_offscreenExtent; }
+
+	// Capabilities exposed to techniques so DescribeTargets() can pick formats /
+	// sample counts that match the Renderer's swapchain & MSAA configuration.
+	RendererCaps GetCaps() const;
 
 	PostProcessChain& GetPostProcess() { return m_postProcess; }
 	const PostProcessChain& GetPostProcess() const { return m_postProcess; }
@@ -81,13 +82,21 @@ public:
 	const SceneLighting& GetLighting() const { return m_lighting; }
 
 private:
+	// Allocate scene images (color/depth/resolve) according to a technique's
+	// declared target needs, returning the handles the technique receives via
+	// RegisterPasses. The "scene output" handle (resolve if MSAA, else color)
+	// is also returned so Build() can thread it into the post-process chain.
+	struct AllocatedTargets {
+		TechniqueTargets handles;
+		ImageHandle      sceneOutput;   // = handles.resolve if valid, else handles.color
+	};
+	AllocatedTargets AllocateTargets(const RenderTargetDesc& desc, VkExtent2D extent);
+
 	RendererConfig m_config{};
 	RenderGraph m_graph;
 
-	ImageHandle m_sceneColor;
-	ImageHandle m_sceneDepth;
-	ImageHandle m_sceneResolve;
-	ImageHandle m_finalScene;   // output of the post-process chain (or m_sceneResolve if empty)
+	TechniqueTargets m_targets{};   // shape allocated for the active technique this build
+	ImageHandle m_finalScene;       // output of the post-process chain (or scene output if empty)
 	ImageHandle m_swapchain;
 	VkExtent2D m_offscreenExtent{};
 

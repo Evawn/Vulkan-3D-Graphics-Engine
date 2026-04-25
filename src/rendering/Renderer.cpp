@@ -6,6 +6,38 @@ Renderer::Renderer(const RendererConfig& config)
 	, m_graph(config.device, config.allocator)
 {}
 
+RendererCaps Renderer::GetCaps() const {
+	RendererCaps caps{};
+	caps.swapchainFormat   = m_config.swapchainFormat;
+	caps.depthFormat       = m_config.depthFormat;
+	caps.msaaSamples       = m_config.msaaSamples;
+	caps.maxFramesInFlight = m_config.maxFramesInFlight;
+	return caps;
+}
+
+Renderer::AllocatedTargets Renderer::AllocateTargets(const RenderTargetDesc& desc, VkExtent2D extent) {
+	AllocatedTargets out{};
+
+	out.handles.color = m_graph.CreateImage("scene_color", {
+		extent.width, extent.height, 1,
+		desc.color.format, desc.color.samples });
+
+	if (desc.color.needsResolve) {
+		out.handles.resolve = m_graph.CreateImage("scene_resolve", {
+			extent.width, extent.height, 1,
+			desc.color.format, VK_SAMPLE_COUNT_1_BIT });
+	}
+
+	if (desc.hasDepth) {
+		out.handles.depth = m_graph.CreateImage("scene_depth", {
+			extent.width, extent.height, 1,
+			desc.depthFormat, desc.depthSamples });
+	}
+
+	out.sceneOutput = desc.color.needsResolve ? out.handles.resolve : out.handles.color;
+	return out;
+}
+
 void Renderer::Build(
 	RenderTechnique* technique,
 	const RenderContext& ctx,
@@ -27,23 +59,17 @@ void Renderer::Build(
 	ppCtx.lighting = &m_lighting;
 	m_postProcess.SetContext(ppCtx);
 
-	// Create scene images (MSAA color, depth, resolve)
-	m_sceneColor = m_graph.CreateImage("scene_color", {
-		m_offscreenExtent.width, m_offscreenExtent.height, 1,
-		m_config.swapchainFormat, m_config.msaaSamples });
-	m_sceneDepth = m_graph.CreateImage("scene_depth", {
-		m_offscreenExtent.width, m_offscreenExtent.height, 1,
-		m_config.depthFormat, m_config.msaaSamples });
-	m_sceneResolve = m_graph.CreateImage("scene_resolve", {
-		m_offscreenExtent.width, m_offscreenExtent.height, 1,
-		m_config.swapchainFormat });
+	// Ask the technique what scene-image stack it needs, then allocate it.
+	RenderTargetDesc desc = technique->DescribeTargets(GetCaps());
+	auto allocated = AllocateTargets(desc, m_offscreenExtent);
+	m_targets = allocated.handles;
 
-	// Register technique passes
-	technique->RegisterPasses(m_graph, ctx, m_sceneColor, m_sceneDepth, m_sceneResolve);
+	// Register technique passes against the allocated targets
+	technique->RegisterPasses(m_graph, ctx, m_targets);
 
-	// Register post-process passes; chain threads sceneResolve through any
-	// enabled effects and returns the final scene image.
-	m_finalScene = m_postProcess.Register(m_graph, m_sceneResolve, m_offscreenExtent);
+	// Register post-process passes; chain threads the technique's scene output
+	// through any enabled effects and returns the final scene image.
+	m_finalScene = m_postProcess.Register(m_graph, allocated.sceneOutput, m_offscreenExtent);
 
 	// Import swapchain image (updated per-frame)
 	m_swapchain = m_graph.ImportImage("swapchain",
@@ -100,10 +126,6 @@ void Renderer::Rebuild(
 	auto swapchainView = fc.GetImageViews()[0];
 	auto swapchainExtent = fc.GetSwapchain()->GetExtent();
 	Build(technique, ctx, swapchainView, swapchainExtent, std::move(presentRecordFn));
-}
-
-std::shared_ptr<VWrap::ImageView> Renderer::GetSceneResolveView() const {
-	return m_graph.GetImageView(m_sceneResolve);
 }
 
 std::shared_ptr<VWrap::ImageView> Renderer::GetFinalSceneView() const {

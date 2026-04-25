@@ -74,12 +74,12 @@ private:
 public:
 	std::string GetDisplayName() const override { return "Mesh Rasterizer"; }
 
+	RenderTargetDesc DescribeTargets(const RendererCaps& caps) const override;
+
 	void RegisterPasses(
 		RenderGraph& graph,
 		const RenderContext& ctx,
-		ImageHandle colorTarget,
-		ImageHandle depthTarget,
-		ImageHandle resolveTarget) override;
+		const TechniqueTargets& targets) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
 

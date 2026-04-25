@@ -13,9 +13,9 @@
 #include "Camera.h"
 #include "Inspectable.h"
 #include "AppEvent.h"
+#include "RenderGraphTypes.h"
 
 class RenderGraph;
-struct ImageHandle;
 struct SceneLighting;
 
 struct RenderContext {
@@ -29,6 +29,37 @@ struct RenderContext {
 	SceneLighting* lighting = nullptr;  // shared, non-owning; renderer-owned state
 };
 
+// Capabilities the Renderer exposes to techniques so DescribeTargets() can pick
+// matching formats / sample counts without each technique hardcoding them.
+struct RendererCaps {
+	VkFormat              swapchainFormat = VK_FORMAT_UNDEFINED;
+	VkFormat              depthFormat     = VK_FORMAT_UNDEFINED;
+	VkSampleCountFlagBits msaaSamples     = VK_SAMPLE_COUNT_1_BIT;
+	uint32_t              maxFramesInFlight = 1;
+};
+
+// What the technique tells the Renderer to allocate for it. The Renderer owns
+// the images; the technique is handed the resulting handles via TechniqueTargets.
+struct RenderTargetDesc {
+	struct ColorAttachment {
+		VkFormat              format       = VK_FORMAT_UNDEFINED;
+		VkSampleCountFlagBits samples      = VK_SAMPLE_COUNT_1_BIT;
+		bool                  needsResolve = false;   // non-1x samples → also allocate a 1x resolve target
+	};
+	ColorAttachment       color{};
+	bool                  hasDepth     = false;
+	VkFormat              depthFormat  = VK_FORMAT_UNDEFINED;
+	VkSampleCountFlagBits depthSamples = VK_SAMPLE_COUNT_1_BIT;
+};
+
+// What the Renderer hands back after allocating the targets. Handles for any
+// attachment the technique didn't request stay default-constructed (id == UINT32_MAX).
+struct TechniqueTargets {
+	ImageHandle color;
+	ImageHandle resolve;       // valid only when desc.color.needsResolve
+	ImageHandle depth;         // valid only when desc.hasDepth
+};
+
 class RenderTechnique : public IInspectable {
 public:
 	virtual ~RenderTechnique() = default;
@@ -36,12 +67,15 @@ public:
 	// IInspectable: GetDisplayName, GetParameters
 
 	// ---- Rendering ----
+	// Tell the Renderer what scene-image stack this technique needs. Called once
+	// per graph build, before RegisterPasses. The Renderer allocates the images
+	// and passes the handles back via RegisterPasses(...).
+	virtual RenderTargetDesc DescribeTargets(const RendererCaps& caps) const = 0;
+
 	virtual void RegisterPasses(
 		RenderGraph& graph,
 		const RenderContext& ctx,
-		ImageHandle colorTarget,
-		ImageHandle depthTarget,
-		ImageHandle resolveTarget) = 0;
+		const TechniqueTargets& targets) = 0;
 
 	// Called once after graph.Compile(); resources allocated by the graph are now
 	// available. BindingTable handles descriptor writes automatically — this hook

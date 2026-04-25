@@ -67,12 +67,12 @@ private:
 public:
 	std::string GetDisplayName() const override { return "Brickmap Palette Renderer"; }
 
+	RenderTargetDesc DescribeTargets(const RendererCaps& caps) const override;
+
 	void RegisterPasses(
 		RenderGraph& graph,
 		const RenderContext& ctx,
-		ImageHandle colorTarget,
-		ImageHandle depthTarget,
-		ImageHandle resolveTarget) override;
+		const TechniqueTargets& targets) override;
 
 	void Reload(const RenderContext& ctx) override;
 

@@ -27,12 +27,21 @@ struct AnimatedGeometryTracePC {
 static_assert(sizeof(AnimatedGeometryTracePC) == 160,
 	"AnimatedGeometryTracePC must stay in std140 layout — 160 bytes");
 
+RenderTargetDesc AnimatedGeometryRenderer::DescribeTargets(const RendererCaps& caps) const {
+	RenderTargetDesc desc{};
+	desc.color.format       = caps.swapchainFormat;
+	desc.color.samples      = caps.msaaSamples;
+	desc.color.needsResolve = (caps.msaaSamples != VK_SAMPLE_COUNT_1_BIT);
+	desc.hasDepth     = true;
+	desc.depthFormat  = caps.depthFormat;
+	desc.depthSamples = caps.msaaSamples;
+	return desc;
+}
+
 void AnimatedGeometryRenderer::RegisterPasses(
 	RenderGraph& graph,
 	const RenderContext& ctx,
-	ImageHandle colorTarget,
-	ImageHandle depthTarget,
-	ImageHandle resolveTarget)
+	const TechniqueTargets& targets)
 {
 	auto logger = spdlog::get("Render");
 	m_device = ctx.device;
@@ -110,9 +119,9 @@ void AnimatedGeometryRenderer::RegisterPasses(
 
 	// Graphics pass: single-level DDA fragment shader.
 	graph.AddGraphicsPass("Animated Geometry Trace")
-		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
-		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
-		.SetResolveTarget(resolveTarget)
+		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
+		.SetResolveTarget(targets.resolve)
 		.Read(m_volume, ResourceUsage::SampledRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};

@@ -34,12 +34,21 @@ struct BrickmapPaletteTracePC {
 static_assert(sizeof(BrickmapPaletteTracePC) == 144,
 	"BrickmapPaletteTracePC must stay in std140 layout — 144 bytes");
 
+RenderTargetDesc BrickmapPaletteRenderer::DescribeTargets(const RendererCaps& caps) const {
+	RenderTargetDesc desc{};
+	desc.color.format       = caps.swapchainFormat;
+	desc.color.samples      = caps.msaaSamples;
+	desc.color.needsResolve = (caps.msaaSamples != VK_SAMPLE_COUNT_1_BIT);
+	desc.hasDepth     = true;
+	desc.depthFormat  = caps.depthFormat;
+	desc.depthSamples = caps.msaaSamples;
+	return desc;
+}
+
 void BrickmapPaletteRenderer::RegisterPasses(
 	RenderGraph& graph,
 	const RenderContext& ctx,
-	ImageHandle colorTarget,
-	ImageHandle depthTarget,
-	ImageHandle resolveTarget)
+	const TechniqueTargets& targets)
 {
 	auto logger = spdlog::get("Render");
 	m_device = ctx.device;
@@ -177,9 +186,9 @@ void BrickmapPaletteRenderer::RegisterPasses(
 
 	// Graphics pass: brickmap two-level DDA ray-march with palette colors
 	graph.AddGraphicsPass("Brickmap Palette Trace")
-		.SetColorAttachment(colorTarget, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
-		.SetDepthAttachment(depthTarget, LoadOp::Clear, StoreOp::DontCare)
-		.SetResolveTarget(resolveTarget)
+		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
+		.SetResolveTarget(targets.resolve)
 		.Read(m_brickmap_buffer, ResourceUsage::StorageRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};

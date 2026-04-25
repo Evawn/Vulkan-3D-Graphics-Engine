@@ -1,6 +1,7 @@
 #include "Application.h"
-#include "ShaderCompiler.h"
-#include "ScreenshotCapture.h"
+#include "MeshRasterizer.h"
+#include "BrickmapPaletteRenderer.h"
+#include "AnimatedGeometryRenderer.h"
 #include "post-process/BloomEffect.h"
 #include "post-process/LensFlareEffect.h"
 
@@ -18,50 +19,50 @@ void Application::Init() {
 	m_editor.InitImGui(m_vk, m_presentation_render_pass, *m_window);
 
 	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
-	m_offscreen_extent = extent;
-
-	// Create renderer
-	RendererConfig rendererConfig{};
-	rendererConfig.device = m_vk.device;
-	rendererConfig.allocator = m_vk.allocator;
-	rendererConfig.msaaSamples = m_vk.msaaSamples;
-	rendererConfig.swapchainFormat = m_vk.frameController->GetSwapchain()->GetFormat();
-	rendererConfig.depthFormat = VWrap::FindDepthFormat(m_vk.physicalDevice->Get());
-	rendererConfig.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
-	m_renderer = Renderer(rendererConfig);
-
-	// Register default post-process effects. Order matters: bloom first (operates
-	// on the raw scene-with-sun), lens flare second (overlays ghosts on top of
-	// the bloomed image so halos interact visually with the ghosts).
-	m_renderer.GetPostProcess().AddEffect(std::make_unique<BloomEffect>());
-	m_renderer.GetPostProcess().AddEffect(std::make_unique<LensFlareEffect>());
 
 	spdlog::get("App")->debug("Creating camera...");
 	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
 
+	// Bring up the rendering system (owns Renderer + technique list + event queue + profiler)
+	RenderingSystemConfig rsc{};
+	rsc.vk                     = &m_vk;
+	rsc.maxFramesInFlight      = MAX_FRAMES_IN_FLIGHT;
+	rsc.camera                 = m_camera;
+	rsc.initialOffscreenExtent = extent;
+	m_rendering.Init(rsc);
+
+	// Register default post-process effects. Order matters: bloom first (operates
+	// on the raw scene-with-sun), lens flare second (overlays ghosts on top of
+	// the bloomed image so halos interact visually with the ghosts).
+	m_rendering.AddPostProcessEffect(std::make_unique<BloomEffect>());
+	m_rendering.AddPostProcessEffect(std::make_unique<LensFlareEffect>());
+
 	spdlog::get("App")->debug("Initializing renderers...");
-	m_renderers.push_back(std::make_unique<BrickmapPaletteRenderer>());
-	m_renderers.push_back(std::make_unique<AnimatedGeometryRenderer>());
-	m_renderers.push_back(std::make_unique<MeshRasterizer>());
-	m_active_renderer_index = 0;
+	m_rendering.AddTechnique(std::make_unique<BrickmapPaletteRenderer>());
+	m_rendering.AddTechnique(std::make_unique<AnimatedGeometryRenderer>());
+	m_rendering.AddTechnique(std::make_unique<MeshRasterizer>());
 
-	// Wire each technique's event sink so it can post AppEvents (reload, rebuild,
-	// pipeline recreate) without polling flags.
-	for (auto& tech : m_renderers) {
-		tech->SetEventSink([this](AppEvent e) { PushEvent(e); });
-	}
+	// Wire UI record + before/after rebuild hooks BEFORE first build runs, so
+	// the initial graph already has the ImGui draw callback wired in.
+	m_rendering.SetUiRecord([this](PassContext& ctx) { m_editor.CmdDraw(ctx.cmd); });
+	m_rendering.SetOnBeforeGraphRebuild([this] {
+		m_editor.RemoveSceneTexture();
+	});
+	m_rendering.SetOnAfterGraphRebuild([this] {
+		m_editor.RegisterSceneTexture(m_rendering.GetFinalSceneView());
+		m_editor.SetGraphSnapshot(m_rendering.GetGraphSnapshot());
+	});
+	m_rendering.SetOnScreenshotSaved([this](const std::string& path) {
+		m_editor.SetLastScreenshotPath(path);
+	});
 
-	BuildRenderGraph();
-
-	spdlog::get("App")->debug("Creating GPU profiler...");
-	m_gpu_profiler = GPUProfiler::Create(m_vk.device, MAX_FRAMES_IN_FLIGHT);
-	spdlog::get("App")->debug("GPU profiler created");
+	m_rendering.BuildInitialGraph();
 
 	// Camera controller owns input polling and camera movement
 	Input::Init(m_window->GetRaw());
 	m_camera_controller = CameraController::Create(m_camera);
 	m_camera_controller->SetReloadCallback([this]() {
-		PushEvent({AppEventType::HotReloadShaders});
+		m_rendering.RequestReload();
 	});
 	m_camera_controller->SetToggleViewportOnlyCallback([this]() {
 		auto* s = m_editor.GetState();
@@ -75,23 +76,19 @@ void Application::Init() {
 		m_editor.GetState()->camera_focused = focused;
 	});
 
-	// Initialize panels (needs camera, controller, renderers)
-	m_editor.InitPanels(&m_renderers, &m_active_renderer_index, m_camera, m_camera_controller, m_vk);
+	// Initialize panels (needs camera, controller, technique list)
+	m_editor.InitPanels(&m_rendering.GetTechniques(),
+	                    m_rendering.GetActiveTechniqueIndexPtr(),
+	                    m_camera, m_camera_controller, m_vk);
 
 	// Wire scene lighting + post-process chain into the inspector so ImGui can edit them.
-	m_editor.SetLighting(&m_renderer.GetLighting());
-	m_editor.SetPostProcess(&m_renderer.GetPostProcess());
+	m_editor.SetLighting(&m_rendering.GetLighting());
+	m_editor.SetPostProcess(&m_rendering.GetPostProcess());
 
-	// Wire editor callbacks to event queue
-	m_editor.SetReloadCallback([this]() {
-		PushEvent({AppEventType::HotReloadShaders});
-	});
-	m_editor.SetSwitchCallback([this](size_t idx) {
-		PushEvent({AppEventType::SwitchRenderer, idx});
-	});
-	m_editor.SetScreenshotCallback([this]() {
-		PushEvent({AppEventType::CaptureScreenshot});
-	});
+	// Editor-issued requests fan out into the rendering event queue.
+	m_editor.SetReloadCallback    ([this] { m_rendering.RequestReload(); });
+	m_editor.SetSwitchCallback    ([this](size_t idx) { m_rendering.RequestSwitchTechnique(idx); });
+	m_editor.SetScreenshotCallback([this] { m_rendering.RequestScreenshot(); });
 
 	m_state = AppState::Running;
 }
@@ -99,7 +96,7 @@ void Application::Init() {
 void Application::InitVulkan() {
 	m_vk = VWrap::VulkanContext::Create(m_window->GetHandle(), ENABLE_VALIDATION_LAYERS, MAX_FRAMES_IN_FLIGHT);
 
-	m_vk.frameController->SetResizeCallback([this]() { Resize(); });
+	m_vk.frameController->SetResizeCallback([this]() { m_rendering.HandleSwapchainResize(); });
 
 	m_window->SetFramebufferResizeCallback([this]() {
 		m_vk.frameController->SetResized(true);
@@ -107,32 +104,12 @@ void Application::InitVulkan() {
 		m_editor.GetState()->layout_dirty = true;
 	});
 	m_window->SetContentScaleCallback([this](float scale) {
-		PushEvent({AppEventType::DpiChanged, 0, scale});
+		// DPI changes are pure UI state — no graph rebuild, no device idle needed.
+		m_editor.OnDpiChanged(scale);
 	});
 
 	VkFormat swapchainFormat = m_vk.frameController->GetSwapchain()->GetFormat();
 	m_presentation_render_pass = VWrap::RenderPass::CreatePresentation(m_vk.device, swapchainFormat);
-}
-
-void Application::BuildRenderGraph() {
-	m_renderer.Rebuild(
-		m_renderers[m_active_renderer_index].get(),
-		BuildRenderContext(),
-		*m_vk.frameController,
-		[this](PassContext& ctx) {
-			m_editor.CmdDraw(ctx.cmd);
-		});
-
-	// Pipelines are owned by the graph and built inside Compile() against the
-	// canonical render passes — no post-build pipeline recreation needed.
-
-	m_editor.RegisterSceneTexture(m_renderer.GetFinalSceneView());
-
-	// Update profiler pass count and graph snapshot for dev tooling panel
-	if (m_gpu_profiler)
-		m_gpu_profiler->SetPassCount(static_cast<uint32_t>(m_renderer.GetGraph().GetPassCount()));
-	m_graphSnapshot = m_renderer.GetGraph().BuildSnapshot();
-	m_editor.SetGraphSnapshot(&m_graphSnapshot);
 }
 
 void Application::MainLoop() {
@@ -144,7 +121,7 @@ void Application::MainLoop() {
 		last_time = current_time;
 
 		m_camera_controller->Update(dt);
-		ProcessEvents();
+		m_rendering.ProcessEvents();
 
 		// Click to capture viewport
 		if (!m_camera_controller->IsFocused() && m_editor.ViewportWasClicked()) {
@@ -160,8 +137,9 @@ void Application::MainLoop() {
 		m_editor.UpdateViewportTexture();
 		m_editor.BeginFrame();
 		DrawFrame();
-		m_editor.UpdateMetrics(m_last_metrics.fps, m_last_metrics.render_time, dt * 1000.0f);
-		m_editor.SetPerformanceMetrics(&m_last_metrics);
+		m_metrics_snapshot = m_rendering.GetLastMetrics();
+		m_editor.UpdateMetrics(m_metrics_snapshot.fps, m_metrics_snapshot.render_time, dt * 1000.0f);
+		m_editor.SetPerformanceMetrics(&m_metrics_snapshot);
 	}
 	vkDeviceWaitIdle(m_vk.device->Get());
 }
@@ -172,85 +150,14 @@ void Application::Cleanup() {
 	m_window->Destroy();
 }
 
-void Application::PushEvent(AppEvent event) {
-	m_events.push_back(event);
-}
-
-static bool EventNeedsDeviceIdle(AppEventType type) {
-	switch (type) {
-		case AppEventType::HotReloadShaders:
-		case AppEventType::SwitchRenderer:
-		case AppEventType::DpiChanged:
-		case AppEventType::ReloadTechnique:
-		case AppEventType::RebuildGraph:
-		case AppEventType::RecreatePipelines:
-			return true;
-		case AppEventType::CaptureScreenshot:
-			return false;
-	}
-	return false;
-}
-
-void Application::DispatchEvent(const AppEvent& event) {
-	switch (event.type) {
-		case AppEventType::HotReloadShaders:
-			HotReloadShaders();
-			break;
-		case AppEventType::SwitchRenderer:
-			SwitchRenderer(event.index);
-			break;
-		case AppEventType::DpiChanged:
-			m_editor.OnDpiChanged(event.scale);
-			break;
-		case AppEventType::CaptureScreenshot:
-			CaptureScreenshot();
-			break;
-		case AppEventType::ReloadTechnique:
-			m_renderers[m_active_renderer_index]->Reload(BuildRenderContext());
-			break;
-		case AppEventType::RebuildGraph:
-			m_editor.RemoveSceneTexture();
-			BuildRenderGraph();
-			break;
-		case AppEventType::RecreatePipelines:
-			m_renderer.GetGraph().RecreatePipelines();
-			break;
-	}
-}
-
-void Application::ProcessEvents() {
-	// Drain in a loop: dispatched events (e.g. ReloadTechnique → RebuildGraph)
-	// can post follow-ups, and we want them handled in the same tick.
-	while (!m_events.empty()) {
-		auto batch = std::move(m_events);
-		m_events.clear();
-
-		bool needs_idle = false;
-		for (const auto& e : batch) {
-			if (EventNeedsDeviceIdle(e.type)) { needs_idle = true; break; }
-		}
-		if (needs_idle) {
-			vkDeviceWaitIdle(m_vk.device->Get());
-		}
-
-		for (const auto& event : batch) {
-			DispatchEvent(event);
-		}
-	}
-}
-
 void Application::DrawFrame() {
 
 	// Handle viewport resize from panel
 	if (m_editor.ViewportWasResized()) {
 		VkExtent2D desired = m_editor.GetDesiredViewportExtent();
 		if (desired.width > 0 && desired.height > 0) {
-			vkDeviceWaitIdle(m_vk.device->Get());
-			m_editor.RemoveSceneTexture();
-			m_offscreen_extent = desired;
-			m_renderer.OnViewportResize(desired, m_renderers[m_active_renderer_index].get());
+			m_rendering.HandleViewportResize(desired);
 			m_camera->SetAspect((float)desired.width / (float)desired.height);
-			m_editor.RegisterSceneTexture(m_renderer.GetFinalSceneView());
 		}
 	}
 
@@ -260,105 +167,15 @@ void Application::DrawFrame() {
 	uint32_t frame_index = m_vk.frameController->GetCurrentFrame();
 	auto command_buffer = m_vk.frameController->GetCurrentCommandBuffer();
 
-	// Read metrics from previous cycle (fence wait in AcquireNext guarantees GPU work done)
-	m_last_metrics = m_gpu_profiler->GetMetrics(frame_index);
-
 	// Update swapchain import for current image
-	m_renderer.UpdateSwapchainView(m_vk.frameController->GetImageViews()[image_index]);
+	m_rendering.UpdateSwapchainView(m_vk.frameController->GetImageViews()[image_index]);
 
 	command_buffer->Begin();
-
-	m_gpu_profiler->CmdBegin(command_buffer, frame_index);
-	m_renderer.Execute(command_buffer, frame_index, m_gpu_profiler.get());
-	m_gpu_profiler->CmdEnd(command_buffer, frame_index);
-
+	m_rendering.DrawFrame(command_buffer, frame_index);
 	if (vkEndCommandBuffer(command_buffer->Get()) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to end command buffer recording!");
 	}
 
 	// PRESENT ------------------------------------------------
 	m_vk.frameController->Render();
-}
-
-void Application::Resize() {
-	// Swapchain resized — rebuild the graph so the UI pass gets new swapchain framebuffers.
-	// Scene offscreen resources keep their current m_offscreen_extent.
-	BuildRenderGraph();
-}
-
-void Application::HotReloadShaders() {
-	auto logger = spdlog::get("Render");
-	logger->info("Hot-reloading shaders...");
-
-	auto& renderer = m_renderers[m_active_renderer_index];
-	auto spvPaths = renderer->GetShaderPaths();
-	// Include post-process shaders so hot-reload affects bloom/flare too.
-	auto ppPaths = m_renderer.GetPostProcess().GetShaderPaths();
-	spvPaths.insert(spvPaths.end(), ppPaths.begin(), ppPaths.end());
-
-	auto results = ShaderCompiler::CompileAll(spvPaths);
-
-	bool allSuccess = true;
-	for (const auto& r : results) {
-		if (!r.success) {
-			allSuccess = false;
-			break;
-		}
-	}
-
-	if (!allSuccess) {
-		logger->warn("Shader compilation failed - keeping old pipeline");
-		return;
-	}
-
-	// One graph-level call rebuilds every owned pipeline (technique + effects).
-	m_renderer.GetGraph().RecreatePipelines();
-	logger->info("Pipeline recreated successfully");
-}
-
-void Application::SwitchRenderer(size_t index) {
-	if (index >= m_renderers.size() || index == m_active_renderer_index) return;
-
-	auto logger = spdlog::get("App");
-	logger->info("Switching renderer to: {}", m_renderers[index]->GetDisplayName());
-
-	m_editor.RemoveSceneTexture();
-	m_active_renderer_index = index;
-	BuildRenderGraph();
-
-	logger->info("Switched to: {}", m_renderers[index]->GetDisplayName());
-}
-
-void Application::CaptureScreenshot() {
-	auto& graph = m_renderer.GetGraph();
-	// Capture the post-processed output so the screenshot matches what the user
-	// sees in the viewport (sun + bloom + flare included).
-	auto finalScene = m_renderer.GetFinalScene();
-	auto resolveImage = graph.GetImage(finalScene);
-	auto resolveDesc = graph.GetImageDesc(finalScene);
-	VkFormat format = graph.GetImageFormat(finalScene);
-	VkExtent2D extent = { resolveDesc.width, resolveDesc.height };
-
-	auto path = ScreenshotCapture::Capture(
-		m_vk.device, m_vk.allocator, m_vk.graphicsCommandPool,
-		resolveImage, format, extent);
-	if (!path.empty()) {
-		m_editor.SetLastScreenshotPath(path);
-	}
-}
-
-RenderContext Application::BuildRenderContext() const {
-	RenderContext ctx{};
-	ctx.device = m_vk.device;
-	ctx.allocator = m_vk.allocator;
-	ctx.graphicsPool = m_vk.graphicsCommandPool;
-	ctx.computePool = m_vk.computeCommandPool;
-	ctx.extent = m_offscreen_extent;
-	ctx.maxFramesInFlight = MAX_FRAMES_IN_FLIGHT;
-	ctx.camera = m_camera;
-	// const_cast: RenderContext stores a non-const pointer because techniques may
-	// eventually write to lighting (e.g. sync-to-time-of-day hooks). The Renderer
-	// itself owns the state; the constness here is incidental.
-	ctx.lighting = const_cast<SceneLighting*>(&m_renderer.GetLighting());
-	return ctx;
 }
