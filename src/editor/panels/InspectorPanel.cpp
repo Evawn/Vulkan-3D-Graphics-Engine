@@ -2,6 +2,7 @@
 #include "UIStyle.h"
 #include "FileDialog.h"
 #include "post-process/PostProcessChain.h"
+#include "Scene.h"
 
 void InspectorPanel::SetRenderers(
 	std::vector<std::unique_ptr<RenderTechnique>>* renderers,
@@ -29,6 +30,16 @@ static void DrawTechniqueParameter(TechniqueParameter& param) {
 	case TechniqueParameter::Color4:
 		changed = ImGui::ColorEdit4(param.label.c_str(), static_cast<float*>(param.data));
 		break;
+	case TechniqueParameter::Vec3:
+		changed = ImGui::DragFloat3(param.label.c_str(), static_cast<float*>(param.data),
+		                            param.speed, param.min, param.max, "%.3f");
+		break;
+	case TechniqueParameter::Text: {
+		// Read-only text row: dim label + dim value.
+		const char* val = param.textValue ? param.textValue->c_str() : "";
+		ImGui::TextColored(UIStyle::kTextDim, "%s: %s", param.label.c_str(), val);
+		return;
+	}
 	case TechniqueParameter::Enum: {
 		int* val = static_cast<int*>(param.data);
 		if (!param.enumLabels.empty()) {
@@ -63,6 +74,21 @@ static void DrawTechniqueParameter(TechniqueParameter& param) {
 
 void InspectorPanel::Draw() {
 	ImGui::Begin("Inspector");
+
+	// === Selected Node === (top — most context-sensitive piece)
+	if (m_selected_node) {
+		ImGui::PushID(static_cast<const void*>(m_selected_node));
+		const std::string header = "Node: " + m_selected_node->GetDisplayName();
+		if (ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+			auto& params = m_selected_node->GetParameters();
+			if (params.empty()) {
+				ImGui::TextColored(UIStyle::kTextDim, "No parameters");
+			} else {
+				for (auto& p : params) DrawTechniqueParameter(p);
+			}
+		}
+		ImGui::PopID();
+	}
 
 	// === Technique ===
 	if (ImGui::CollapsingHeader("Technique", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -107,6 +133,11 @@ void InspectorPanel::Draw() {
 				}
 			}
 		}
+	}
+
+	// === Sky ===
+	if (m_sky && ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::ColorEdit3("Sky Color", &m_sky->color.x);
 	}
 
 	// === Lighting ===

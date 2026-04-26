@@ -10,6 +10,7 @@
 #include "VoxLoader.h"
 #include "PaletteResource.h"
 #include "SceneLighting.h"
+#include "SkyDescription.h"
 #include <chrono>
 #include <memory>
 #include <glm/glm.hpp>
@@ -46,7 +47,6 @@ private:
 	// Tunable parameters
 	int m_shape = 0;
 	int m_max_iterations = 250;
-	float m_sky_color[3] = { 0.529f, 0.808f, 0.922f };
 	bool m_debug_color = false;
 	float m_time_scale = 1.0f;
 	std::chrono::steady_clock::time_point m_start_time;
@@ -68,11 +68,12 @@ private:
 	// frame from this.
 	SceneNode*     m_node     = nullptr;
 
-	// Shared, non-owning pointer to renderer-owned lighting state. Captured from
+	// Shared, non-owning pointers to scene-owned state. Captured from
 	// RenderContext during RegisterPasses; read during per-frame record to
-	// populate sun push constants. Survives RegisterPasses lifetime because the
-	// Renderer owns it.
-	const SceneLighting* m_lighting = nullptr;
+	// populate sun + sky push constants. Survive RegisterPasses lifetime because
+	// the Scene owns them.
+	const SceneLighting*  m_lighting = nullptr;
+	const SkyDescription* m_sky      = nullptr;
 
 	std::vector<TechniqueParameter> m_parameters;
 

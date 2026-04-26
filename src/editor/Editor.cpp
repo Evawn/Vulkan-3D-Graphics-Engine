@@ -2,6 +2,7 @@
 #include "Window.h"
 #include "Log.h"
 #include "UIStyle.h"
+#include "Scene.h"
 #include <spdlog/spdlog.h>
 
 static void check_vk_result(VkResult err) {
@@ -48,7 +49,10 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 						size_t* activeRendererIndex,
 						std::shared_ptr<Camera> camera,
 						std::shared_ptr<CameraController> cameraController,
-						VWrap::VulkanContext& vk) {
+						VWrap::VulkanContext& vk,
+						Scene* scene) {
+	m_scene = scene;
+
 	// Viewport panel
 	m_viewport.SetTextureID(m_scene_texture);
 	m_viewport.SetUIState(&m_ui);
@@ -64,6 +68,12 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 	// Output panel
 	m_output.SetSink(Log::GetImGuiSink());
 	m_gui->RegisterPanel("Output", [this]() { m_output.Draw(); });
+
+	// Hierarchy panel — selection routes to Inspector. Registered before
+	// Inspector so the layout puts it above (ImGui dockspace ordering).
+	m_hierarchy.SetSelectionChangedCallback(
+		[this](SceneNode* node) { m_inspector.SetSelectedNode(node); });
+	m_gui->RegisterPanel("Hierarchy", [this]() { m_hierarchy.Draw(m_scene); });
 
 	// Inspector panel
 	m_inspector.SetRenderers(renderers, activeRendererIndex);

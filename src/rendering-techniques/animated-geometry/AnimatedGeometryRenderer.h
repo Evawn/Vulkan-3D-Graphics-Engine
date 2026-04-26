@@ -7,6 +7,7 @@
 #include "BindingTable.h"
 #include "PaletteResource.h"
 #include "SceneLighting.h"
+#include "SkyDescription.h"
 #include <chrono>
 #include <memory>
 #include <glm/glm.hpp>
@@ -52,14 +53,14 @@ private:
 	// Tunable parameters.
 	int m_pattern = 0;
 	int m_max_iterations = 250;
-	float m_sky_color[3] = { 0.529f, 0.808f, 0.922f };
 	bool m_debug_color = false;
 	float m_time_scale = 1.0f;
 	std::chrono::steady_clock::time_point m_start_time;
 
 	glm::uvec3 m_volume_size = glm::uvec3(128, 128, 128);
 
-	const SceneLighting* m_lighting = nullptr;
+	const SceneLighting*  m_lighting = nullptr;
+	const SkyDescription* m_sky      = nullptr;
 
 	std::vector<TechniqueParameter> m_parameters;
 

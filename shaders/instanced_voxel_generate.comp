@@ -1,0 +1,54 @@
+#version 450
+
+// Procedural grass-blade animation: paints `frameCount` frames of a thin
+// vertical blade swaying side-to-side. Z-slabs of a single 3D image:
+// frame `f` lives at z' = z + f * size.z. Runs once per graph rebuild
+// (the technique disables the pass on subsequent frames — animated frames
+// are static once written).
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, r8ui) uniform writeonly uimage3D volume;
+
+layout(push_constant) uniform PC {
+	int sizeX, sizeY, sizeZ;
+	int frameCount;
+} pc;
+
+uint chooseMaterial(int x, int y, int z, int frame) {
+	// Center of the volume (in single-frame coords).
+	float cx = float(pc.sizeX) * 0.5;
+	float cy = float(pc.sizeY) * 0.5;
+
+	// Sway phase per frame. tSweep ∈ [0, 1) over the animation.
+	float tSweep = float(frame) / float(max(pc.frameCount, 1));
+	float sway   = sin(tSweep * 6.28318) * float(pc.sizeX) * 0.25;
+
+	// Bend more at the top: blade tilts proportionally to z.
+	float zNorm = float(z) / float(max(pc.sizeZ - 1, 1));
+	float dx = float(x) - (cx + sway * zNorm);
+	float dy = float(y) - cy;
+
+	// Cross-section: thin rectangle (wider in y for a leaf-like profile).
+	if (abs(dx) <= 0.6 && abs(dy) <= 1.6 && z >= 0 && z < pc.sizeZ) {
+		// Color varies by z so the blade has a tip — palette index 80 for base, 70 for tip.
+		float t = zNorm;
+		uint base = 70u + uint(round(t * 10.0));    // 70..80
+		return base;
+	}
+	return 0u;
+}
+
+void main() {
+	int x = int(gl_GlobalInvocationID.x);
+	int y = int(gl_GlobalInvocationID.y);
+	int z = int(gl_GlobalInvocationID.z);
+	if (x >= pc.sizeX || y >= pc.sizeY) return;
+	if (z >= pc.sizeZ * pc.frameCount) return;
+
+	int frame = z / pc.sizeZ;
+	int zInFrame = z - frame * pc.sizeZ;
+
+	uint m = chooseMaterial(x, y, zInFrame, frame);
+	imageStore(volume, ivec3(x, y, z), uvec4(m));
+}

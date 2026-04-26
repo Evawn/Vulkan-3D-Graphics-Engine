@@ -2,6 +2,8 @@
 #include "MeshRasterizer.h"
 #include "BrickmapPaletteRenderer.h"
 #include "AnimatedGeometryRenderer.h"
+#include "InstancedVoxelTechnique.h"
+#include "Scene.h"
 #include "post-process/BloomEffect.h"
 #include "post-process/LensFlareEffect.h"
 
@@ -40,6 +42,7 @@ void Application::Init() {
 	spdlog::get("App")->debug("Initializing renderers...");
 	m_rendering.AddTechnique(std::make_unique<BrickmapPaletteRenderer>());
 	m_rendering.AddTechnique(std::make_unique<AnimatedGeometryRenderer>());
+	m_rendering.AddTechnique(std::make_unique<InstancedVoxelTechnique>());
 	m_rendering.AddTechnique(std::make_unique<MeshRasterizer>());
 
 	// Wire UI record + before/after rebuild hooks BEFORE first build runs, so
@@ -76,13 +79,19 @@ void Application::Init() {
 		m_editor.GetState()->camera_focused = focused;
 	});
 
-	// Initialize panels (needs camera, controller, technique list)
+	// Inspector asset-name resolution for SceneNode component rows. Set before
+	// InitPanels so the first GetParameters() call sees the registry.
+	SceneNode::SetAssetRegistryForInspector(&m_rendering.GetAssets());
+
+	// Initialize panels (needs camera, controller, technique list, scene)
 	m_editor.InitPanels(&m_rendering.GetTechniques(),
 	                    m_rendering.GetActiveTechniqueIndexPtr(),
-	                    m_camera, m_camera_controller, m_vk);
+	                    m_camera, m_camera_controller, m_vk,
+	                    &m_rendering.GetScene());
 
-	// Wire scene lighting + post-process chain into the inspector so ImGui can edit them.
-	m_editor.SetLighting(&m_rendering.GetLighting());
+	// Wire scene lighting + sky + post-process chain into the inspector so ImGui can edit them.
+	m_editor.SetLighting(&m_rendering.GetScene().GetLighting());
+	m_editor.SetSky     (&m_rendering.GetScene().GetSky());
 	m_editor.SetPostProcess(&m_rendering.GetPostProcess());
 
 	// Editor-issued requests fan out into the rendering event queue.

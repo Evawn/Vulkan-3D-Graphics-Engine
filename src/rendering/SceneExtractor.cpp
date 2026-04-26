@@ -55,6 +55,24 @@ void SceneExtractor::Visit(const SceneNode& node, const glm::mat4& parentWorld,
 				out.Add(item);
 				break;
 			}
+			case ComponentType::InstanceCloud: {
+				const auto* vol = assets.GetVoxelVolume(comp.asset);
+				if (!vol || vol->volumeImage.id == UINT32_MAX) break;
+				if (comp.instanceBuffer.id == UINT32_MAX) break;
+				if (comp.instanceCount == 0) break;
+				RenderItem item{};
+				item.type           = RenderItemType::InstancedVoxelMesh;
+				item.voxelAsset     = vol->volumeImage;
+				item.frameCount     = vol->frameCount;
+				item.instanceBuffer = comp.instanceBuffer;
+				item.instanceCount  = comp.instanceCount;
+				item.firstInstance  = 0;
+				item.transform      = world;
+				item.aabbMin        = comp.instanceAabbMin;
+				item.aabbMax        = comp.instanceAabbMax;
+				out.Add(item);
+				break;
+			}
 		}
 	}
 

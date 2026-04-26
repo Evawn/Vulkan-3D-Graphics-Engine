@@ -58,6 +58,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	m_graphics_pool = ctx.graphicsPool;
 	m_camera = ctx.camera;
 	m_lighting = ctx.lighting;
+	m_sky      = ctx.sky;
 	m_start_time = std::chrono::steady_clock::now();
 
 	m_graph  = &graph;
@@ -246,7 +247,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 			pc.NDCtoWorld = m_camera->GetNDCtoWorldMatrix();
 			pc.cameraPos = m_camera->GetPosition();
 			pc.maxIterations = m_max_iterations;
-			pc.skyColor = glm::vec3(m_sky_color[0], m_sky_color[1], m_sky_color[2]);
+			pc.skyColor = m_sky ? m_sky->color : glm::vec3(0.529f, 0.808f, 0.922f);
 			pc.debugColor = m_debug_color ? 1 : 0;
 			if (m_lighting) {
 				pc.sunDirection = m_lighting->GetSunDirection();
@@ -319,7 +320,6 @@ std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
 				{ "Sphere", "Torus", "Box Frame", "Cylinder", "Cone", "Octahedron", "Gyroid", "Sine Blob", "Menger Sponge" } },
 			{ "Time Scale", TechniqueParameter::Float, &m_time_scale, 0.0f, 5.0f },
 			{ "Max Iterations", TechniqueParameter::Int, &m_max_iterations, 1.0f, 500.0f },
-			{ "Sky Color", TechniqueParameter::Color3, m_sky_color },
 			{ "Debug Coloring", TechniqueParameter::Bool, &m_debug_color },
 		};
 

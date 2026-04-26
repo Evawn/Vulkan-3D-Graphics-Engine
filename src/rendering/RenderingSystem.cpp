@@ -66,12 +66,14 @@ RenderContext RenderingSystem::BuildRenderContext() const {
 	// shared_ptr is the same one Application created and drives via
 	// CameraController; we just route it through the scene.
 	ctx.camera            = m_world.GetActiveCamera();
-	// Lighting / scene / world / assets all live on RenderingSystem; const_cast
-	// is incidental — RenderContext is logically a non-owning bundle, and these
-	// members are all mutable engine state.
-	ctx.lighting          = const_cast<SceneLighting*>(&m_lighting);
+	// Lighting now lives on the Scene; world / scene / assets all live on
+	// RenderingSystem. const_cast is incidental — RenderContext is logically a
+	// non-owning bundle, and these members are all mutable engine state.
+	auto* world           = const_cast<Scene*>(&m_world);
+	ctx.lighting          = &world->GetLighting();
+	ctx.sky               = &world->GetSky();
 	ctx.scene             = const_cast<RenderScene*>(&m_scene);
-	ctx.world             = const_cast<Scene*>(&m_world);
+	ctx.world             = world;
 	ctx.assets            = const_cast<AssetRegistry*>(&m_assets);
 	return ctx;
 }

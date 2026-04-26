@@ -2,6 +2,8 @@
 
 #include "AssetRegistry.h"
 #include "SceneLighting.h"
+#include "SkyDescription.h"
+#include "Inspectable.h"
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -33,16 +35,34 @@ class Camera;
 enum class ComponentType : uint8_t {
 	Mesh,
 	VoxelVolume,
+	InstanceCloud,
 };
 
 struct Component {
 	ComponentType type;
 	AssetID       asset;          // resolved against AssetRegistry by the extractor
 
-	// VoxelVolume-only — number of animation frames packed in the asset.
-	// Today this is always 1; the foliage workflow will use >1 once the
-	// animated voxel asset path lands.
+	// VoxelVolume / InstanceCloud — number of animation frames packed in the
+	// asset (Z-slabs of the volume image). Mesh ignores this.
 	uint32_t frameCount = 1;
+
+	// ---- InstanceCloud-only ----
+	//
+	// One bulk SSBO carries the per-instance state for the entire cloud:
+	// position, scale, rotation, animOffset. The technique addresses entries
+	// via firstInstance + gl_InstanceIndex. The buffer's lifetime is graph-
+	// managed (Persistent), allocated by whoever creates the cloud (typically
+	// the technique on first RegisterPasses).
+	BufferHandle instanceBuffer;
+	uint32_t     instanceCount    = 0;
+
+	// Per-instance bounding box in instance-local space (i.e. the cube each
+	// instance rasterizes). Typically (0,0,0) → (size.x, size.y, size.z) of
+	// the asset volume so the shader's BB-rasterized cube matches the volume
+	// extent. Used by the vertex shader to scale the unit cube and by future
+	// frustum culling.
+	glm::vec3 instanceAabbMin = glm::vec3(0.0f);
+	glm::vec3 instanceAabbMax = glm::vec3(0.0f);
 };
 
 // ---- SceneNode ----
@@ -55,7 +75,9 @@ struct Component {
 // edits (we don't have to invalidate raw pointers when the parent's vector
 // reallocates).
 
-class SceneNode {
+class AssetRegistry;
+
+class SceneNode : public IInspectable {
 public:
 	std::string name;
 
@@ -88,6 +110,25 @@ public:
 	// position / rotation / scale of a node high in the tree if you want
 	// downstream nodes to recompute their world transform.
 	void MarkSubtreeDirty();
+
+	// IInspectable
+	std::string                       GetDisplayName() const override;
+	std::vector<TechniqueParameter>&  GetParameters() override;
+
+	// Inspector wires this so component rows can resolve asset IDs to display
+	// names. The pointer is read on every GetParameters() rebuild — set on
+	// construction or before showing the inspector.
+	static void SetAssetRegistryForInspector(const AssetRegistry* assets);
+
+private:
+	// Editor-cached parameter rows. Built on first GetParameters() call and
+	// rebuilt whenever the component list shape changes (cached by component
+	// count). Euler angles are stored directly here because deriving them from
+	// the quaternion every frame would cause drift on edit.
+	std::vector<TechniqueParameter> m_params;
+	glm::vec3                       m_eulerDeg = glm::vec3(0.0f);
+	std::vector<std::string>        m_componentTextCache;  // backing storage for Text rows
+	size_t                          m_paramsBuiltForComponentCount = SIZE_MAX;
 };
 
 // ---- Scene ----
@@ -113,11 +154,15 @@ public:
 	SceneLighting&       GetLighting()       { return m_lighting; }
 	const SceneLighting& GetLighting() const { return m_lighting; }
 
+	SkyDescription&       GetSky()       { return m_sky; }
+	const SkyDescription& GetSky() const { return m_sky; }
+
 	std::shared_ptr<Camera> GetActiveCamera() const { return m_camera; }
 	void SetActiveCamera(std::shared_ptr<Camera> cam) { m_camera = std::move(cam); }
 
 private:
 	SceneNode               m_root;
 	SceneLighting           m_lighting;
+	SkyDescription          m_sky;
 	std::shared_ptr<Camera> m_camera;
 };

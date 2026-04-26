@@ -22,12 +22,12 @@ void DrawFullscreenItem(const PassContext& ctx, const RenderItem& item) {
 }
 
 void DrawInstancedVoxelMesh(const PassContext& ctx, const RenderItem& item, const RenderGraph& graph) {
-	// Reserved — the instanced animated voxel renderer (foliage) hasn't been
-	// built yet. The intended shape: a unit cube (provided as item.vertexBuffer/
-	// item.indexBuffer) is rasterized once per instance with item.transform
-	// scaled to (aabbMax - aabbMin), and the fragment shader DDA-traverses
-	// inward into voxelAsset using the per-instance SSBO entry pointed at by
-	// firstInstance + gl_InstanceIndex.
-	(void)ctx; (void)item; (void)graph;
-	assert(false && "DrawInstancedVoxelMesh: not implemented yet — reserved for foliage renderer");
+	// Procedural unit cube via gl_VertexIndex — no vertex/index buffers. The
+	// vertex shader reads its position from a hardcoded 36-vertex cube table
+	// (two triangles per face, 6 faces) and scales by the per-instance AABB
+	// from instance SSBO. The fragment shader DDAs into voxelAsset using the
+	// per-instance frame offset. firstInstance offsets into the instance SSBO
+	// so multiple clouds can share one buffer.
+	(void)graph;
+	ctx.cmd->CmdDraw(36, item.instanceCount, 0, item.firstInstance);
 }

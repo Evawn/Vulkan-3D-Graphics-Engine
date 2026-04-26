@@ -3,6 +3,7 @@
 #include "imgui.h"
 #include "RenderTechnique.h"
 #include "SceneLighting.h"
+#include "SkyDescription.h"
 #include "Camera.h"
 #include <vector>
 #include <memory>
@@ -10,6 +11,7 @@
 #include <string>
 
 class PostProcessChain;
+class SceneNode;
 
 class InspectorPanel {
 private:
@@ -28,8 +30,9 @@ private:
 	std::function<void()> m_screenshot_callback;
 	std::string m_last_screenshot_path;
 
-	// Lighting + post-processing (owned by Renderer; panel just edits them)
-	SceneLighting* m_lighting = nullptr;
+	// Lighting + sky + post-processing (Scene-owned; panel just edits them)
+	SceneLighting*    m_lighting = nullptr;
+	SkyDescription*   m_sky      = nullptr;
 	PostProcessChain* m_post_process = nullptr;
 
 public:
@@ -41,6 +44,15 @@ public:
 	void SetScreenshotCallback(std::function<void()> cb) { m_screenshot_callback = std::move(cb); }
 	void SetLastScreenshotPath(const std::string& path) { m_last_screenshot_path = path; }
 	void SetLighting(SceneLighting* lighting) { m_lighting = lighting; }
+	void SetSky(SkyDescription* sky)          { m_sky = sky; }
 	void SetPostProcess(PostProcessChain* chain) { m_post_process = chain; }
+
+	// Drives the "Selected Node" section. Driven by HierarchyPanel selection
+	// changes; nullptr hides the section.
+	void SetSelectedNode(SceneNode* node) { m_selected_node = node; }
+
 	void Draw();
+
+private:
+	SceneNode* m_selected_node = nullptr;
 };

@@ -70,6 +70,15 @@ struct VoxelVolumeAsset {
 	glm::uvec3  size = glm::uvec3(0);
 	VkFormat    format = VK_FORMAT_R8_UINT;
 
+	// Number of animation frames packed into the volume image. Frames are
+	// stored as Z-slabs of a single 3D image: voxel `(x, y, z)` of frame `f`
+	// lives at `(x, y, z + f * size.z)`. The image's full Z-extent is therefore
+	// `size.z * frameCount`. `frameCount == 1` is a static volume — the v1 path
+	// for .vox files and the existing brickmap-palette / animated-geometry
+	// procedural volumes. The InstancedVoxelTechnique reads frameCount per
+	// per-instance offset into time → frame index in the shader.
+	uint32_t    frameCount = 1;
+
 	// File-backed only — empty for procedural.
 	std::vector<uint8_t>           data;
 	std::array<uint8_t, 256 * 4>   palette{};
@@ -141,6 +150,26 @@ public:
 	AssetID CreateProceduralVoxelVolume(std::string name, glm::uvec3 size,
 	                                    VkFormat format = VK_FORMAT_R8_UINT,
 	                                    VkImageUsageFlags extraUsage = 0);
+
+	// Procedural animated volume — `frameCount` Z-slabs of `size`. Image is
+	// allocated as a 3D image of dimensions (size.x, size.y, size.z * frameCount).
+	// Shaders address frame `f` by sampling at z' = z + f * size.z. Used by the
+	// foliage workflow (compute writes each frame into its slab) and by the
+	// InstancedVoxelTechnique (per-instance shader picks a frame).
+	AssetID CreateProceduralAnimatedVoxelVolume(std::string name, glm::uvec3 size,
+	                                            uint32_t frameCount,
+	                                            VkFormat format = VK_FORMAT_R8_UINT,
+	                                            VkImageUsageFlags extraUsage = 0);
+
+	// File-backed animated volume — `frameCount * size.x * size.y * size.z`
+	// bytes of host data, frames packed sequentially. Reuses the .vox palette.
+	// Useful for hand-authored animated assets exported from MagicaVoxel before
+	// the foliage editor lands.
+	AssetID RegisterAnimatedVoxelAsset(std::string name, glm::uvec3 size,
+	                                   uint32_t frameCount,
+	                                   std::vector<uint8_t> framesData,
+	                                   std::array<uint8_t, 256 * 4> palette,
+	                                   std::string sourcePath = "");
 	// Resize an existing procedural volume. Returns true if size actually
 	// changed (caller should request a graph rebuild). Format stays as-is.
 	bool    ResizeProceduralVoxelVolume(AssetID id, glm::uvec3 newSize);

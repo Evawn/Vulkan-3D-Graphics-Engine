@@ -83,7 +83,7 @@ public:
 	// ---- Editor wiring ----
 	std::vector<std::unique_ptr<RenderTechnique>>& GetTechniques()        { return m_techniques; }
 	size_t* GetActiveTechniqueIndexPtr()                                  { return &m_activeIndex; }
-	SceneLighting&    GetLighting()                                       { return m_lighting; }
+	SceneLighting&    GetLighting()                                       { return m_world.GetLighting(); }
 	PostProcessChain& GetPostProcess()                                    { return m_renderer.GetPostProcess(); }
 	const GraphSnapshot* GetGraphSnapshot() const                         { return &m_graphSnapshot; }
 	GPUProfiler*      GetProfiler()                                       { return m_profiler.get(); }
@@ -138,15 +138,10 @@ private:
 	// PassContext (record-time) so passes consume what extraction emits.
 	RenderScene m_scene;
 
-	// Scene-wide lighting state. Owned here as the staging point for the future
-	// Scene module — the eventual Scene will own this, but for now RenderingSystem
-	// is the canonical owner. Techniques and post-process effects access it via
-	// RenderContext::lighting / PostProcessContext::lighting.
-	SceneLighting m_lighting{};
-
 	// World state: source-of-truth scene tree, owned here. Techniques and the
 	// application populate it during Init / on file picks; the extractor walks
-	// it every frame to fill m_scene.
+	// it every frame to fill m_scene. Lighting + sky now live on the Scene
+	// (RenderingSystem::GetLighting() forwards to m_world.GetLighting()).
 	Scene m_world;
 
 	// Engine-wide asset storage. Techniques register their assets here; the

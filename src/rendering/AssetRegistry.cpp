@@ -106,7 +106,47 @@ AssetID AssetRegistry::CreateProceduralVoxelVolume(std::string name, glm::uvec3 
 	v.isProcedural = true;
 	v.size         = size;
 	v.format       = format;
+	v.frameCount   = 1;
 	v.needsUpload  = false;
+	m_volumes.push_back(std::move(v));
+	if (m_currentGraph) DeclareVolume(m_volumes.back(), *m_currentGraph);
+	return AssetID{ static_cast<uint32_t>(m_volumes.size() - 1), AssetID::Type::VoxelVolume };
+}
+
+AssetID AssetRegistry::CreateProceduralAnimatedVoxelVolume(std::string name, glm::uvec3 size,
+                                                           uint32_t frameCount,
+                                                           VkFormat format,
+                                                           VkImageUsageFlags extraUsage)
+{
+	(void)extraUsage;
+	VoxelVolumeAsset v{};
+	v.name         = std::move(name);
+	v.isProcedural = true;
+	v.size         = size;
+	v.format       = format;
+	v.frameCount   = std::max<uint32_t>(frameCount, 1);
+	v.needsUpload  = false;
+	m_volumes.push_back(std::move(v));
+	if (m_currentGraph) DeclareVolume(m_volumes.back(), *m_currentGraph);
+	return AssetID{ static_cast<uint32_t>(m_volumes.size() - 1), AssetID::Type::VoxelVolume };
+}
+
+AssetID AssetRegistry::RegisterAnimatedVoxelAsset(std::string name, glm::uvec3 size,
+                                                  uint32_t frameCount,
+                                                  std::vector<uint8_t> framesData,
+                                                  std::array<uint8_t, 256 * 4> palette,
+                                                  std::string sourcePath)
+{
+	VoxelVolumeAsset v{};
+	v.name         = std::move(name);
+	v.sourcePath   = std::move(sourcePath);
+	v.isProcedural = false;
+	v.size         = size;
+	v.format       = VK_FORMAT_R8_UINT;
+	v.frameCount   = std::max<uint32_t>(frameCount, 1);
+	v.data         = std::move(framesData);
+	v.palette      = palette;
+	v.needsUpload  = !v.data.empty();
 	m_volumes.push_back(std::move(v));
 	if (m_currentGraph) DeclareVolume(m_volumes.back(), *m_currentGraph);
 	return AssetID{ static_cast<uint32_t>(m_volumes.size() - 1), AssetID::Type::VoxelVolume };
@@ -172,7 +212,10 @@ void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
 	ImageDesc d{};
 	d.width      = v.size.x;
 	d.height     = v.size.y;
-	d.depth      = v.size.z;
+	// Animated volumes pack frames as Z-slabs: depth = size.z * frameCount.
+	// frameCount == 1 collapses to a static volume, so this single declaration
+	// path serves both cases.
+	d.depth      = v.size.z * std::max<uint32_t>(v.frameCount, 1);
 	d.format     = v.format;
 	d.samples    = VK_SAMPLE_COUNT_1_BIT;
 	d.imageType  = VK_IMAGE_TYPE_3D;
@@ -180,7 +223,9 @@ void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
 	// volumes don't strictly need it — the graph derives STORAGE from a
 	// compute writer — but we set it uniformly so a procedural volume can also
 	// be host-clobbered (e.g. by a future "save asset to disk" capture path).
-	d.extraUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	// SAMPLED is required by InstancedVoxelTechnique reading the volume via a
+	// combined image sampler in its fragment shader.
+	d.extraUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	d.lifetime   = Lifetime::Persistent;
 	v.volumeImage = graph.CreateImage(v.name + "_volume", d);
 }
@@ -207,9 +252,12 @@ void AssetRegistry::UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph,
 
 	// Mirror BrickmapPaletteRenderer::UploadVolumeData — staging buffer →
 	// CmdCopyBufferToImage → leave the image in GENERAL so subsequent compute
-	// passes can read it without re-transitioning. The graph's first-use
-	// barrier still issues a layout transition if a different layout is needed.
-	const VkDeviceSize size = static_cast<VkDeviceSize>(v.size.x) * v.size.y * v.size.z;
+	// passes can read it without re-transitioning. For animated volumes, all
+	// frames are packed Z-sequentially in v.data, and the image's Z extent is
+	// already size.z * frameCount, so the copy treats it as one contiguous
+	// volume.
+	const uint32_t fullDepth = v.size.z * std::max<uint32_t>(v.frameCount, 1);
+	const VkDeviceSize size = static_cast<VkDeviceSize>(v.size.x) * v.size.y * fullDepth;
 	auto allocator = graph.GetImage(v.volumeImage)->GetAllocator();
 	auto staging   = VWrap::Buffer::CreateStaging(allocator, size);
 	void* mapped   = staging->Map();
@@ -221,7 +269,7 @@ void AssetRegistry::UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph,
 	cmd->BeginSingle();
 	cmd->CmdTransitionImageLayout(image, v.format,
 		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	cmd->CmdCopyBufferToImage(staging, image, v.size.x, v.size.y, v.size.z);
+	cmd->CmdCopyBufferToImage(staging, image, v.size.x, v.size.y, fullDepth);
 	cmd->CmdTransitionImageLayout(image, v.format,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	cmd->EndAndSubmit();

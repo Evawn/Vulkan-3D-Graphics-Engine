@@ -43,9 +43,10 @@ struct RenderItem {
 	int32_t       vertexOffset     = 0;
 
 	// --- Instancing (InstancedVoxelMesh, future: instanced Mesh) ---
-	// Per-instance data lives in a pass-owned SSBO; the item only addresses into
-	// that SSBO via firstInstance/instanceCount. This is the line of code that
-	// makes "millions of grass blades" fall out as a single vkCmdDrawIndexed.
+	// Per-instance data lives in an SSBO referenced by `instanceBuffer`; the
+	// item addresses into it via firstInstance/instanceCount. This is the line
+	// that makes "millions of grass blades" fall out as a single vkCmdDraw.
+	BufferHandle  instanceBuffer;       // valid for InstancedVoxelMesh
 	uint32_t      instanceCount    = 1;
 	uint32_t      firstInstance    = 0;
 

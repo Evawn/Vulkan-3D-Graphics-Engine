@@ -6,6 +6,7 @@
 #include "MetricsPanel.h"
 #include "OutputPanel.h"
 #include "InspectorPanel.h"
+#include "HierarchyPanel.h"
 #include "RenderGraphPanel.h"
 #include "VulkanContext.h"
 #include "Sampler.h"
@@ -19,6 +20,7 @@
 #include <vector>
 
 class Window;
+class Scene;
 
 class Editor {
 public:
@@ -34,7 +36,8 @@ public:
 					size_t* activeRendererIndex,
 					std::shared_ptr<Camera> camera,
 					std::shared_ptr<CameraController> cameraController,
-					VWrap::VulkanContext& vk);
+					VWrap::VulkanContext& vk,
+					Scene* scene);
 
 	void Shutdown();
 
@@ -66,8 +69,9 @@ public:
 	// Screenshot path forwarding
 	void SetLastScreenshotPath(const std::string& path);
 
-	// Inspector wiring for lighting + post-process (called once after construction)
+	// Inspector wiring for lighting + sky + post-process (called once after construction)
 	void SetLighting(SceneLighting* lighting) { m_inspector.SetLighting(lighting); }
+	void SetSky(SkyDescription* sky)          { m_inspector.SetSky(sky); }
 	void SetPostProcess(PostProcessChain* chain) { m_inspector.SetPostProcess(chain); }
 
 	// Render Graph panel
@@ -87,5 +91,8 @@ private:
 	MetricsPanel m_metrics;
 	OutputPanel m_output;
 	InspectorPanel m_inspector;
+	HierarchyPanel m_hierarchy;
 	RenderGraphPanel m_renderGraphPanel;
+
+	Scene* m_scene = nullptr;
 };

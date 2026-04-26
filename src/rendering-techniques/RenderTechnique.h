@@ -20,6 +20,7 @@ class RenderScene;
 class Scene;
 class AssetRegistry;
 struct SceneLighting;
+struct SkyDescription;
 
 struct RenderContext {
 	std::shared_ptr<VWrap::Device> device;
@@ -29,7 +30,8 @@ struct RenderContext {
 	VkExtent2D extent;
 	uint32_t maxFramesInFlight;
 	std::shared_ptr<Camera> camera;
-	SceneLighting* lighting = nullptr;  // shared, non-owning; renderer-owned state
+	SceneLighting*  lighting = nullptr;  // shared, non-owning; scene-owned state
+	SkyDescription* sky      = nullptr;  // shared, non-owning; scene-owned state
 
 	// Per-frame extracted item list. The SceneExtractor fills this from m_world
 	// each frame; pass record callbacks read from it via PassContext::scene.
