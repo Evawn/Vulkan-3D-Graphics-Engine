@@ -11,6 +11,7 @@
 #include "PaletteResource.h"
 #include "SceneLighting.h"
 #include "SkyDescription.h"
+#include "PrimitiveFactory.h"
 #include <chrono>
 #include <memory>
 #include <glm/glm.hpp>
@@ -51,6 +52,13 @@ private:
 	float m_time_scale = 1.0f;
 	std::chrono::steady_clock::time_point m_start_time;
 
+	// Volume source — picks which content-producer fills the voxel asset.
+	// The Source dropdown drives a rebuild of m_parameters so only the relevant
+	// sub-controls are visible. Switching back to ProceduralSDF reuses the
+	// existing "restore procedural" path (m_pending_reload + empty vox path).
+	enum class Source : int { ProceduralSDF = 0, VoxFile = 1, IslandTerrain = 2 };
+	int m_source = static_cast<int>(Source::ProceduralSDF);
+
 	// Dynamic per-axis volume sizing (procedural defaults to uvec3(128); .vox fits per-axis)
 	glm::uvec3 m_volume_size = glm::uvec3(128, 128, 128);
 
@@ -60,6 +68,16 @@ private:
 	// VoxelVolumeAsset.isProcedural is false → file mode; true → procedural mode.
 	std::string m_vox_file_path;
 	bool m_pending_reload = false;
+
+	// Island-terrain bake state. Config edited live by inspector sliders; bake
+	// runs (CPU, on the calling thread) when m_pending_bake is set during Reload.
+	IslandTerrainConfig m_terrain_cfg{};
+	int  m_terrain_grid_x = 1024;     // mirror of cfg.gridSize.x as int for slider widget
+	int  m_terrain_grid_y = 1024;
+	int  m_terrain_max_height = 128;
+	int  m_terrain_octaves = 5;
+	int  m_terrain_seed    = 1337;
+	bool m_pending_bake = false;
 	RenderGraph*   m_graph    = nullptr;
 	AssetRegistry* m_assets   = nullptr;
 	Scene*         m_world    = nullptr;
@@ -76,6 +94,13 @@ private:
 	const SkyDescription* m_sky      = nullptr;
 
 	std::vector<TechniqueParameter> m_parameters;
+	// Cleared next time GetParameters() is called — rebuilds the param list.
+	// Set from inside onChanged callbacks (e.g. Source dropdown) so we don't
+	// invalidate the inspector's iterator mid-walk.
+	bool m_params_dirty = true;
+
+	void RebuildParameters();
+	void BakeIslandTerrainNow();
 
 public:
 	std::string GetDisplayName() const override { return "Brickmap Palette Renderer"; }

@@ -68,6 +68,19 @@ static void DrawTechniqueParameter(TechniqueParameter& param) {
 		// File handles its own change channel via onFileChanged; skip onChanged.
 		return;
 	}
+	case TechniqueParameter::Button: {
+		// Stretch button across the available content width so it reads as a
+		// "perform this action" affordance rather than a typical inline control.
+		const float w = ImGui::GetContentRegionAvail().x;
+		if (ImGui::Button(param.label.c_str(), ImVec2(w, 0))) {
+			if (param.onClicked) param.onClicked();
+		}
+		return;
+	}
+	case TechniqueParameter::Header: {
+		ImGui::SeparatorText(param.label.c_str());
+		return;
+	}
 	}
 	if (changed && param.onChanged) param.onChanged();
 }

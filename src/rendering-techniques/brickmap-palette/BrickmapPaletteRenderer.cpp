@@ -314,14 +314,60 @@ std::vector<std::string> BrickmapPaletteRenderer::GetShaderPaths() const {
 }
 
 std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
-	if (m_parameters.empty()) {
-		m_parameters = {
-			{ "Shape", TechniqueParameter::Enum, &m_shape, 0.0f, 0.0f,
-				{ "Sphere", "Torus", "Box Frame", "Cylinder", "Cone", "Octahedron", "Gyroid", "Sine Blob", "Menger Sponge" } },
-			{ "Time Scale", TechniqueParameter::Float, &m_time_scale, 0.0f, 5.0f },
-			{ "Max Iterations", TechniqueParameter::Int, &m_max_iterations, 1.0f, 500.0f },
-			{ "Debug Coloring", TechniqueParameter::Bool, &m_debug_color },
+	if (m_parameters.empty() || m_params_dirty) {
+		RebuildParameters();
+		m_params_dirty = false;
+	}
+	return m_parameters;
+}
+
+void BrickmapPaletteRenderer::RebuildParameters() {
+	m_parameters.clear();
+
+	// --- Always-visible: Source switcher + global trace controls ---
+	{
+		TechniqueParameter src;
+		src.label = "Source";
+		src.type  = TechniqueParameter::Enum;
+		src.data  = &m_source;
+		src.enumLabels = { "Procedural SDF", "VOX File", "Island Terrain" };
+		src.onChanged = [this]() {
+			// Defer the param-list rebuild — we're inside the inspector's
+			// iteration of the current list, so mutating it now is unsafe.
+			m_params_dirty = true;
+
+			// Side effects of switching modes:
+			//  - ProceduralSDF: kick the existing "restore procedural" path so
+			//    the volume reverts to the SDF generator.
+			//  - VoxFile: do nothing until the user picks a file.
+			//  - IslandTerrain: do nothing until the user clicks Bake.
+			if (m_source == static_cast<int>(Source::ProceduralSDF)) {
+				m_vox_file_path.clear();
+				m_pending_reload = true;
+				if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
+			}
 		};
+		m_parameters.push_back(std::move(src));
+	}
+	m_parameters.push_back({ "Max Iterations", TechniqueParameter::Int, &m_max_iterations, 1.0f, 500.0f });
+	m_parameters.push_back({ "Debug Coloring", TechniqueParameter::Bool, &m_debug_color });
+
+	// --- Mode-specific controls ---
+	const Source src = static_cast<Source>(m_source);
+
+	if (src == Source::ProceduralSDF) {
+		TechniqueParameter hdr;
+		hdr.label = "Procedural SDF"; hdr.type = TechniqueParameter::Header;
+		m_parameters.push_back(std::move(hdr));
+
+		m_parameters.push_back({ "Shape", TechniqueParameter::Enum, &m_shape, 0.0f, 0.0f,
+			{ "Sphere", "Torus", "Box Frame", "Cylinder", "Cone", "Octahedron", "Gyroid", "Sine Blob", "Menger Sponge" } });
+		m_parameters.push_back({ "Time Scale", TechniqueParameter::Float, &m_time_scale, 0.0f, 5.0f });
+	}
+	else if (src == Source::VoxFile) {
+		TechniqueParameter hdr;
+		hdr.label = "VOX File"; hdr.type = TechniqueParameter::Header;
+		m_parameters.push_back(std::move(hdr));
 
 		TechniqueParameter voxFile;
 		voxFile.label = "VOX Model";
@@ -335,15 +381,95 @@ std::vector<TechniqueParameter>& BrickmapPaletteRenderer::GetParameters() {
 		};
 		m_parameters.push_back(std::move(voxFile));
 	}
-	return m_parameters;
+	else if (src == Source::IslandTerrain) {
+		TechniqueParameter hdr;
+		hdr.label = "Island Terrain"; hdr.type = TechniqueParameter::Header;
+		m_parameters.push_back(std::move(hdr));
+
+		// Sliders bind to the int mirrors; cfg gets the values copied at bake time.
+		m_parameters.push_back({ "Grid X",       TechniqueParameter::Int,   &m_terrain_grid_x,     8.0f,   4096.0f });
+		m_parameters.push_back({ "Grid Y",       TechniqueParameter::Int,   &m_terrain_grid_y,     8.0f,   4096.0f });
+		m_parameters.push_back({ "Max Height",   TechniqueParameter::Int,   &m_terrain_max_height, 8.0f,   512.0f  });
+		m_parameters.push_back({ "Noise Scale",  TechniqueParameter::Float, &m_terrain_cfg.noiseScale,    0.001f, 0.05f  });
+		m_parameters.push_back({ "Octaves",      TechniqueParameter::Int,   &m_terrain_octaves,    1.0f,   8.0f    });
+		m_parameters.push_back({ "Lacunarity",   TechniqueParameter::Float, &m_terrain_cfg.lacunarity,    1.5f,   3.0f   });
+		m_parameters.push_back({ "Gain",         TechniqueParameter::Float, &m_terrain_cfg.gain,          0.2f,   0.8f   });
+		m_parameters.push_back({ "Island Radius",  TechniqueParameter::Float, &m_terrain_cfg.islandRadius,  0.05f, 0.95f });
+		m_parameters.push_back({ "Island Falloff", TechniqueParameter::Float, &m_terrain_cfg.islandFalloff, 0.01f, 0.6f  });
+		m_parameters.push_back({ "Sea Level",    TechniqueParameter::Float, &m_terrain_cfg.seaLevel,      0.0f,  0.6f   });
+		m_parameters.push_back({ "Beach Width",  TechniqueParameter::Float, &m_terrain_cfg.beachWidth,    0.0f,  0.2f   });
+		m_parameters.push_back({ "Seed",         TechniqueParameter::Int,   &m_terrain_seed,       0.0f,   1000000.0f });
+
+		TechniqueParameter bake;
+		bake.label = "Bake Island";
+		bake.type  = TechniqueParameter::Button;
+		bake.onClicked = [this]() {
+			m_pending_bake = true;
+			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
+		};
+		m_parameters.push_back(std::move(bake));
+	}
 }
 
 FrameStats BrickmapPaletteRenderer::GetFrameStats() const {
 	return { 3, 4, 0 };
 }
 
+void BrickmapPaletteRenderer::BakeIslandTerrainNow() {
+	auto logger = spdlog::get("Render");
+	if (!m_assets) return;
+
+	// Copy the int-mirrored slider values into the canonical cfg before baking.
+	m_terrain_cfg.gridSize  = glm::uvec2(std::max(8, m_terrain_grid_x),
+	                                     std::max(8, m_terrain_grid_y));
+	m_terrain_cfg.maxHeight = static_cast<uint32_t>(std::max(8, m_terrain_max_height));
+	m_terrain_cfg.octaves   = std::max(1, m_terrain_octaves);
+	m_terrain_cfg.seed      = static_cast<uint32_t>(std::max(0, m_terrain_seed));
+
+	const auto t0 = std::chrono::steady_clock::now();
+	VoxModel model = PrimitiveFactory::BakeIslandTerrain(m_terrain_cfg);
+	const auto t1 = std::chrono::steady_clock::now();
+	const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+	logger->info("BrickmapPaletteRenderer: BakeIslandTerrain took {:.1f} ms ({}x{}x{})",
+	             ms, model.volumeSize.x, model.volumeSize.y, model.volumeSize.z);
+
+	m_volume_size = model.volumeSize;
+
+	// Hand the baked bytes + palette to the registry. ReplaceVoxelVolume sets
+	// isProcedural=false; OnPostCompile during the next graph build disables
+	// the procedural Generate pass and uploads the palette via PaletteResource.
+	m_assets->ReplaceVoxelVolume(m_volume_asset, std::move(model), "<island bake>");
+
+	// Reposition the camera. The trace shader maps the volume into a centered
+	// unit-ish cube — see brickmap_palette_trace.frag: voxel_world_size = 2/max(vs),
+	// half_extents = vec3(vs) * voxel_world_size * 0.5. The largest voxel axis
+	// covers world-space [-1, 1]; smaller axes scale proportionally. So we pick a
+	// vantage at fixed multiples of those world-space half-extents.
+	if (m_camera) {
+		const float maxVS = static_cast<float>(std::max({m_volume_size.x, m_volume_size.y, m_volume_size.z}));
+		const glm::vec3 halfExtents = glm::vec3(m_volume_size) * (1.0f / maxVS);  // = vs/maxVS * 1.0
+		const glm::vec3 center(0.0f);
+		const glm::vec3 eye = center + glm::vec3(halfExtents.x * 1.6f,
+		                                         -halfExtents.y * 1.6f,
+		                                          halfExtents.z * 2.5f);
+		m_camera->SetPosition(eye);
+		m_camera->SetForward(center - eye);
+		m_camera->SetNearFar(0.05f, 50.0f);
+	}
+
+	if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
+}
+
 void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
 	(void)ctx;
+
+	// Bake takes precedence — the user clicked an explicit action button.
+	if (m_pending_bake) {
+		m_pending_bake = false;
+		BakeIslandTerrainNow();
+		return;
+	}
+
 	if (!m_pending_reload) return;
 	m_pending_reload = false;
 	auto logger = spdlog::get("Render");

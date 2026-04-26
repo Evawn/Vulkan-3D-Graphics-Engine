@@ -7,7 +7,7 @@
 // One editable parameter exposed to the inspector. Used by RenderTechnique and
 // PostProcessEffect; in principle by anything else that derives from IInspectable.
 struct TechniqueParameter {
-	enum Type { Float, Int, Bool, Color3, Color4, Enum, File, Vec3, Text };
+	enum Type { Float, Int, Bool, Color3, Color4, Enum, File, Vec3, Text, Button, Header };
 	std::string label;
 	Type type;
 	void* data = nullptr;
@@ -25,6 +25,9 @@ struct TechniqueParameter {
 	// Use this to reflect a parameter change into render state — e.g. a wireframe
 	// toggle that needs to recreate pipelines.
 	std::function<void()> onChanged;
+
+	// Button-only — fired when the user clicks. The label drives the button text.
+	std::function<void()> onClicked;
 
 	// Vec3-only — drag speed. Defaulted so existing brace-init parameter rows
 	// don't have to specify it.

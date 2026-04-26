@@ -13,6 +13,7 @@ target_include_directories(VulkanEngine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/utils"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering/voxel"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rendering/primitives"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/mesh-rasterizer"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/brickmap-palette"
