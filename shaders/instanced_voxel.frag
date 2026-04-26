@@ -180,7 +180,7 @@ void main() {
 	}
 
 	vec4 albedo = texelFetch(palette_sampler, ivec2(h.matIdx, 0), 0);
-	vec3 normal = -vec3(h.step_sign) * vec3(h.face);
+	vec3 localNormal = -vec3(h.step_sign) * vec3(h.face);
 
 	float ao = 1.0;
 	if (frame.aoStrength > 0.0) {
@@ -190,10 +190,17 @@ void main() {
 		ao = mix(1.0, raw, frame.aoStrength);
 	}
 
-	// Sun direction is world-space → instance-AABB-local, same chain as the view ray.
-	vec3 cloudSunDir = cloudWorldInv * frame.sunDirection;
-	vec3 localSunDir = normalize(quatRotate(quatConjugate(vInstRot), cloudSunDir));
-	float NdotL = max(0.0, dot(normal, localSunDir));
+	// Directional shading is computed in WORLD space so it tracks the scene
+	// graph correctly under cloud-level rotation/translation. Forward chain:
+	//   N_world = mat3(cloudWorld) · R_inst · N_local
+	// (right-angle R_inst is orthonormal; uniform per-instance scale would
+	// drop out under the final normalize). For non-uniform cloudWorld scale,
+	// this would need the proper inverse-transpose normal matrix passed in
+	// as a per-draw push-constant slot — not needed at v1 since SceneNode
+	// scale defaults to (1,1,1) for the InstanceCloud root.
+	vec3 cloudNormal = quatRotate(vInstRot, localNormal);
+	vec3 worldNormal = normalize(mat3(pc.cloudWorld) * cloudNormal);
+	float NdotL = max(0.0, dot(worldNormal, frame.sunDirection));
 
 	vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
 	vec3 direct  = frame.sunColor * frame.sunIntensity * NdotL;

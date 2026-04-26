@@ -392,9 +392,16 @@ void InstancedVoxelTechnique::RebuildInstanceData(RenderGraph& graph) {
 	std::mt19937 rng(0xC0FFEE);
 	std::uniform_real_distribution<float> jitter(-0.05f, 0.05f);
 	std::uniform_real_distribution<float> phase(0.0f, static_cast<float>(m_frame_count));
-	std::uniform_real_distribution<float> spinDist(-0.4f, 0.4f);
+	// 4-way Z-yaw quantization. Voxel volumes are axis-aligned grids, so any
+	// non-right-angle rotation forces the DDA to march diagonally through
+	// partial voxels — quantizing to {0°, 90°, 180°, 270°} keeps each blade's
+	// internal grid axis-aligned with the cloud frame (and, for the default
+	// identity cloudWorld, with the world). Increase to 24 if we ever want
+	// blades laid sideways (full cube symmetry group).
+	std::uniform_int_distribution<int> yawIdxDist(0, 3);
 
 	const float origin = -0.5f * (m_grid_dim - 1) * m_grid_spacing;
+	const float kQuarterTurn = 1.57079632679f;  // π/2
 	for (int gy = 0; gy < m_grid_dim; ++gy) {
 		for (int gx = 0; gx < m_grid_dim; ++gx) {
 			GpuInstance gi{};
@@ -409,8 +416,7 @@ void InstancedVoxelTechnique::RebuildInstanceData(RenderGraph& graph) {
 			gi.scale = m_grid_spacing / static_cast<float>(m_volume_size.x);
 			gi.scale *= 1.0f + jitter(rng) * 4.0f;
 
-			// Random Z-spin so blades don't all face the same way.
-			float yaw = spinDist(rng) * 6.28318f;
+			float yaw = static_cast<float>(yawIdxDist(rng)) * kQuarterTurn;
 			glm::quat q = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f));
 			gi.rotation = glm::vec4(q.x, q.y, q.z, q.w);
 
@@ -453,7 +459,7 @@ std::vector<TechniqueParameter>& InstancedVoxelTechnique::GetParameters() {
 		gridDim.type  = TechniqueParameter::Int;
 		gridDim.data  = &m_grid_dim;
 		gridDim.min   = 1.0f;
-		gridDim.max   = 64.0f;
+		gridDim.max   = 128.0f;
 		gridDim.onChanged = [this]() {
 			m_pending_grid_rebuild = true;
 			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});

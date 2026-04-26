@@ -94,9 +94,9 @@ private:
 	// Tunables.
 	int   m_max_iterations = 96;
 	bool  m_debug_color = false;
-	float m_animation_speed = 4.0f;   // frames per second
-	int   m_grid_dim = 32;            // 32×32 = 1024 instances
-	float m_grid_spacing = 0.4f;
+	float m_animation_speed = 6.0f;   // frames per second
+	int   m_grid_dim = 64;            // 64×64 = 4096 instances
+	float m_grid_spacing = 0.2f;      // smaller blades, denser field — same ~12.8 unit footprint
 	bool  m_pending_grid_rebuild = false;
 
 	std::chrono::steady_clock::time_point m_start_time;

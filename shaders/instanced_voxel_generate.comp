@@ -1,10 +1,14 @@
 #version 450
 
 // Procedural grass-blade animation: paints `frameCount` frames of a thin
-// vertical blade swaying side-to-side. Z-slabs of a single 3D image:
-// frame `f` lives at z' = z + f * size.z. Runs once per graph rebuild
-// (the technique disables the pass on subsequent frames — animated frames
-// are static once written).
+// vertical blade swaying with a wind-like motion. Z-slabs of a single 3D
+// image: frame `f` lives at z' = z + f * size.z. Runs once per graph
+// rebuild (the technique disables the pass on subsequent frames — animated
+// frames are static once written).
+//
+// Cross-section is a thin tapered leaf: wider in X (sway plane) than Y, so
+// the four right-angle yaw quantizations naturally alternate between
+// "face-on" and "edge-on" silhouettes when seen from the camera.
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
@@ -16,24 +20,46 @@ layout(push_constant) uniform PC {
 } pc;
 
 uint chooseMaterial(int x, int y, int z, int frame) {
-	// Center of the volume (in single-frame coords).
 	float cx = float(pc.sizeX) * 0.5;
 	float cy = float(pc.sizeY) * 0.5;
 
-	// Sway phase per frame. tSweep ∈ [0, 1) over the animation.
+	float zNorm  = float(z) / float(max(pc.sizeZ - 1, 1));
 	float tSweep = float(frame) / float(max(pc.frameCount, 1));
-	float sway   = sin(tSweep * 6.28318) * float(pc.sizeX) * 0.25;
 
-	// Bend more at the top: blade tilts proportionally to z.
-	float zNorm = float(z) / float(max(pc.sizeZ - 1, 1));
-	float dx = float(x) - (cx + sway * zNorm);
-	float dy = float(y) - cy;
+	// Cubic bend so the tip swings far while the base barely moves — that's
+	// what real grass does (the stem near the ground is stiff, the tip is
+	// floppy). Pure linear bend looked too rigid.
+	float bend = zNorm * zNorm * zNorm;
 
-	// Cross-section: thin rectangle (wider in y for a leaf-like profile).
-	if (abs(dx) <= 0.6 && abs(dy) <= 1.6 && z >= 0 && z < pc.sizeZ) {
-		// Color varies by z so the blade has a tip — palette index 80 for base, 70 for tip.
-		float t = zNorm;
-		uint base = 70u + uint(round(t * 10.0));    // 70..80
+	// Tip traces an ellipse in (X,Y) instead of a straight side-to-side line.
+	// sin/cos at the same frequency are exactly π/2 out of phase so the tip
+	// returns to its starting point cleanly at frame == frameCount (no loop
+	// pop). The Y-axis amplitude is intentionally small — grass doesn't sway
+	// much fore-aft, but a hint of it sells the 3D illusion.
+	float angle = tSweep * 6.28318;
+	float swayX = sin(angle) * float(pc.sizeX) * 0.35 * bend;
+	float swayY = cos(angle) * float(pc.sizeY) * 0.10 * bend;
+
+	float dx = float(x) - (cx + swayX);
+	float dy = float(y) - (cy + swayY);
+
+	// Tapered cross-section: full width near the base, pointier at the tip.
+	// halfW is the sway-axis (leaf-flat) extent; halfD is the depth extent.
+	// Asymmetry between W and D means rotated blades read distinctly
+	// different from cardinal viewing angles — useful for visual variety
+	// even with a single shared asset.
+	float taper = 1.0 - 0.55 * zNorm;
+	float halfW = 1.0 * taper;     // 2 voxels wide at base, 1 at tip
+	float halfD = 0.5 * taper;     // 1 voxel deep at base, ~0 at tip
+
+	if (abs(dx) <= halfW && abs(dy) <= halfD && z >= 0 && z < pc.sizeZ) {
+		// Color gradient along the blade: deep cool green at the base,
+		// warmer yellow-green at the tip (sun-bleached new growth). The
+		// default palette's HSV rainbow has indices 64..95 covering roughly
+		// hue 78°..124°, which is a richer green range than the old 70..80
+		// (hue 88°..102°).
+		float ramp = clamp(1.0 - zNorm, 0.0, 1.0);
+		uint base = 64u + uint(round(ramp * 31.0));    // 64=tip, 95=base
 		return base;
 	}
 	return 0u;
