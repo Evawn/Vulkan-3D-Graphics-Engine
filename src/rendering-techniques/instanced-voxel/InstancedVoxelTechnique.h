@@ -68,12 +68,19 @@ private:
 
 	// Bindings.
 	std::shared_ptr<BindingTable> m_compute_bindings;   // for the generate compute pass
+	std::shared_ptr<BindingTable> m_sky_bindings;       // fullscreen sky pre-pass
 	std::shared_ptr<BindingTable> m_graphics_bindings;  // for the draw pass
 
 	// Volume meta uniform (per-frame UBO, stays static after first rebuild —
 	// per-frame slot lets BindingTable's per-frame uniform path serve it).
 	std::vector<std::shared_ptr<VWrap::Buffer>> m_meta_buffers;
 	std::vector<void*>                          m_meta_mapped;
+
+	// Per-frame UBO carrying camera/sun/sky/time/iteration state. Rewritten
+	// every frame in the trace pass record callback. Bound to both the trace
+	// pass (for shading) and the sky pre-pass (for the sun disk + gradient).
+	std::vector<std::shared_ptr<VWrap::Buffer>> m_frame_ubo_buffers;
+	std::vector<void*>                          m_frame_ubo_mapped;
 
 	// Palette.
 	std::unique_ptr<PaletteResource> m_palette;

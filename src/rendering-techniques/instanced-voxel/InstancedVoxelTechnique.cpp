@@ -16,6 +16,8 @@ constexpr const char* kVolumeAssetName = "instanced_voxel_blade_v1";
 constexpr const char* kInstanceBufferName = "instanced_voxel_instances";
 constexpr const char* kSceneNodeName = "instanced_voxel_grass";
 constexpr const char* kGenerateName  = "InstancedVoxel Generate";
+constexpr const char* kSkyPassName   = "InstancedVoxel Sky";
+constexpr const char* kTracePassName = "InstancedVoxel Trace";
 
 // CPU layout must match shaders/instanced_voxel.vert::InstanceData.
 // std430-compatible: 16-byte alignment for vec3+scalar pairs, vec4 for quat.
@@ -23,7 +25,7 @@ struct GpuInstance {
 	glm::vec3 position;     float scale;
 	glm::vec4 rotation;     // quaternion (xyz, w)
 	float     animOffset;
-	float     _pad0;
+	float     _pad0;        // reserved for future speciesIndex (bindless multi-species)
 	float     _pad1;
 	float     _pad2;
 };
@@ -39,19 +41,36 @@ struct GeneratePC {
 	int32_t frameCount;
 };
 
-struct InstancedVoxelPC {
-	glm::mat4 cloudWorld;
-	glm::mat4 viewProj;
-	glm::vec3 cameraPos;      int32_t maxIterations;
-	glm::vec3 skyColor;       int32_t debugColor;
-	glm::vec3 sunDirection;   float   sunCosHalfAngle;
-	glm::vec3 sunColor;       float   sunIntensity;
-	glm::vec3 aabbMin;        float   ambientIntensity;
-	glm::vec3 aabbMax;        float   aoStrength;
-	int32_t   shadowsEnabled; float   time;
-	int32_t   frameCount;     int32_t _pad0;
+// Per-frame UBO. Rewritten every frame; both the sky pre-pass and the
+// trace pass read it. std140 layout: vec3+scalar pairs share 16 B slots.
+struct InstancedVoxelFrameUbo {
+	glm::mat4 viewProj;        // 64
+	glm::mat4 ndcToWorld;      // 64 — sky pass uses this; trace pass ignores
+	glm::vec3 cameraPos;       int32_t maxIterations;   // 16
+	glm::vec3 skyColor;        int32_t debugColor;      // 16
+	glm::vec3 sunDirection;    float   sunCosHalfAngle; // 16
+	glm::vec3 sunColor;        float   sunIntensity;    // 16
+	float     ambientIntensity;
+	float     aoStrength;
+	int32_t   shadowsEnabled;
+	float     time;                                     // 16
+	int32_t   frameCount;
+	int32_t   _pad0;
+	int32_t   _pad1;
+	int32_t   _pad2;                                    // 16
 };
-static_assert(sizeof(InstancedVoxelPC) == 240, "InstancedVoxelPC must stay std140-compatible");
+static_assert(sizeof(InstancedVoxelFrameUbo) == 224,
+	"InstancedVoxelFrameUbo must stay std140-compatible");
+
+// Slim per-draw push constant: just the cube-rasterization geometry. Comfortably
+// under the 128-byte minimum guarantee of every conformant Vulkan implementation.
+struct InstancedVoxelDrawPC {
+	glm::mat4 cloudWorld;      // 64
+	glm::vec3 aabbMin; float _pad0;   // 16
+	glm::vec3 aabbMax; float _pad1;   // 16
+};
+static_assert(sizeof(InstancedVoxelDrawPC) == 96,
+	"InstancedVoxelDrawPC must stay <= 128 B for portable push-constant limits");
 } // namespace
 
 RenderTargetDesc InstancedVoxelTechnique::DescribeTargets(const RendererCaps& caps) const {
@@ -144,6 +163,18 @@ void InstancedVoxelTechnique::RegisterPasses(
 		std::memcpy(m_meta_mapped[i], &meta, sizeof(meta));
 	}
 
+	// Per-frame UBO (camera/sun/sky/time/iteration). Written each frame in the
+	// trace-pass record callback; both sky and trace passes read it.
+	m_frame_ubo_buffers.assign(ctx.maxFramesInFlight, nullptr);
+	m_frame_ubo_mapped.assign(ctx.maxFramesInFlight, nullptr);
+	for (uint32_t i = 0; i < ctx.maxFramesInFlight; i++) {
+		m_frame_ubo_buffers[i] = VWrap::Buffer::CreateMapped(
+			m_allocator, sizeof(InstancedVoxelFrameUbo),
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			m_frame_ubo_mapped[i]);
+	}
+
 	// Palette + sampler.
 	if (!m_palette) {
 		m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
@@ -191,24 +222,67 @@ void InstancedVoxelTechnique::RegisterPasses(
 		})
 		.SetBindings(m_compute_bindings);
 
+	// ---- Sky pre-pass: fullscreen gradient + sun disk so non-cube pixels
+	// aren't just clear color. Reuses the per-frame UBO from the trace pass.
+	m_sky_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
+	m_sky_bindings
+		->AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT)
+		 .BindUniformBufferPerFrame(0, m_frame_ubo_buffers, sizeof(InstancedVoxelFrameUbo));
+	m_sky_bindings->Build();
+
 	// ---- Graphics pass: rasterize the cube per instance, DDA inside. ----
+	// Vertex stage now also reads the frame UBO (for viewProj). Instance SSBO
+	// is read in BOTH vertex (transform) and fragment (per-instance rotation
+	// inverse for the trace direction).
 	m_graphics_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
 	m_graphics_bindings
-		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,        VK_SHADER_STAGE_VERTEX_BIT)
+		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
+		 .AddBinding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .BindGraphStorageBuffer(0, m_instance_buffer)
 		 .BindGraphSampledImage(1, m_volume, m_volume_sampler)
 		 .BindExternalSampledImage(2, m_palette->GetImageView(), m_palette->GetSampler(),
 		                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		 .BindUniformBufferPerFrame(3, m_meta_buffers, sizeof(VolumeMetaUbo));
+		 .BindUniformBufferPerFrame(3, m_meta_buffers, sizeof(VolumeMetaUbo))
+		 .BindUniformBufferPerFrame(4, m_frame_ubo_buffers, sizeof(InstancedVoxelFrameUbo));
 	m_graphics_bindings->Build();
 
-	auto& drawPass = graph.AddGraphicsPass("InstancedVoxel Trace");
+	// ---- Sky pre-pass (fullscreen). Runs FIRST among graphics passes so the
+	// trace pass below can use LoadOp::Load and overlay the cube draws on top
+	// of the gradient + sun disk.
+	auto& skyPass = graph.AddGraphicsPass(kSkyPassName);
+	skyPass
+		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		.SetPipeline([this]() {
+			GraphicsPipelineDesc d{};
+			d.vertSpvPath = std::string(config::SHADER_DIR) + "/sky_fullscreen.vert.spv";
+			d.fragSpvPath = std::string(config::SHADER_DIR) + "/sky_fullscreen.frag.spv";
+			d.descriptorSetLayout = m_sky_bindings->GetLayout();
+			d.inputAssembly = PipelineDefaults::TriangleStrip();
+			d.rasterizer = PipelineDefaults::NoCullFill();
+			d.depthStencil = PipelineDefaults::NoDepthTest();
+			d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			return d;
+		})
+		.SetRecord([this](PassContext& pctx) {
+			auto vk_cmd = pctx.cmd->Get();
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pctx.graphicsPipeline->Get());
+			VkDescriptorSet ds = m_sky_bindings->GetSet(pctx.frameIndex)->Get();
+			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
+			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
+		})
+		.SetBindings(m_sky_bindings);
+
+	auto& drawPass = graph.AddGraphicsPass(kTracePassName);
 	drawPass.AcceptsItemTypes({ RenderItemType::InstancedVoxelMesh });
 	drawPass
-		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
+		// LoadOp::Load — the sky pre-pass already wrote the gradient + sun.
+		// Cube draws then overwrite covered pixels with traced voxel color or
+		// `discard` (leaving the sky visible on misses).
+		.SetColorAttachment(targets.color, LoadOp::Load, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(targets.resolve)
 		.Read(m_volume, ResourceUsage::SampledRead)
@@ -219,11 +293,9 @@ void InstancedVoxelTechnique::RegisterPasses(
 			d.fragSpvPath = std::string(config::SHADER_DIR) + "/instanced_voxel.frag.spv";
 			d.descriptorSetLayout = m_graphics_bindings->GetLayout();
 			VkPushConstantRange r{};
-			// Push constants are read in both vertex (for transforms) and fragment
-			// (for trace state). Single range with combined stage flags.
 			r.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 			r.offset = 0;
-			r.size = sizeof(InstancedVoxelPC);
+			r.size = sizeof(InstancedVoxelDrawPC);
 			d.pushConstantRanges = { r };
 			d.inputAssembly = PipelineDefaults::TriangleList();
 			// Front face = CCW, back-face cull. Cube vertex order in
@@ -243,36 +315,42 @@ void InstancedVoxelTechnique::RegisterPasses(
 
 			if (!pctx.scene) return;
 
-			InstancedVoxelPC pc{};
-			pc.viewProj = m_camera->GetProjectionMatrix() * m_camera->GetViewMatrix();
-			pc.cameraPos = m_camera->GetPosition();
-			pc.maxIterations = m_max_iterations;
-			pc.skyColor = m_sky ? m_sky->color : glm::vec3(0.529f, 0.808f, 0.922f);
-			pc.debugColor = m_debug_color ? 1 : 0;
+			// ---- Update per-frame UBO (read by both this pass and the sky pre-pass).
+			InstancedVoxelFrameUbo ubo{};
+			glm::mat4 view = m_camera->GetViewMatrix();
+			glm::mat4 proj = m_camera->GetProjectionMatrix();
+			ubo.viewProj = proj * view;
+			ubo.ndcToWorld = glm::inverse(ubo.viewProj);
+			ubo.cameraPos = m_camera->GetPosition();
+			ubo.maxIterations = m_max_iterations;
+			ubo.skyColor = m_sky ? m_sky->color : glm::vec3(0.529f, 0.808f, 0.922f);
+			ubo.debugColor = m_debug_color ? 1 : 0;
 			if (m_lighting) {
-				pc.sunDirection     = m_lighting->GetSunDirection();
-				pc.sunCosHalfAngle  = m_lighting->GetSunCosHalfAngle();
-				pc.sunColor         = glm::vec3(m_lighting->sunColor[0],
-				                                m_lighting->sunColor[1],
-				                                m_lighting->sunColor[2]);
-				pc.sunIntensity     = m_lighting->sunIntensity;
-				pc.ambientIntensity = m_lighting->ambientIntensity;
-				pc.aoStrength       = m_lighting->aoStrength;
-				pc.shadowsEnabled   = m_lighting->shadowsEnabled ? 1 : 0;
+				ubo.sunDirection     = m_lighting->GetSunDirection();
+				ubo.sunCosHalfAngle  = m_lighting->GetSunCosHalfAngle();
+				ubo.sunColor         = glm::vec3(m_lighting->sunColor[0],
+				                                 m_lighting->sunColor[1],
+				                                 m_lighting->sunColor[2]);
+				ubo.sunIntensity     = m_lighting->sunIntensity;
+				ubo.ambientIntensity = m_lighting->ambientIntensity;
+				ubo.aoStrength       = m_lighting->aoStrength;
+				ubo.shadowsEnabled   = m_lighting->shadowsEnabled ? 1 : 0;
 			} else {
-				pc.sunDirection = glm::vec3(0, 0, -1);
-				pc.sunCosHalfAngle = 1.0f;
-				pc.sunColor = glm::vec3(1.0f);
-				pc.sunIntensity = 1.0f;
-				pc.ambientIntensity = 0.5f;
-				pc.aoStrength = 0.0f;
-				pc.shadowsEnabled = 0;
+				ubo.sunDirection = glm::vec3(0, 0, -1);
+				ubo.sunCosHalfAngle = 1.0f;
+				ubo.sunColor = glm::vec3(1.0f);
+				ubo.sunIntensity = 1.0f;
+				ubo.ambientIntensity = 0.5f;
+				ubo.aoStrength = 0.0f;
+				ubo.shadowsEnabled = 0;
 			}
-			pc.frameCount = static_cast<int32_t>(m_frame_count);
-
+			ubo.frameCount = static_cast<int32_t>(m_frame_count);
 			auto now = std::chrono::steady_clock::now();
-			pc.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+			ubo.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+			std::memcpy(m_frame_ubo_mapped[pctx.frameIndex], &ubo, sizeof(ubo));
 
+			// ---- Per-draw push constant: just the cube geometry.
+			InstancedVoxelDrawPC pc{};
 			for (const auto& item : pctx.scene->Get(RenderItemType::InstancedVoxelMesh)) {
 				pc.cloudWorld = item.transform;
 				pc.aabbMin = item.aabbMin;
@@ -358,6 +436,8 @@ std::vector<std::string> InstancedVoxelTechnique::GetShaderPaths() const {
 		std::string(config::SHADER_DIR) + "/instanced_voxel.vert.spv",
 		std::string(config::SHADER_DIR) + "/instanced_voxel.frag.spv",
 		std::string(config::SHADER_DIR) + "/instanced_voxel_generate.comp.spv",
+		std::string(config::SHADER_DIR) + "/sky_fullscreen.vert.spv",
+		std::string(config::SHADER_DIR) + "/sky_fullscreen.frag.spv",
 	};
 }
 
@@ -384,6 +464,6 @@ std::vector<TechniqueParameter>& InstancedVoxelTechnique::GetParameters() {
 }
 
 FrameStats InstancedVoxelTechnique::GetFrameStats() const {
-	// One draw call per InstancedVoxelMesh item × instances per item.
-	return { 1, 36 * m_instance_count, 0 };
+	// Sky pre-pass (1 draw, 4 verts) + cube draw (1 draw × instanceCount).
+	return { 2, 4 + 36 * m_instance_count, 0 };
 }

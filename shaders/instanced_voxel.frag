@@ -10,27 +10,13 @@
 
 layout(location = 0) in vec3 vLocalPos;
 layout(location = 1) in vec3 vWorldPos;
-layout(location = 2) flat in int vFrameIdx;
+layout(location = 2) flat in int  vFrameIdx;
+layout(location = 3) flat in vec4 vInstRot;     // per-instance quaternion
 
-layout(push_constant) uniform PushConstantBlock {
-	mat4  cloudWorld;
-	mat4  viewProj;
-	vec3  cameraPos;
-	int   maxIterations;
-	vec3  skyColor;
-	int   debugColor;
-	vec3  sunDirection;
-	float sunCosHalfAngle;
-	vec3  sunColor;
-	float sunIntensity;
-	vec3  aabbMin;
-	float ambientIntensity;
-	vec3  aabbMax;
-	float aoStrength;
-	int   shadowsEnabled;
-	float time;
-	int   frameCount;
-	int   _pad0;
+layout(push_constant) uniform DrawPushConstantBlock {
+	mat4 cloudWorld;
+	vec3 aabbMin; float _pad0;
+	vec3 aabbMax; float _pad1;
 } pc;
 
 layout(set = 0, binding = 1) uniform usampler3D volume_sampler;
@@ -40,12 +26,35 @@ layout(set = 0, binding = 3) uniform VolumeMeta {
 	int   frameCount;
 } meta;
 
+// Per-frame state (camera/sun/sky/time/iteration). Shared with the sky pass.
+layout(set = 0, binding = 4) uniform FrameUbo {
+	mat4  viewProj;
+	mat4  ndcToWorld;
+	vec3  cameraPos;         int   maxIterations;
+	vec3  skyColor;          int   debugColor;
+	vec3  sunDirection;      float sunCosHalfAngle;
+	vec3  sunColor;          float sunIntensity;
+	float ambientIntensity;
+	float aoStrength;
+	int   shadowsEnabled;
+	float time;
+	int   frameCount;
+	int   _pad0; int _pad1; int _pad2;
+} frame;
+
 layout(location = 0) out vec4 outColor;
 
-uint sampleMaterialAtFrame(ivec3 voxelCoord, int frame) {
+// Conjugate of a unit quaternion is its inverse. cheaper than inverse().
+vec4 quatConjugate(vec4 q) { return vec4(-q.xyz, q.w); }
+vec3 quatRotate(vec4 q, vec3 v) {
+	vec3 t = 2.0 * cross(q.xyz, v);
+	return v + q.w * t + cross(q.xyz, t);
+}
+
+uint sampleMaterialAtFrame(ivec3 voxelCoord, int f) {
 	if (any(lessThan(voxelCoord, ivec3(0))) ||
 	    any(greaterThanEqual(voxelCoord, meta.size))) return 0u;
-	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y, voxelCoord.z + frame * meta.size.z);
+	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y, voxelCoord.z + f * meta.size.z);
 	return texelFetch(volume_sampler, c, 0).r;
 }
 
@@ -114,7 +123,7 @@ Hit traceLocal(vec3 origin, vec3 direction) {
 
 	bvec3 last_face = bvec3(false);
 
-	for (int i = 0; i < pc.maxIterations; i++) {
+	for (int i = 0; i < frame.maxIterations; i++) {
 		if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, meta.size))) break;
 
 		uint matIdx = sampleMaterial(voxel);
@@ -150,22 +159,23 @@ void main() {
 	g_local_origin = pc.aabbMin;
 	g_voxel_local  = (pc.aabbMax - pc.aabbMin) / vec3(meta.size);
 
-	// Compute the ray *in instance-local space* by transforming the world ray
-	// through the inverse of (cloudWorld * per-instance T*R*S). For v1 we
-	// approximate by treating the local-space ray direction as the
-	// world-direction's projection onto the cube's local frame: the per-cloud
-	// transform is approximately rigid (scale=1, rotation present), so the
-	// ray direction in local space = inverse(cloudWorld) * worldDir. This
-	// loses fidelity if the per-instance scale is non-uniform — fine for v1
-	// foliage where instances are uniformly scaled.
-	mat3 worldToLocal = transpose(mat3(pc.cloudWorld));
-	vec3 worldDir = normalize(vWorldPos - pc.cameraPos);
-	vec3 localDir = normalize(worldToLocal * worldDir);
+	// World ray → instance-AABB-local ray.
+	//
+	// Forward chain in vertex stage was:  cloudWorld * (T_inst * R_inst * S_inst) * localPos
+	// So inverse for a *direction* (translations cancel) is:
+	//     localDir = R_inst^-1 * cloudWorld^-1 * worldDir
+	// cloudWorld is treated as rotation-only (uniform-scale assumption already
+	// documented in the technique header); R_inst is a unit quaternion so its
+	// inverse is the conjugate. Scale cancels under final normalize().
+	mat3 cloudWorldInv = transpose(mat3(pc.cloudWorld));
+	vec3 worldDir = normalize(vWorldPos - frame.cameraPos);
+	vec3 cloudDir = cloudWorldInv * worldDir;
+	vec3 localDir = normalize(quatRotate(quatConjugate(vInstRot), cloudDir));
 
 	Hit h = traceLocal(vLocalPos + localDir * 0.0001, localDir);
 
 	if (!h.hit) {
-		// Discard unhit cube interior — sky shows through. Foliage is sparse.
+		// Discard unhit cube interior — sky pre-pass shows through. Foliage is sparse.
 		discard;
 	}
 
@@ -173,22 +183,23 @@ void main() {
 	vec3 normal = -vec3(h.step_sign) * vec3(h.face);
 
 	float ao = 1.0;
-	if (pc.aoStrength > 0.0) {
+	if (frame.aoStrength > 0.0) {
 		// We need a hitPos for cornerAO; use the voxel's center as a v1 stand-in.
 		vec3 hitLocal = g_local_origin + (vec3(h.voxel) + 0.5) * g_voxel_local;
 		float raw = cornerAO(h.voxel, h.face, h.step_sign, hitLocal);
-		ao = mix(1.0, raw, pc.aoStrength);
+		ao = mix(1.0, raw, frame.aoStrength);
 	}
 
-	// Sun direction is world-space; transform to local for NdotL.
-	vec3 localSunDir = normalize(worldToLocal * pc.sunDirection);
+	// Sun direction is world-space → instance-AABB-local, same chain as the view ray.
+	vec3 cloudSunDir = cloudWorldInv * frame.sunDirection;
+	vec3 localSunDir = normalize(quatRotate(quatConjugate(vInstRot), cloudSunDir));
 	float NdotL = max(0.0, dot(normal, localSunDir));
 
-	vec3 ambient = pc.skyColor * pc.ambientIntensity * ao;
-	vec3 direct  = pc.sunColor * pc.sunIntensity * NdotL;
+	vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
+	vec3 direct  = frame.sunColor * frame.sunIntensity * NdotL;
 	vec3 lit = albedo.rgb * (ambient + direct);
 
-	if (pc.debugColor != 0) {
+	if (frame.debugColor != 0) {
 		lit -= vec3(float(h.total_iters) / 250.0);
 	}
 
