@@ -16,6 +16,9 @@
 #include "Pipeline.h"
 #include "ComputePipeline.h"
 
+class RenderScene;
+enum class RenderItemType : uint8_t;
+
 // ---- Handles ----
 //
 // `gen` guards against use-after-Clear: every Clear() bumps the graph's gen
@@ -146,6 +149,12 @@ struct PassContext {
 	// called (e.g. the UI pass uses ImGui's internal pipeline).
 	std::shared_ptr<VWrap::Pipeline> graphicsPipeline;
 	std::shared_ptr<VWrap::ComputePipeline> computePipeline;
+
+	// Frame-local scene the pass should consume items from. Set by the graph
+	// from the pointer RenderingSystem stashed before Execute(). Null only when
+	// the graph runs without a scene (e.g. headless / unit tests). Passes
+	// filter to their accepted item types via scene->Get(RenderItemType::X).
+	const RenderScene* scene = nullptr;
 };
 
 // ---- Internal resource storage ----
@@ -220,6 +229,11 @@ struct PassInfo {
 	std::vector<BufferHandle> readBuffers;
 	std::vector<ImageHandle> writeImages;
 	std::vector<BufferHandle> writeBuffers;
+
+	// Item types this pass declared as consumers via .AcceptsItemTypes(...).
+	// Empty == "this pass does not iterate the RenderScene" (e.g. compute
+	// dispatch, UI pass, post-process effects that draw an implicit FSQ).
+	std::vector<RenderItemType> acceptedItemTypes;
 
 	struct ColorAttachmentDetail {
 		ImageHandle target;

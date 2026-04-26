@@ -2,6 +2,7 @@
 
 #include "Renderer.h"
 #include "RenderTechnique.h"
+#include "RenderScene.h"
 #include "AppEvent.h"
 #include "VulkanContext.h"
 #include "Camera.h"
@@ -119,4 +120,10 @@ private:
 	std::function<void()> m_onBeforeGraphRebuild;
 	std::function<void()> m_onAfterGraphRebuild;
 	std::function<void(const std::string&)> m_onScreenshotSaved;
+
+	// Frame-local item list. Cleared each DrawFrame, refilled by every active
+	// technique's EmitItems(). Plumbed into RenderContext (RegisterPasses-time)
+	// and into PassContext (record-time) so passes consume what techniques (and
+	// eventually the scene graph) emit.
+	RenderScene m_scene;
 };

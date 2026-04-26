@@ -1,4 +1,5 @@
 #include "MeshRasterizer.h"
+#include "RenderItem.h"
 #include "PipelineDefaults.h"
 #include "config.h"
 #include <spdlog/spdlog.h>
@@ -52,10 +53,7 @@ void MeshRasterizer::RegisterPasses(
 		logger->warn("Model not found ({}), waiting for user to select one", m_model_path);
 	}
 
-	if (!m_vertices.empty()) {
-		CreateVertexBuffer();
-		CreateIndexBuffer();
-	}
+	DeclareGeometryBuffers(graph);
 	CreateUniformBuffers(ctx.maxFramesInFlight);
 
 	// Binding table: per-frame UBO at binding 0 + texture sampler at binding 1.
@@ -67,7 +65,9 @@ void MeshRasterizer::RegisterPasses(
 		                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	m_bindings->Build();
 
-	graph.AddGraphicsPass("Mesh Scene")
+	auto& meshPass = graph.AddGraphicsPass("Mesh Scene");
+	meshPass.AcceptsItemTypes({ RenderItemType::Mesh });
+	meshPass
 		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(targets.resolve)
@@ -90,69 +90,92 @@ void MeshRasterizer::RegisterPasses(
 			d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 			return d;
 		})
-		.SetRecord([this](PassContext& ctx) {
-			UpdateUniformBuffer(ctx.frameIndex);
+		.SetRecord([this](PassContext& pctx) {
+			auto vk_cmd = pctx.cmd->Get();
+			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pctx.graphicsPipeline->Get());
 
-			if (m_indices.empty() || !m_vertex_buffer || !m_index_buffer) return;
-
-			auto vk_cmd = ctx.cmd->Get();
-			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.graphicsPipeline->Get());
-
-			VkDescriptorSet ds = m_bindings->GetSet(ctx.frameIndex)->Get();
+			VkDescriptorSet ds = m_bindings->GetSet(pctx.frameIndex)->Get();
 			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				ctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
+				pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
-			VkBuffer vertexBuffers[] = { m_vertex_buffer->Get() };
-			VkDeviceSize offsets[] = { 0 };
-			vkCmdBindVertexBuffers(vk_cmd, 0, 1, vertexBuffers, offsets);
-			vkCmdBindIndexBuffer(vk_cmd, m_index_buffer->Get(), 0, VK_INDEX_TYPE_UINT32);
-			vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
+			if (!pctx.scene) return;
+			for (const auto& item : pctx.scene->Get(RenderItemType::Mesh)) {
+				UpdateUniformBuffer(pctx.frameIndex, item.transform);
+				DrawMeshItem(pctx, item, *m_graph);
+			}
 		})
 		.SetBindings(m_bindings);
 }
 
-void MeshRasterizer::CreateVertexBuffer() {
-	VkDeviceSize bufferSize = sizeof(m_vertices[0]) * m_vertices.size();
-
-	auto staging_buffer = VWrap::Buffer::CreateStaging(m_allocator, bufferSize);
-
-	void* data;
-	vmaMapMemory(m_allocator->Get(), staging_buffer->GetAllocation(), &data);
-	memcpy(data, m_vertices.data(), (size_t)bufferSize);
-	vmaUnmapMemory(m_allocator->Get(), staging_buffer->GetAllocation());
-
-	m_vertex_buffer = VWrap::Buffer::Create(m_allocator,
-		bufferSize,
-		VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		0);
-
-	auto command_buffer = VWrap::CommandBuffer::Create(m_graphics_pool);
-	command_buffer->BeginSingle();
-	command_buffer->CmdCopyBuffer(staging_buffer, m_vertex_buffer, bufferSize);
-	command_buffer->EndAndSubmit();
+void MeshRasterizer::OnPostCompile(RenderGraph& graph) {
+	(void)graph;
+	if (m_pending_geometry_upload) {
+		UploadGeometry();
+		m_pending_geometry_upload = false;
+	}
 }
 
-void MeshRasterizer::CreateIndexBuffer() {
-	VkDeviceSize bufferSize = sizeof(m_indices[0]) * m_indices.size();
+void MeshRasterizer::EmitItems(RenderScene& scene, const RenderContext& ctx) {
+	(void)ctx;
+	// Single static mesh today. Skip emission entirely if the OBJ failed to load
+	// — the pass record callback then iterates an empty bucket and the draw is
+	// suppressed naturally (no special-casing in the pass).
+	if (m_indices.empty() || m_vertex_buffer.id == UINT32_MAX) return;
 
-	auto staging_buffer = VWrap::Buffer::CreateStaging(m_allocator, bufferSize);
+	m_accumulated_rotation += m_rotation_speed * 0.016f;
 
-	void* data;
-	vmaMapMemory(m_allocator->Get(), staging_buffer->GetAllocation(), &data);
-	memcpy(data, m_indices.data(), (size_t)bufferSize);
-	vmaUnmapMemory(m_allocator->Get(), staging_buffer->GetAllocation());
+	// OBJ convention is Y-up; engine is Z-up — rotate -90° around X to correct.
+	static const glm::mat4 yUpToZUp = glm::rotate(glm::mat4(1.0f),
+		glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
 
-	m_index_buffer = VWrap::Buffer::Create(m_allocator,
-		bufferSize,
-		VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		0);
+	glm::mat4 model = glm::rotate(glm::mat4(1.0f), m_accumulated_rotation, glm::vec3(0.0f, 0.0f, 1.0f));
+	model = glm::scale(model, glm::vec3(m_model_scale));
+	model = model * yUpToZUp;
 
-	auto command_buffer = VWrap::CommandBuffer::Create(m_graphics_pool);
-	command_buffer->BeginSingle();
-	command_buffer->CmdCopyBuffer(staging_buffer, m_index_buffer, bufferSize);
-	command_buffer->EndAndSubmit();
+	RenderItem item{};
+	item.type           = RenderItemType::Mesh;
+	item.vertexBuffer   = m_vertex_buffer;
+	item.indexBuffer    = m_index_buffer;
+	item.indexCount     = static_cast<uint32_t>(m_indices.size());
+	item.firstIndex     = 0;
+	item.vertexOffset   = 0;
+	item.instanceCount  = 1;
+	item.firstInstance  = 0;
+	item.transform      = model;
+	scene.Add(item);
+}
+
+void MeshRasterizer::DeclareGeometryBuffers(RenderGraph& graph) {
+	if (m_vertices.empty()) {
+		m_vertex_buffer = {};
+		m_index_buffer = {};
+		return;
+	}
+
+	const VkDeviceSize vbSize = sizeof(m_vertices[0]) * m_vertices.size();
+	const VkDeviceSize ibSize = sizeof(m_indices[0])  * m_indices.size();
+
+	BufferDesc vbDesc{};
+	vbDesc.size = vbSize;
+	vbDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	vbDesc.lifetime = Lifetime::Persistent;
+	m_vertex_buffer = graph.CreateBuffer("mesh_vertices", vbDesc);
+
+	BufferDesc ibDesc{};
+	ibDesc.size = ibSize;
+	ibDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	ibDesc.lifetime = Lifetime::Persistent;
+	m_index_buffer = graph.CreateBuffer("mesh_indices", ibDesc);
+
+	m_pending_geometry_upload = true;
+}
+
+void MeshRasterizer::UploadGeometry() {
+	if (m_vertices.empty() || !m_graph) return;
+	const VkDeviceSize vbSize = sizeof(m_vertices[0]) * m_vertices.size();
+	const VkDeviceSize ibSize = sizeof(m_indices[0])  * m_indices.size();
+	m_graph->UploadBufferData(m_vertex_buffer, m_vertices.data(), vbSize, m_graphics_pool);
+	m_graph->UploadBufferData(m_index_buffer,  m_indices.data(),  ibSize, m_graphics_pool);
 }
 
 void MeshRasterizer::CreateUniformBuffers(uint32_t frames) {
@@ -319,15 +342,12 @@ void MeshRasterizer::ReloadModel(const std::string& newPath) {
 		LoadModel();
 	} catch (const std::exception& e) {
 		logger->error("Failed to load model: {}", e.what());
-		m_vertex_buffer.reset();
-		m_index_buffer.reset();
 		return;
 	}
 
-	m_vertex_buffer.reset();
-	m_index_buffer.reset();
-	CreateVertexBuffer();
-	CreateIndexBuffer();
+	// Geometry sizes likely changed — request a graph rebuild so the persistent
+	// buffers are re-declared at the new size. OnPostCompile will then upload.
+	if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 
 	// Reload texture — uses path from MTL if found, otherwise keeps current path
 	m_texture_image.reset();
@@ -416,17 +436,9 @@ void MeshRasterizer::CreatePlaceholderTexture() {
 }
 
 
-void MeshRasterizer::UpdateUniformBuffer(uint32_t frame) {
-	m_accumulated_rotation += m_rotation_speed * 0.016f;
-
-	// OBJ convention is Y-up; engine is Z-up — rotate -90° around X to correct
-	static const glm::mat4 yUpToZUp = glm::rotate(glm::mat4(1.0f),
-		glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-
+void MeshRasterizer::UpdateUniformBuffer(uint32_t frame, const glm::mat4& itemTransform) {
 	UniformBufferObject ubo{};
-	ubo.model = glm::rotate(glm::mat4(1.0f), m_accumulated_rotation, glm::vec3(0.0f, 0.0f, 1.0f));
-	ubo.model = glm::scale(ubo.model, glm::vec3(m_model_scale));
-	ubo.model = ubo.model * yUpToZUp;
+	ubo.model = itemTransform;
 	ubo.view = m_camera->GetViewMatrix();
 	ubo.proj = m_camera->GetProjectionMatrix();
 

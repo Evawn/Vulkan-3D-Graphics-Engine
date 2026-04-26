@@ -14,6 +14,7 @@
 #include <vector>
 
 class GPUProfiler;
+class RenderScene;
 
 // Optional async-compute plumbing for the render graph. When asyncQueue is
 // non-null AND its queue family differs from the graphics family, the graph
@@ -73,6 +74,11 @@ public:
 	void Resize(VkExtent2D newExtent);
 	void Clear();
 
+	// Frame-local scene the graph hands to each pass via PassContext::scene.
+	// Set by RenderingSystem before each Execute(). Non-owning. The graph never
+	// modifies the scene; passes only read items out of it.
+	void SetScene(const RenderScene* scene) { m_scene = scene; }
+
 	// Re-evaluate every pass's pipeline desc factory and rebuild the VkPipeline.
 	// Use for hot-reload (re-reads SPV) and for state changes that need a fresh
 	// pipeline (e.g. wireframe toggle). Render passes / framebuffers are unchanged.
@@ -90,6 +96,13 @@ public:
 
 	// ---- Dynamic imports ----
 	void UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageView> view);
+
+	// One-shot CPU→device staging upload into a graph-managed buffer. The buffer
+	// must already be allocated (i.e. Compile() has run). Used for geometry that
+	// outlives a single frame — Lifetime::Persistent buffers holding OBJ data,
+	// generated foliage proxies, animated voxel asset metadata, etc.
+	void UploadBufferData(BufferHandle handle, const void* data, size_t size,
+	                      std::shared_ptr<VWrap::CommandPool> pool);
 
 	// ---- Introspection ----
 	GraphSnapshot BuildSnapshot() const;
@@ -172,6 +185,11 @@ private:
 	GraphicsQueueWait                                  m_graphicsQueueWait{}; // recomputed each Execute()
 
 	bool m_compiled = false;
+
+	// Non-owning per-frame pointer set by RenderingSystem before Execute().
+	// Forwarded into every PassContext so record callbacks can iterate items
+	// of the type they consume.
+	const RenderScene* m_scene = nullptr;
 
 	// Generation counters bumped on Clear(); stamped onto every new
 	// ImageHandle/BufferHandle so stale handles fail the gen check in Get*().

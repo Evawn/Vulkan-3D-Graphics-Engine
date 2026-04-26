@@ -74,6 +74,13 @@ public:
 		const RenderContext& ctx,
 		const TechniqueTargets& targets) override;
 
+	// Drops one Fullscreen item per frame so the trace pass has something to
+	// iterate. Same plumbing as MeshRasterizer — the item shape just doesn't
+	// carry geometry because post_fullscreen.vert.spv generates the quad from
+	// gl_VertexIndex. The future scene graph still emits items here (a "voxel
+	// volume" scene-graph node would emit FullscreenTrace + voxelAsset handle).
+	void EmitItems(RenderScene& scene, const RenderContext& ctx) override;
+
 	void Reload(const RenderContext& ctx) override;
 
 	// Post-Compile hook: applies any pending .vox upload now that graph resources

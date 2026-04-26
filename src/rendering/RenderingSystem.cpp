@@ -62,6 +62,9 @@ RenderContext RenderingSystem::BuildRenderContext() const {
 	// Lighting lives inside the Renderer; const_cast is incidental — see
 	// Application::BuildRenderContext (the original site of this pattern).
 	ctx.lighting          = const_cast<SceneLighting*>(&m_renderer.GetLighting());
+	// Scene is owned here; const_cast follows the same pattern (RenderContext
+	// is logically a non-owning bundle, and m_scene is mutable engine state).
+	ctx.scene             = const_cast<RenderScene*>(&m_scene);
 	return ctx;
 }
 
@@ -210,6 +213,17 @@ void RenderingSystem::CaptureScreenshot() {
 }
 
 void RenderingSystem::DrawFrame(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex) {
+	// Per-frame scene rebuild. Clear once, then let every active technique drop
+	// items in. The graph reads this through PassContext::scene during Execute.
+	// Future scene-graph integration replaces the per-technique loop with a
+	// single graph-traversal-emits-items call; nothing else here changes.
+	m_scene.Clear();
+	auto rctx = BuildRenderContext();
+	for (auto& tech : m_techniques) {
+		tech->EmitItems(m_scene, rctx);
+	}
+	m_renderer.GetGraph().SetScene(&m_scene);
+
 	m_lastMetrics = m_profiler->GetMetrics(frameIndex);
 	m_profiler->CmdBegin(cmd, frameIndex);
 	m_renderer.Execute(cmd, frameIndex, m_profiler.get());

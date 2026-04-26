@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 
 // File-local: lookup the per-handle usage in the parallel usage vector. Pass
 // builders may have shorter usage vectors if older code paths skipped them; in
@@ -16,8 +17,24 @@ static ResourceUsage UsageAt(const std::vector<ResourceUsage>& v, size_t i) {
 }
 
 // =====================================================================
-// RenderGraph — Resource creation
+// RenderGraph — Resource creation + uploads
 // =====================================================================
+
+void RenderGraph::UploadBufferData(BufferHandle handle, const void* data, size_t size,
+                                   std::shared_ptr<VWrap::CommandPool> pool) {
+	auto dst = GetBuffer(handle);
+
+	auto staging = VWrap::Buffer::CreateStaging(m_allocator, size);
+	void* mapped = nullptr;
+	vmaMapMemory(m_allocator->Get(), staging->GetAllocation(), &mapped);
+	std::memcpy(mapped, data, size);
+	vmaUnmapMemory(m_allocator->Get(), staging->GetAllocation());
+
+	auto cmd = VWrap::CommandBuffer::Create(pool);
+	cmd->BeginSingle();
+	cmd->CmdCopyBuffer(staging, dst, size);
+	cmd->EndAndSubmit();
+}
 
 RenderGraph::RenderGraph(std::shared_ptr<VWrap::Device> device, std::shared_ptr<VWrap::Allocator> allocator)
 	: m_device(device), m_allocator(allocator) {}
@@ -271,6 +288,7 @@ GraphSnapshot RenderGraph::BuildSnapshot() const {
 			info.readImages = pass.m_readImages;
 			info.readBuffers = pass.m_readBuffers;
 			info.writeBuffers = pass.m_writeBuffers;
+			info.acceptedItemTypes = pass.GetAcceptedItemTypes();
 
 			PassInfo::GraphicsDetail gfx;
 			for (const auto& ca : pass.m_colorAttachments) {
@@ -298,6 +316,7 @@ GraphSnapshot RenderGraph::BuildSnapshot() const {
 			info.readBuffers = pass.m_readBuffers;
 			info.writeImages = pass.m_writeImages;
 			info.writeBuffers = pass.m_writeBuffers;
+			info.acceptedItemTypes = pass.GetAcceptedItemTypes();
 		}
 
 		snap.passes.push_back(std::move(info));
@@ -1375,6 +1394,7 @@ void RenderGraph::RecordStream(std::shared_ptr<VWrap::CommandBuffer> cmd,
 				ctx.frameIndex = frameIndex;
 				ctx.extent = extent;
 				ctx.graphicsPipeline = pass.m_pipeline;
+				ctx.scene = m_scene;
 				pass.m_recordFn(ctx);
 			}
 
@@ -1395,6 +1415,7 @@ void RenderGraph::RecordStream(std::shared_ptr<VWrap::CommandBuffer> cmd,
 				ctx.frameIndex = frameIndex;
 				ctx.extent = extent;
 				ctx.computePipeline = pass.m_pipeline;
+				ctx.scene = m_scene;
 				pass.m_recordFn(ctx);
 			}
 		}

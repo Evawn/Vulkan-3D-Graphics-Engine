@@ -1,4 +1,6 @@
 #include "BrickmapPaletteRenderer.h"
+#include "RenderItem.h"
+#include "RenderScene.h"
 #include "PipelineDefaults.h"
 #include "config.h"
 #include <spdlog/spdlog.h>
@@ -185,7 +187,9 @@ void BrickmapPaletteRenderer::RegisterPasses(
 		.SetBindings(m_build_bindings);
 
 	// Graphics pass: brickmap two-level DDA ray-march with palette colors
-	graph.AddGraphicsPass("Brickmap Palette Trace")
+	auto& tracePass = graph.AddGraphicsPass("Brickmap Palette Trace");
+	tracePass.AcceptsItemTypes({ RenderItemType::Fullscreen });
+	tracePass
 		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(targets.resolve)
@@ -240,11 +244,26 @@ void BrickmapPaletteRenderer::RegisterPasses(
 			vkCmdPushConstants(vk_cmd, ctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BrickmapPaletteTracePC), &pc);
 
-			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
+			if (!ctx.scene) return;
+			for (const auto& item : ctx.scene->Get(RenderItemType::Fullscreen)) {
+				DrawFullscreenItem(ctx, item);
+			}
 		})
 		.SetBindings(m_graphics_bindings);
 
 	logger->debug("BrickmapPaletteRenderer: Initialized via RegisterPasses");
+}
+
+void BrickmapPaletteRenderer::EmitItems(RenderScene& scene, const RenderContext& ctx) {
+	(void)ctx;
+	// One Fullscreen item per frame. voxelAsset references the brickmap volume
+	// so a scene-graph node could route this same item shape to alternative
+	// renderers (e.g. a future BrickmapVolume bounded-mesh pass).
+	RenderItem item{};
+	item.type        = RenderItemType::Fullscreen;
+	item.voxelAsset  = m_volume;
+	item.frameCount  = 1;
+	scene.Add(item);
 }
 
 void BrickmapPaletteRenderer::OnPostCompile(RenderGraph& graph) {

@@ -1,6 +1,7 @@
 #pragma once
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
+#include "RenderScene.h"
 #include "BindingTable.h"
 #include "Buffer.h"
 #include "Image.h"
@@ -37,8 +38,13 @@ private:
 	std::shared_ptr<VWrap::Image> m_texture_image;
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
-	std::shared_ptr<VWrap::Buffer> m_vertex_buffer;
-	std::shared_ptr<VWrap::Buffer> m_index_buffer;
+	// Geometry now lives in graph-owned Lifetime::Persistent buffers, addressed
+	// by handle. The technique uploads on RegisterPasses (post-Compile via the
+	// post-compile hook) and re-uploads on model reload. Items reference these
+	// handles; the future scene graph references them the same way.
+	BufferHandle m_vertex_buffer;
+	BufferHandle m_index_buffer;
+	bool m_pending_geometry_upload = false;
 	std::vector<std::shared_ptr<VWrap::Buffer>> m_uniform_buffers;
 	std::vector<void*> m_uniform_buffers_mapped;
 
@@ -61,15 +67,15 @@ private:
 
 	std::vector<TechniqueParameter> m_parameters;
 
-	void CreateVertexBuffer();
-	void CreateIndexBuffer();
+	void DeclareGeometryBuffers(RenderGraph& graph);
+	void UploadGeometry();
 	void CreateUniformBuffers(uint32_t frames);
 	void WriteDescriptors();
 	void LoadModel();
 	void ReloadModel(const std::string& newPath);
 	void ReloadTexture(const std::string& newPath);
 	void CreatePlaceholderTexture();
-	void UpdateUniformBuffer(uint32_t frame);
+	void UpdateUniformBuffer(uint32_t frame, const glm::mat4& itemTransform);
 
 public:
 	std::string GetDisplayName() const override { return "Mesh Rasterizer"; }
@@ -80,6 +86,13 @@ public:
 		RenderGraph& graph,
 		const RenderContext& ctx,
 		const TechniqueTargets& targets) override;
+
+	void OnPostCompile(RenderGraph& graph) override;
+
+	// Drops a single Mesh item per frame for the static OBJ. The future scene
+	// graph emits N items here (one per scene node carrying a mesh component);
+	// nothing else changes.
+	void EmitItems(RenderScene& scene, const RenderContext& ctx) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
 

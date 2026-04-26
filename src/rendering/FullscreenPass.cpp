@@ -1,5 +1,6 @@
 #include "FullscreenPass.h"
 #include "RenderGraph.h"
+#include "RenderItem.h"
 #include "PipelineDefaults.h"
 #include "Utils.h"
 #include "config.h"
@@ -30,10 +31,14 @@ std::unique_ptr<FullscreenPass> FullscreenPass::Build(
 	}
 	fp->m_bindings->Build();
 
-	auto& builder = graph.AddGraphicsPass(desc.name)
-		.SetColorAttachment(desc.output, desc.loadOp, desc.storeOp,
-			desc.clearColor.float32[0], desc.clearColor.float32[1],
-			desc.clearColor.float32[2], desc.clearColor.float32[3]);
+	auto& builder = graph.AddGraphicsPass(desc.name);
+	// Declare for graph introspection / debug surface. Per the plan, fullscreen
+	// post-process passes don't iterate the scene — they draw an implicit FSQ
+	// item directly via DrawFullscreenItem in the record callback.
+	builder.AcceptsItemTypes({ RenderItemType::Fullscreen });
+	builder.SetColorAttachment(desc.output, desc.loadOp, desc.storeOp,
+		desc.clearColor.float32[0], desc.clearColor.float32[1],
+		desc.clearColor.float32[2], desc.clearColor.float32[3]);
 	for (auto h : desc.sampledInputs) builder.Read(h);
 
 	uint32_t pushSize = desc.pushConstantSize;
@@ -66,7 +71,17 @@ std::unique_ptr<FullscreenPass> FullscreenPass::Build(
 			ctx.graphicsPipeline->GetLayout(),
 			{ bindings->GetSet(ctx.frameIndex)->Get() });
 		if (push) push(ctx, ctx.graphicsPipeline->GetLayout());
-		ctx.cmd->CmdDraw(4, 1, 0, 0);
+		// Implicit FSQ item — post-process passes don't pull from the scene.
+		// Routes through the same draw helper that ray-march techniques use,
+		// which is the architectural payoff: one Fullscreen draw path engine-wide.
+		static const RenderItem kImplicitFSQ = []{
+			RenderItem r{};
+			r.type = RenderItemType::Fullscreen;
+			r.instanceCount = 1;
+			r.firstInstance = 0;
+			return r;
+		}();
+		DrawFullscreenItem(ctx, kImplicitFSQ);
 	});
 
 	builder.SetBindings(fp->m_bindings);

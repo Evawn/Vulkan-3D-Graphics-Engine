@@ -65,6 +65,11 @@ public:
 		const RenderContext& ctx,
 		const TechniqueTargets& targets) override;
 
+	// Drops one Fullscreen item per frame so the trace pass has something to
+	// iterate. This technique is the placeholder for the future foliage
+	// renderer, which will instead emit InstancedVoxelMesh items here.
+	void EmitItems(RenderScene& scene, const RenderContext& ctx) override;
+
 	std::vector<std::string> GetShaderPaths() const override;
 
 	std::vector<TechniqueParameter>& GetParameters() override;

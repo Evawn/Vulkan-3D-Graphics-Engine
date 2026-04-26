@@ -1,4 +1,5 @@
 #include "RenderGraphPanel.h"
+#include "RenderItem.h"
 #include "UIStyle.h"
 #include "VkFormatString.h"
 #include <algorithm>
@@ -137,6 +138,22 @@ void RenderGraphPanel::Draw() {
 				ImGui::SeparatorText("Outputs");
 				for (auto h : pass.writeImages) DrawImageRef(snap, h);
 				for (auto h : pass.writeBuffers) DrawBufferRef(snap, h);
+			}
+
+			// Accepted RenderItem types (declared via .AcceptsItemTypes(...))
+			if (!pass.acceptedItemTypes.empty()) {
+				ImGui::SeparatorText("Accepts Items");
+				for (auto t : pass.acceptedItemTypes) {
+					const char* name = "Unknown";
+					switch (t) {
+						case RenderItemType::Mesh:               name = "Mesh"; break;
+						case RenderItemType::Fullscreen:         name = "Fullscreen"; break;
+						case RenderItemType::InstancedVoxelMesh: name = "InstancedVoxelMesh"; break;
+						case RenderItemType::BrickmapVolume:     name = "BrickmapVolume"; break;
+						case RenderItemType::Count_:             name = "<invalid>"; break;
+					}
+					ImGui::BulletText("%s", name);
+				}
 			}
 
 			// Graphics-specific

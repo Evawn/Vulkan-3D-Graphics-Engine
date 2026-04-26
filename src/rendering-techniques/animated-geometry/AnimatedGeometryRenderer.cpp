@@ -1,4 +1,6 @@
 #include "AnimatedGeometryRenderer.h"
+#include "RenderItem.h"
+#include "RenderScene.h"
 #include "PipelineDefaults.h"
 #include "config.h"
 #include <spdlog/spdlog.h>
@@ -125,7 +127,9 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		.SetBindings(m_compute_bindings);
 
 	// Graphics pass: single-level DDA fragment shader.
-	graph.AddGraphicsPass("Animated Geometry Trace")
+	auto& tracePass = graph.AddGraphicsPass("Animated Geometry Trace");
+	tracePass.AcceptsItemTypes({ RenderItemType::Fullscreen });
+	tracePass
 		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(targets.resolve)
@@ -182,11 +186,23 @@ void AnimatedGeometryRenderer::RegisterPasses(
 			vkCmdPushConstants(vk_cmd, ctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(AnimatedGeometryTracePC), &pc);
 
-			vkCmdDraw(vk_cmd, 4, 1, 0, 0);
+			if (!ctx.scene) return;
+			for (const auto& item : ctx.scene->Get(RenderItemType::Fullscreen)) {
+				DrawFullscreenItem(ctx, item);
+			}
 		})
 		.SetBindings(m_graphics_bindings);
 
 	logger->debug("AnimatedGeometryRenderer: Initialized via RegisterPasses");
+}
+
+void AnimatedGeometryRenderer::EmitItems(RenderScene& scene, const RenderContext& ctx) {
+	(void)ctx;
+	RenderItem item{};
+	item.type        = RenderItemType::Fullscreen;
+	item.voxelAsset  = m_volume;
+	item.frameCount  = 1;
+	scene.Add(item);
 }
 
 std::vector<std::string> AnimatedGeometryRenderer::GetShaderPaths() const {

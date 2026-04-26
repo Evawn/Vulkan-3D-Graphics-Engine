@@ -16,6 +16,7 @@
 #include "RenderGraphTypes.h"
 
 class RenderGraph;
+class RenderScene;
 struct SceneLighting;
 
 struct RenderContext {
@@ -27,6 +28,14 @@ struct RenderContext {
 	uint32_t maxFramesInFlight;
 	std::shared_ptr<Camera> camera;
 	SceneLighting* lighting = nullptr;  // shared, non-owning; renderer-owned state
+
+	// Per-frame scene the technique reads / writes. RenderingSystem owns it,
+	// clears it before EmitItems(), and forwards it through both this context
+	// (so RegisterPasses can capture it) and PassContext::scene (so record
+	// callbacks can iterate items). The future scene graph replaces the
+	// per-technique EmitItems shim with a graph-driven traversal that fills
+	// this same RenderScene; nothing on the consumer side changes.
+	RenderScene* scene = nullptr;
 };
 
 // Capabilities the Renderer exposes to techniques so DescribeTargets() can pick
@@ -81,6 +90,19 @@ public:
 	// available. BindingTable handles descriptor writes automatically — this hook
 	// is for one-shot post-compile work like seeding storage buffers/images.
 	virtual void OnPostCompile(RenderGraph& graph) { (void)graph; }
+
+	// Per-frame: drop RenderItems into the scene that the passes registered by
+	// this technique will consume. RenderingSystem clears the scene each frame
+	// before invoking this on every active technique.
+	//
+	// This virtual is the seam the future scene graph will plug into — when it
+	// lands, a single graph-traversal-emits-items call replaces the per-technique
+	// loop in RenderingSystem::DrawFrame. Techniques that *consume* items (rather
+	// than *own* their geometry) won't override this at all; they only declare
+	// .AcceptsItemTypes(...) and iterate scene->Get(...) in their record callback.
+	virtual void EmitItems(RenderScene& scene, const RenderContext& ctx) {
+		(void)scene; (void)ctx;
+	}
 
 	// ---- Hot-reload + metrics ----
 	virtual std::vector<std::string> GetShaderPaths() const = 0;
