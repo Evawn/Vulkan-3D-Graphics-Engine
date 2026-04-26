@@ -31,7 +31,7 @@ struct BrickmapPaletteTracePC {
 	glm::vec3 sunDirection;   float sunCosHalfAngle;
 	glm::vec3 sunColor;       float sunIntensity;
 	float ambientIntensity;   float aoStrength;
-	int   shadowsEnabled;     int   _pad0;
+	int   shadowsEnabled;     float voxelWorldSize;
 };
 static_assert(sizeof(BrickmapPaletteTracePC) == 144,
 	"BrickmapPaletteTracePC must stay in std140 layout — 144 bytes");
@@ -91,14 +91,45 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	// DeclareGraphResources earlier in this build).
 	const auto* vol = m_assets->GetVoxelVolume(m_volume_asset);
 	m_volume = vol ? vol->volumeImage : ImageHandle{};
-	const glm::uvec3 vs = vol ? vol->size : m_volume_size;
-	const glm::uvec3 grid_dim = vs / 8u;
-	const uint32_t grid_cells = grid_dim.x * grid_dim.y * grid_dim.z;
-	// Header is 8 uint32 (32 bytes): vs_x, vs_y, vs_z, brick_size, gd_x, gd_y, gd_z, brick_count
-	VkDeviceSize brickmapSize = (8 + grid_cells + grid_cells * 128) * sizeof(uint32_t);
 
-	logger->info("BrickmapPaletteRenderer: volume={}x{}x{}, grid={}x{}x{}, buffer={} bytes",
-		vs.x, vs.y, vs.z, grid_dim.x, grid_dim.y, grid_dim.z, brickmapSize);
+	// Volume size + brickmap-buffer sizing diverges by source:
+	//   * CPU-brickmap mode (island bake): buffer is exactly the bake's emitted
+	//     size — header + top grid + only the populated bricks. The volume
+	//     image is a tiny placeholder (Generate + Build are off, nothing reads it).
+	//   * Dense modes (Procedural SDF, .vox file): buffer is sized for the
+	//     worst case — every 8^3 cell potentially populated — because the GPU
+	//     build pass packs into it sparsely without knowing brick_count up front.
+	glm::uvec3   vs;
+	glm::uvec3   grid_dim;
+	VkDeviceSize brickmapSize;
+	if (m_cpu_brickmap_mode) {
+		vs           = m_baked_brickmap.volumeSize;
+		grid_dim     = m_baked_brickmap.gridDim;
+		brickmapSize = m_baked_brickmap.ByteSize();
+		logger->info(
+			"BrickmapPaletteRenderer: CPU-brickmap volume={}x{}x{}, grid={}x{}x{}, "
+			"bricks={}, buffer={} bytes",
+			vs.x, vs.y, vs.z, grid_dim.x, grid_dim.y, grid_dim.z,
+			m_baked_brickmap.brickCount, brickmapSize);
+	} else {
+		vs           = vol ? vol->size : m_volume_size;
+		grid_dim     = vs / 8u;
+		const uint32_t grid_cells = grid_dim.x * grid_dim.y * grid_dim.z;
+		// Header is 8 uint32 (32 bytes): vs_x, vs_y, vs_z, brick_size, gd_x, gd_y, gd_z, brick_count
+		brickmapSize = (8 + grid_cells + grid_cells * 128) * sizeof(uint32_t);
+		logger->info("BrickmapPaletteRenderer: volume={}x{}x{}, grid={}x{}x{}, buffer={} bytes",
+			vs.x, vs.y, vs.z, grid_dim.x, grid_dim.y, grid_dim.z, brickmapSize);
+	}
+
+	// World scale: islands use a fixed voxel size so that a larger volume
+	// produces a *bigger* world in screen space (a 2048 island is twice as
+	// wide as a 1024 island). SDF + .vox keep the legacy "fit longest axis to
+	// 2 world units" behavior — those sources don't have a natural physical
+	// scale and the fit is what every existing camera setup expects.
+	const uint32_t maxAxis = std::max({vs.x, vs.y, vs.z});
+	m_voxel_world_size = m_cpu_brickmap_mode
+	                   ? kIslandVoxelWorldSize
+	                   : (maxAxis > 0 ? 2.0f / static_cast<float>(maxAxis) : 1.0f);
 
 	m_brickmap_buffer = graph.CreateBuffer("brickmap_palette_data", {
 		brickmapSize,
@@ -266,7 +297,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				pc.aoStrength = 0.0f;
 				pc.shadowsEnabled = 0;
 			}
-			pc._pad0 = 0;
+			pc.voxelWorldSize = m_voxel_world_size;
 			vkCmdPushConstants(vk_cmd, ctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BrickmapPaletteTracePC), &pc);
 
@@ -286,18 +317,42 @@ void BrickmapPaletteRenderer::RegisterPasses(
 
 void BrickmapPaletteRenderer::OnPostCompile(RenderGraph& graph) {
 	// AssetRegistry::UploadPending has already pushed any .vox bytes into the
-	// volume image by the time we run. We just need to (a) tell the Generate
-	// compute pass to stand down if we're in file-loaded mode, and (b) push
-	// the .vox-supplied palette into the PaletteResource so the trace shader
-	// renders with file colors.
+	// volume image by the time we run. Three modes branch here:
+	//
+	//   * CPU-brickmap (island bake): both Generate AND Build are off — the
+	//     brickmap is staged in directly from m_baked_brickmap.data, and the
+	//     palette comes from the bake (not the asset, which holds no host data).
+	//   * .vox file: Generate off, Build on; palette from the loaded asset.
+	//   * Procedural SDF: Generate on, Build on; palette stays at default.
 	if (!m_assets) return;
+
+	if (m_cpu_brickmap_mode) {
+		graph.SetPassEnabled("Brickmap Palette Generate", false);
+		graph.SetPassEnabled("Brickmap Palette Build",    false);
+		if (m_palette) m_palette->Upload(m_baked_brickmap.palette.data());
+		if (m_baked_brickmap_pending && m_graphics_pool) {
+			graph.UploadBufferData(m_brickmap_buffer,
+			                       m_baked_brickmap.data.data(),
+			                       m_baked_brickmap.ByteSize(),
+			                       m_graphics_pool);
+			m_baked_brickmap_pending = false;
+			spdlog::get("Render")->info(
+				"BrickmapPaletteRenderer: uploaded CPU brickmap ({} bricks, {:.2f} MB)",
+				m_baked_brickmap.brickCount,
+				m_baked_brickmap.ByteSize() / (1024.0 * 1024.0));
+		}
+		return;
+	}
+
 	const auto* vol = m_assets->GetVoxelVolume(m_volume_asset);
 	if (!vol) return;
 
 	if (vol->isProcedural) {
 		graph.SetPassEnabled("Brickmap Palette Generate", true);
+		graph.SetPassEnabled("Brickmap Palette Build",    true);
 	} else {
 		graph.SetPassEnabled("Brickmap Palette Generate", false);
+		graph.SetPassEnabled("Brickmap Palette Build",    true);
 		if (m_palette) m_palette->Upload(vol->palette.data());
 		spdlog::get("Render")->debug("BrickmapPaletteRenderer: Re-applied loaded .vox ({}x{}x{})",
 			vol->size.x, vol->size.y, vol->size.z);
@@ -387,8 +442,10 @@ void BrickmapPaletteRenderer::RebuildParameters() {
 		m_parameters.push_back(std::move(hdr));
 
 		// Sliders bind to the int mirrors; cfg gets the values copied at bake time.
-		m_parameters.push_back({ "Grid X",       TechniqueParameter::Int,   &m_terrain_grid_x,     8.0f,   4096.0f });
-		m_parameters.push_back({ "Grid Y",       TechniqueParameter::Int,   &m_terrain_grid_y,     8.0f,   4096.0f });
+		// Size drives both X and Y (square footprint). Cap is high — at the top
+		// end the heightmap + brick pool dominate CPU memory, both of which
+		// scale with size^2; the bake logs explain the cost when you push it.
+		m_parameters.push_back({ "Size",         TechniqueParameter::Int,   &m_terrain_size,       8.0f,   8192.0f });
 		m_parameters.push_back({ "Max Height",   TechniqueParameter::Int,   &m_terrain_max_height, 8.0f,   512.0f  });
 		m_parameters.push_back({ "Noise Scale",  TechniqueParameter::Float, &m_terrain_cfg.noiseScale,    0.001f, 0.05f  });
 		m_parameters.push_back({ "Octaves",      TechniqueParameter::Int,   &m_terrain_octaves,    1.0f,   8.0f    });
@@ -420,41 +477,54 @@ void BrickmapPaletteRenderer::BakeIslandTerrainNow() {
 	if (!m_assets) return;
 
 	// Copy the int-mirrored slider values into the canonical cfg before baking.
-	m_terrain_cfg.gridSize  = glm::uvec2(std::max(8, m_terrain_grid_x),
-	                                     std::max(8, m_terrain_grid_y));
+	const uint32_t side = static_cast<uint32_t>(std::max(8, m_terrain_size));
+	m_terrain_cfg.gridSize  = glm::uvec2(side, side);
 	m_terrain_cfg.maxHeight = static_cast<uint32_t>(std::max(8, m_terrain_max_height));
 	m_terrain_cfg.octaves   = std::max(1, m_terrain_octaves);
 	m_terrain_cfg.seed      = static_cast<uint32_t>(std::max(0, m_terrain_seed));
 
+	// Sparse direct-to-brickmap bake: emits a ready-to-upload BrickmapData with
+	// no dense intermediate. CPU memory now scales with the surface band, not
+	// with sx*sy*sz.
 	const auto t0 = std::chrono::steady_clock::now();
-	VoxModel model = PrimitiveFactory::BakeIslandTerrain(m_terrain_cfg);
+	m_baked_brickmap = PrimitiveFactory::BakeIslandTerrainBrickmap(m_terrain_cfg);
 	const auto t1 = std::chrono::steady_clock::now();
 	const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-	logger->info("BrickmapPaletteRenderer: BakeIslandTerrain took {:.1f} ms ({}x{}x{})",
-	             ms, model.volumeSize.x, model.volumeSize.y, model.volumeSize.z);
+	logger->info(
+		"BrickmapPaletteRenderer: BakeIslandTerrainBrickmap took {:.1f} ms "
+		"(volume {}x{}x{}, {} bricks, {:.2f} MB)",
+		ms, m_baked_brickmap.volumeSize.x, m_baked_brickmap.volumeSize.y,
+		m_baked_brickmap.volumeSize.z, m_baked_brickmap.brickCount,
+		m_baked_brickmap.ByteSize() / (1024.0 * 1024.0));
 
-	m_volume_size = model.volumeSize;
+	// Track the logical island extent for camera math + trace bindings, but
+	// shrink the procedural volume image down to a placeholder — nothing reads
+	// it in CPU-brickmap mode (Generate + Build are disabled), so allocating a
+	// full-extent R8_UINT 3D image would waste VRAM proportional to sx*sy*sz.
+	m_volume_size = m_baked_brickmap.volumeSize;
+	m_assets->ResizeProceduralVoxelVolume(m_volume_asset, glm::uvec3(8));
 
-	// Hand the baked bytes + palette to the registry. ReplaceVoxelVolume sets
-	// isProcedural=false; OnPostCompile during the next graph build disables
-	// the procedural Generate pass and uploads the palette via PaletteResource.
-	m_assets->ReplaceVoxelVolume(m_volume_asset, std::move(model), "<island bake>");
+	m_cpu_brickmap_mode      = true;
+	m_baked_brickmap_pending = true;
 
-	// Reposition the camera. The trace shader maps the volume into a centered
-	// unit-ish cube — see brickmap_palette_trace.frag: voxel_world_size = 2/max(vs),
-	// half_extents = vec3(vs) * voxel_world_size * 0.5. The largest voxel axis
-	// covers world-space [-1, 1]; smaller axes scale proportionally. So we pick a
-	// vantage at fixed multiples of those world-space half-extents.
+	// Reposition the camera. The trace shader maps the volume using
+	// voxel_world_size = pc.voxelWorldSize (fixed for islands), so half_extents
+	// = vec3(vs) * vws * 0.5 — bigger islands literally fill more world space,
+	// so the eye distance and far plane both scale with size.
 	if (m_camera) {
-		const float maxVS = static_cast<float>(std::max({m_volume_size.x, m_volume_size.y, m_volume_size.z}));
-		const glm::vec3 halfExtents = glm::vec3(m_volume_size) * (1.0f / maxVS);  // = vs/maxVS * 1.0
+		const float vws = kIslandVoxelWorldSize;
+		const glm::vec3 halfExtents = glm::vec3(m_volume_size) * (vws * 0.5f);
 		const glm::vec3 center(0.0f);
-		const glm::vec3 eye = center + glm::vec3(halfExtents.x * 1.6f,
+		const glm::vec3 eye = center + glm::vec3( halfExtents.x * 1.6f,
 		                                         -halfExtents.y * 1.6f,
 		                                          halfExtents.z * 2.5f);
 		m_camera->SetPosition(eye);
 		m_camera->SetForward(center - eye);
-		m_camera->SetNearFar(0.05f, 50.0f);
+		// Far plane needs to outgrow the diagonal of the island so the back
+		// edge stays visible. 8x the largest half-extent comfortably covers
+		// any oblique view.
+		const float farPlane = std::max(50.0f, std::max({halfExtents.x, halfExtents.y, halfExtents.z}) * 8.0f);
+		m_camera->SetNearFar(0.05f, farPlane);
 	}
 
 	if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
@@ -474,6 +544,11 @@ void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
 	m_pending_reload = false;
 	auto logger = spdlog::get("Render");
 	if (!m_assets) return;
+
+	// Leaving the IslandTerrain source — drop CPU-brickmap mode so the
+	// dense Generate/Build pipeline runs again on the next graph build.
+	m_cpu_brickmap_mode      = false;
+	m_baked_brickmap_pending = false;
 
 	if (m_vox_file_path.empty()) {
 		// Switch back to procedural mode. Resize the asset back to the

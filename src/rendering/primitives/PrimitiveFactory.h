@@ -1,6 +1,6 @@
 #pragma once
 
-#include "VoxLoader.h"
+#include "Brickmap.h"
 
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -48,10 +48,15 @@ struct IslandTerrainConfig {
 
 namespace PrimitiveFactory {
 
-	// CPU bake — run on the calling thread. Returns a VoxModel whose volume
-	// bytes + palette can be moved straight into AssetRegistry::ReplaceVoxelVolume.
-	// volumeSize is per-axis padded up to a multiple of 8 to match the brickmap
-	// build pass's brick size.
-	VoxModel BakeIslandTerrain(const IslandTerrainConfig& cfg);
+	// CPU bake — run on the calling thread. Emits a finished brickmap directly
+	// in the GPU layout: no dense intermediate volume is allocated, and the
+	// GPU compute build pass is unnecessary. Heightmap-driven brick skipping
+	// means CPU memory scales with the *populated* surface band, not with the
+	// total bounding volume.
+	//
+	// volumeSize is per-axis padded up to a multiple of brickSize (8). Caller
+	// uploads the returned `data` straight into the technique's brickmap
+	// storage buffer and the `palette` straight into PaletteResource.
+	BrickmapData BakeIslandTerrainBrickmap(const IslandTerrainConfig& cfg);
 
 }

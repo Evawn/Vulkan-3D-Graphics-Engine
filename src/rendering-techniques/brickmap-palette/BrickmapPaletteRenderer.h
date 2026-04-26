@@ -8,6 +8,7 @@
 #include "Buffer.h"
 #include "CommandBuffer.h"
 #include "VoxLoader.h"
+#include "Brickmap.h"
 #include "PaletteResource.h"
 #include "SceneLighting.h"
 #include "SkyDescription.h"
@@ -71,13 +72,28 @@ private:
 
 	// Island-terrain bake state. Config edited live by inspector sliders; bake
 	// runs (CPU, on the calling thread) when m_pending_bake is set during Reload.
+	// Square-footprint islands: a single Size slider drives both X and Y so
+	// the inspector stays uncluttered.
 	IslandTerrainConfig m_terrain_cfg{};
-	int  m_terrain_grid_x = 1024;     // mirror of cfg.gridSize.x as int for slider widget
-	int  m_terrain_grid_y = 1024;
+	int  m_terrain_size       = 1024; // X == Y voxel extent; capped by RebuildParameters
 	int  m_terrain_max_height = 128;
-	int  m_terrain_octaves = 5;
-	int  m_terrain_seed    = 1337;
-	bool m_pending_bake = false;
+	int  m_terrain_octaves    = 5;
+	int  m_terrain_seed       = 1337;
+	bool m_pending_bake       = false;
+
+	// CPU-brickmap mode — set by BakeIslandTerrainNow. When true, the bake
+	// produced a finished brickmap directly (no dense intermediate, no GPU
+	// build pass). The next RegisterPasses sizes m_brickmap_buffer to fit and
+	// disables Generate + Build; OnPostCompile pushes the bytes via staging.
+	BrickmapData m_baked_brickmap{};
+	bool         m_baked_brickmap_pending = false;  // upload needed on next post-compile
+	bool         m_cpu_brickmap_mode      = false;  // active for this graph
+
+	// World-space edge length of one voxel, pushed into the trace shader.
+	// Recomputed in RegisterPasses based on the active source. Islands use a
+	// fixed value so larger volumes render bigger; SDF + .vox auto-fit.
+	static constexpr float kIslandVoxelWorldSize = 2.0f / 1024.0f;
+	float m_voxel_world_size = kIslandVoxelWorldSize;
 	RenderGraph*   m_graph    = nullptr;
 	AssetRegistry* m_assets   = nullptr;
 	Scene*         m_world    = nullptr;

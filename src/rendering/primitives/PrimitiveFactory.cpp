@@ -96,34 +96,46 @@ namespace {
 
 }  // namespace
 
-VoxModel PrimitiveFactory::BakeIslandTerrain(const IslandTerrainConfig& cfg) {
+BrickmapData PrimitiveFactory::BakeIslandTerrainBrickmap(const IslandTerrainConfig& cfg) {
 	auto logger = spdlog::get("Render");
 
-	// Pad up to a multiple of 8 per axis so the brickmap build pass tiles cleanly.
-	const uint32_t sx = std::max(8u, RoundUpTo8(cfg.gridSize.x));
-	const uint32_t sy = std::max(8u, RoundUpTo8(cfg.gridSize.y));
-	const uint32_t sz = std::max(8u, RoundUpTo8(cfg.maxHeight));
+	// Pad up to a multiple of the brick edge so each brick maps onto a clean
+	// 8^3 region. brickSize is fixed at 8 — matches the trace shader's layout.
+	constexpr uint32_t kBrickSize = 8;
+	const uint32_t sx = std::max(kBrickSize, RoundUpTo8(cfg.gridSize.x));
+	const uint32_t sy = std::max(kBrickSize, RoundUpTo8(cfg.gridSize.y));
+	const uint32_t sz = std::max(kBrickSize, RoundUpTo8(cfg.maxHeight));
 
-	if (logger) {
-		const uint64_t bytes = uint64_t(sx) * sy * sz;
-		const double mb = bytes / (1024.0 * 1024.0);
-		logger->info("BakeIslandTerrain: gridSize={}x{} maxHeight={} → padded {}x{}x{} ({:.1f} MB)",
-		             cfg.gridSize.x, cfg.gridSize.y, cfg.maxHeight, sx, sy, sz, mb);
-		if (mb > 512.0) {
-			logger->warn("BakeIslandTerrain: dense volume is {:.1f} MB — large allocations ahead", mb);
-		}
-	}
+	const uint32_t gdx = sx / kBrickSize;
+	const uint32_t gdy = sy / kBrickSize;
+	const uint32_t gdz = sz / kBrickSize;
+	const uint64_t gridCells = uint64_t(gdx) * gdy * gdz;
 
-	VoxModel model{};
-	model.sizeX = sx;
-	model.sizeY = sy;
-	model.sizeZ = sz;
-	model.volumeSize = glm::uvec3(sx, sy, sz);
-	model.volume.assign(uint64_t(sx) * sy * sz, 0u);
-	model.palette = BuildIslandPalette();
+	BrickmapData out{};
+	out.volumeSize = glm::uvec3(sx, sy, sz);
+	out.gridDim    = glm::uvec3(gdx, gdy, gdz);
+	out.brickSize  = kBrickSize;
+	out.brickCount = 0;
+	out.palette    = BuildIslandPalette();
 
-	// Heightmap pass — separate so we don't recompute fBm per Z step.
-	std::vector<uint32_t> heightmap(uint64_t(sx) * sy, 0u);
+	// Header (8 words) + top grid (gridCells words). Pool entries appended as
+	// non-empty bricks are discovered. Sentinel-fill the grid up front so any
+	// brick we skip is implicitly marked empty.
+	out.data.assign(8 + gridCells, 0xFFFFFFFFu);
+	out.data[0] = sx;
+	out.data[1] = sy;
+	out.data[2] = sz;
+	out.data[3] = kBrickSize;
+	out.data[4] = gdx;
+	out.data[5] = gdy;
+	out.data[6] = gdz;
+	out.data[7] = 0;  // brick_count, populated below
+
+	// Heightmap — 2 bytes per XY column. uint16 caps at 65535, far above the
+	// max-height slider's 512, so packed storage is safe and halves the only
+	// allocation that scales with horizontal extent at large sizes (256 MB →
+	// 128 MB at 8192^2).
+	std::vector<uint16_t> heightmap(uint64_t(sx) * sy, 0u);
 
 	const float halfX = sx * 0.5f;
 	const float halfY = sy * 0.5f;
@@ -131,71 +143,159 @@ VoxModel PrimitiveFactory::BakeIslandTerrain(const IslandTerrainConfig& cfg) {
 	// grids still get a circular-ish island instead of an elongated one.
 	const float halfMin = std::min(halfX, halfY);
 
-	const float seaY    = cfg.seaLevel * static_cast<float>(sz);
-	const float beachY  = (cfg.seaLevel + cfg.beachWidth) * static_cast<float>(sz);
+	const float seaY   = cfg.seaLevel * static_cast<float>(sz);
+	const float beachY = (cfg.seaLevel + cfg.beachWidth) * static_cast<float>(sz);
 
+	uint32_t globalHmax = 0;
 	for (uint32_t y = 0; y < sy; ++y) {
 		for (uint32_t x = 0; x < sx; ++x) {
-			// fBm sampled in voxel space scaled by noiseScale.
 			const float n = FBm2D(static_cast<float>(x) * cfg.noiseScale,
 			                      static_cast<float>(y) * cfg.noiseScale, cfg);
 
-			// Radial island falloff — 1 at center, 0 past islandRadius+islandFalloff.
 			const float dx = (static_cast<float>(x) + 0.5f - halfX) / halfMin;
 			const float dy = (static_cast<float>(y) + 0.5f - halfY) / halfMin;
 			const float dist = std::sqrt(dx * dx + dy * dy);
 			const float mask = 1.0f - Smoothstep(cfg.islandRadius, cfg.islandRadius + cfg.islandFalloff, dist);
 
-			// Bias the heightmap so the island has a baseline above sea level
-			// (otherwise low-noise patches in the island center would be water).
-			// Centerline pushes height to ~maxHeight * (seaLevel + 0.4 * mask).
 			const float baseline = (cfg.seaLevel + 0.05f) + 0.55f * mask;
 			const float h01 = std::clamp(baseline + 0.35f * mask * (n - 0.5f), 0.0f, 1.0f);
 
-			heightmap[uint64_t(y) * sx + x] = static_cast<uint32_t>(h01 * static_cast<float>(sz - 1));
+			const uint32_t h = static_cast<uint32_t>(h01 * static_cast<float>(sz - 1));
+			heightmap[uint64_t(y) * sx + x] = static_cast<uint16_t>(h);
+			if (h > globalHmax) globalHmax = h;
 		}
 	}
 
-	// Voxelize columns from heightmap.
-	for (uint32_t y = 0; y < sy; ++y) {
-		for (uint32_t x = 0; x < sx; ++x) {
-			const uint32_t h = heightmap[uint64_t(y) * sx + x];
-			const float    hf = static_cast<float>(h);
+	// Reserve a rough upper bound for the pool so we avoid mid-bake reallocations.
+	// Surface band (seaY .. globalHmax) is everything that *might* contain
+	// bricks; assume worst case all those bricks are populated.
+	{
+		const uint32_t bzLo = static_cast<uint32_t>(std::max(0.0f, std::floor(seaY))) / kBrickSize;
+		const uint32_t bzHi = std::min(gdz, (globalHmax / kBrickSize) + 1);
+		const uint64_t maxBricks = uint64_t(gdx) * gdy * (bzHi > bzLo ? (bzHi - bzLo) : 0);
+		out.data.reserve(out.data.size() + maxBricks * 128);
+	}
 
-			// Surface that ends inside the beach band is "beachy" — fill the top
-			// with sand instead of grass. Surfaces above are normal terrain.
-			const bool isBeachColumn = (hf <= beachY);
+	// Per-brick scratch — 128 words = exactly one brick in the pool layout.
+	uint32_t scratch[128];
 
-			const uint32_t topZ = std::min<uint32_t>(h, sz - 1);
-			for (uint32_t z = 0; z <= topZ; ++z) {
-				if (static_cast<float>(z) < seaY) {
-					// Below sea level — empty for v1 (water comes later).
+	uint64_t skippedAbove = 0;
+	uint64_t skippedBelow = 0;
+	uint64_t skippedEmptyBand = 0;
+	uint64_t emittedBricks = 0;
+
+	for (uint32_t bz = 0; bz < gdz; ++bz) {
+		const uint32_t z0 = bz * kBrickSize;
+		const uint32_t zMaxInBrick = z0 + kBrickSize - 1;
+
+		// Whole-z-slab below sea is uniformly empty regardless of XY.
+		const bool slabBelowSea = (static_cast<float>(zMaxInBrick) < seaY);
+
+		for (uint32_t by = 0; by < gdy; ++by) {
+			const uint32_t y0 = by * kBrickSize;
+			for (uint32_t bx = 0; bx < gdx; ++bx) {
+				const uint32_t x0 = bx * kBrickSize;
+				const uint64_t gridIdx = uint64_t(bx)
+				                       + uint64_t(by) * gdx
+				                       + uint64_t(bz) * gdx * gdy;
+
+				if (slabBelowSea) {
+					++skippedBelow;
+					continue;  // sentinel already in place
+				}
+
+				// Find min/max heights under this brick's 8x8 XY footprint.
+				uint32_t hmin = UINT32_MAX;
+				uint32_t hmax = 0;
+				for (uint32_t ly = 0; ly < kBrickSize; ++ly) {
+					const uint16_t* row = &heightmap[uint64_t(y0 + ly) * sx + x0];
+					for (uint32_t lx = 0; lx < kBrickSize; ++lx) {
+						const uint32_t h = row[lx];
+						if (h < hmin) hmin = h;
+						if (h > hmax) hmax = h;
+					}
+				}
+
+				// Brick entirely above all surfaces under it → all voxels empty.
+				if (z0 > hmax) {
+					++skippedAbove;
 					continue;
 				}
 
-				uint8_t mat;
-				if (isBeachColumn) {
-					mat = MAT_SAND;
-				} else if (z == topZ) {
-					mat = MAT_GRASS;
-				} else if (z + 3u >= topZ) {
-					mat = MAT_DIRT;
-				} else {
-					mat = MAT_STONE;
+				// Brick lies under terrain but the slice [seaY, hmax] doesn't
+				// reach it: hmax < z0 already handled above. The opposite case
+				// — z0 above globalHmax — is also folded into that test. Below
+				// we fall through to per-voxel rasterization.
+				(void)hmin;
+
+				// Voxelize this brick into scratch.
+				for (uint32_t i = 0; i < 128; ++i) scratch[i] = 0u;
+				bool anyOccupied = false;
+
+				for (uint32_t ly = 0; ly < kBrickSize; ++ly) {
+					for (uint32_t lx = 0; lx < kBrickSize; ++lx) {
+						const uint32_t h = heightmap[uint64_t(y0 + ly) * sx + (x0 + lx)];
+						const uint32_t topZ = std::min<uint32_t>(h, sz - 1);
+						const bool isBeachColumn = (static_cast<float>(h) <= beachY);
+
+						const uint32_t zStart = z0;
+						const uint32_t zEnd   = std::min<uint32_t>(z0 + kBrickSize - 1, topZ);
+						if (zEnd < zStart) continue;
+						for (uint32_t gz = zStart; gz <= zEnd; ++gz) {
+							if (static_cast<float>(gz) < seaY) continue;
+
+							uint8_t mat;
+							if (isBeachColumn) {
+								mat = MAT_SAND;
+							} else if (gz == topZ) {
+								mat = MAT_GRASS;
+							} else if (gz + 3u >= topZ) {
+								mat = MAT_DIRT;
+							} else {
+								mat = MAT_STONE;
+							}
+
+							const uint32_t lz = gz - z0;
+							const uint32_t linear  = lz * 64u + ly * 8u + lx;
+							const uint32_t word    = linear >> 2;
+							const uint32_t laneBit = (linear & 3u) * 8u;
+							scratch[word] |= static_cast<uint32_t>(mat) << laneBit;
+							anyOccupied = true;
+						}
+					}
 				}
 
-				const uint64_t idx = (uint64_t(z) * sy + y) * sx + x;
-				model.volume[idx] = mat;
+				if (!anyOccupied) {
+					++skippedEmptyBand;
+					continue;
+				}
+
+				const uint32_t brickIdx = out.brickCount++;
+				out.data[8 + gridIdx] = brickIdx;
+				out.data.insert(out.data.end(), scratch, scratch + 128);
+				++emittedBricks;
 			}
 		}
 	}
 
+	out.data[7] = out.brickCount;
+
 	if (logger) {
-		uint64_t filled = 0;
-		for (uint8_t v : model.volume) if (v != 0) ++filled;
-		const double pct = 100.0 * static_cast<double>(filled) / static_cast<double>(model.volume.size());
-		logger->info("BakeIslandTerrain: {} filled voxels ({:.2f}%)", filled, pct);
+		const uint64_t totalCells   = gridCells;
+		const uint64_t totalBytes   = out.ByteSize();
+		const double   mb           = totalBytes / (1024.0 * 1024.0);
+		const double   denseMb      = uint64_t(sx) * sy * sz / (1024.0 * 1024.0);
+		const double   sparsity     = totalCells > 0
+		                            ? 100.0 * static_cast<double>(emittedBricks) / static_cast<double>(totalCells)
+		                            : 0.0;
+		logger->info(
+			"BakeIslandTerrainBrickmap: {}x{}x{} → grid {}x{}x{} ({} cells), "
+			"emitted {} bricks ({:.2f}%), skipped above={} below={} empty-band={}, "
+			"buffer {:.2f} MB (vs dense {:.1f} MB)",
+			sx, sy, sz, gdx, gdy, gdz, totalCells,
+			emittedBricks, sparsity, skippedAbove, skippedBelow, skippedEmptyBand,
+			mb, denseMb);
 	}
 
-	return model;
+	return out;
 }

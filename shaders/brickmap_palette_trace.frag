@@ -15,7 +15,8 @@ layout(push_constant) uniform PushConstantBlock {
 	float ambientIntensity;// scales skyColor contribution (modulated by AO)
 	float aoStrength;      // 0 disables corner AO; 1 = full weight
 	int   shadowsEnabled;  // 0/1 — gates the secondary DDA march toward the sun
-	int   _pad0;
+	float voxelWorldSize;  // edge length of one voxel in world units. Larger volumes
+	                       // → bigger world (no auto-fit-to-unit-cube).
 } pc;
 
 // Flat uint array — per-axis layout:
@@ -273,8 +274,9 @@ void main() {
 	g_grid_dim    = uvec3(bm_data[4], bm_data[5], bm_data[6]);
 	g_grid_cells  = g_grid_dim.x * g_grid_dim.y * g_grid_dim.z;
 
-	uint max_vs = max(max(g_volume_size.x, g_volume_size.y), g_volume_size.z);
-	g_voxel_world_size = 2.0 / float(max_vs);
+	// World scale is host-driven (push constant), not auto-normalized: a 2048
+	// island is twice as big as a 1024 island, not half the voxel size.
+	g_voxel_world_size = pc.voxelWorldSize;
 	g_half_extents     = vec3(g_volume_size) * g_voxel_world_size * 0.5;
 
 	vec3 rayOrigin = pc.cameraPos;
