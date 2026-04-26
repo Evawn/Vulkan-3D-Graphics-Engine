@@ -6,15 +6,40 @@
 #include "PassDAG.h"
 #include "Device.h"
 #include "Allocator.h"
+#include "CommandBuffer.h"
+#include "CommandPool.h"
+#include "Queue.h"
+#include "Semaphore.h"
 #include <memory>
 #include <vector>
 
 class GPUProfiler;
 
+// Optional async-compute plumbing for the render graph. When asyncQueue is
+// non-null AND its queue family differs from the graphics family, the graph
+// honors AsyncCompute affinity hints by recording compute work into a
+// per-frame-in-flight async command buffer and submitting it on asyncQueue.
+// Cross-queue handoff uses one binary semaphore per frame-in-flight, signaled
+// by the async submit and waited on by the next graphics submit. If the queue
+// is null OR shares a family with graphics, every AsyncCompute hint is
+// silently demoted back to the graphics stream.
+struct RenderGraphAsyncConfig {
+	std::shared_ptr<VWrap::Queue>       computeQueue;
+	std::shared_ptr<VWrap::CommandPool> computeCommandPool;
+	uint32_t                            graphicsQueueFamily = 0;
+	uint32_t                            framesInFlight      = 1;
+};
+
 class RenderGraph {
 public:
 	RenderGraph() = default;
 	RenderGraph(std::shared_ptr<VWrap::Device> device, std::shared_ptr<VWrap::Allocator> allocator);
+
+	// Set once after construction (typically by Renderer) to enable async-compute
+	// scheduling. Calling with a queue whose family equals graphicsQueueFamily
+	// disables async; the graph keeps the config but treats async-availability
+	// as false.
+	void ConfigureAsync(const RenderGraphAsyncConfig& cfg);
 
 	// ---- Resources ----
 	ImageHandle CreateImage(const std::string& name, const ImageDesc& desc);
@@ -70,6 +95,18 @@ public:
 	GraphSnapshot BuildSnapshot() const;
 	size_t GetPassCount() const { return m_executionOrder.size(); }
 
+	// What the host-side graphics submit needs to wait on this frame, if anything.
+	// Populated by Execute() — cleared at the start of every Execute call. Empty
+	// vector = no async work was submitted; the caller may submit graphics with
+	// only its existing waits (image-available). Non-empty = the graphics queue
+	// must additionally wait on the listed semaphores at the listed stages
+	// before reading anything the async batch produced.
+	struct GraphicsQueueWait {
+		std::vector<VkSemaphore>          semaphores;
+		std::vector<VkPipelineStageFlags> stages;
+	};
+	const GraphicsQueueWait& GetGraphicsQueueWait() const { return m_graphicsQueueWait; }
+
 	// ---- Internal access for builders ----
 	const ImageResource& GetImageResource(ImageHandle handle) const;
 	const BufferResource& GetBufferResource(BufferHandle handle) const;
@@ -104,17 +141,35 @@ private:
 	std::vector<size_t>   m_nodeToDecl;          // node id -> decl idx (inverse of declToNode)
 	std::vector<bool>     m_nodeAlive;           // node id -> is in m_executionOrder
 
+	// Per-pass resolved queue stream (parallel to m_executionOrder). Set by
+	// Compile() from DAGBuilder's affinity output, after demotion.
+	std::vector<QueueAffinity> m_executionOrderStreams;
+	bool                       m_hasAsyncWork = false;
+
 	// Explicit sink resources marked by callers via MarkSink(). Combined with
 	// imported / Persistent resources (implicit sinks) at Compile time.
 	std::vector<uint32_t> m_explicitImageSinks;
 	std::vector<uint32_t> m_explicitBufferSinks;
 
-	// Pre-computed barriers per execution step
+	// Pre-computed barriers per execution step. The release barriers are
+	// emitted *after* the pass body (only populated for passes that produce
+	// resources consumed on a different queue stream); the regular barriers
+	// are emitted before the pass body and may include cross-stream acquires.
 	struct PassBarriers {
 		std::vector<ImageBarrier> imageBarriers;
 		std::vector<BufferBarrier> bufferBarriers;
+		std::vector<ImageBarrier> imageReleaseBarriers;
+		std::vector<BufferBarrier> bufferReleaseBarriers;
 	};
 	std::vector<PassBarriers> m_barriers;
+
+	// ---- Async-compute plumbing (only populated when ConfigureAsync was called
+	// with a distinct compute queue family) ----
+	RenderGraphAsyncConfig                            m_asyncCfg{};
+	bool                                              m_asyncAvailable = false;
+	std::vector<std::shared_ptr<VWrap::CommandBuffer>> m_asyncCmdBuffers;     // one per frame-in-flight
+	std::vector<std::shared_ptr<VWrap::Semaphore>>     m_asyncDoneSemaphores; // one per frame-in-flight
+	GraphicsQueueWait                                  m_graphicsQueueWait{}; // recomputed each Execute()
 
 	bool m_compiled = false;
 
@@ -131,6 +186,13 @@ private:
 	void CreatePipelines();
 	void UpdateBindings();
 	void ComputeBarriers();
+
+	// Records every pass in m_executionOrder whose stream matches `targetStream`
+	// into the given command buffer. Writes pre-pass barriers (intra-stream +
+	// cross-stream acquires), the pass body, and post-pass release barriers.
+	void RecordStream(std::shared_ptr<VWrap::CommandBuffer> cmd,
+	                  uint32_t frameIndex, GPUProfiler* profiler,
+	                  QueueAffinity targetStream);
 
 	void BuildGraphicsPipeline(GraphicsPassBuilder& pass);
 	void BuildComputePipeline(ComputePassBuilder& pass);

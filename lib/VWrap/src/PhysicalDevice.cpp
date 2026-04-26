@@ -149,6 +149,12 @@ namespace VWrap
         throw std::runtime_error("Could not find suitable memory type!");
     }
 
+    bool PhysicalDevice::HasAsyncComputeQueue() {
+        QueueFamilyIndices indices = FindQueueFamilies();
+        if (!indices.graphicsFamily.has_value() || !indices.computeFamily.has_value()) return false;
+        return indices.computeFamily.value() != indices.graphicsFamily.value();
+    }
+
     VkSampleCountFlagBits PhysicalDevice::GetMaxUsableSampleCount() {
         VkPhysicalDeviceProperties physicalDeviceProperties;
         vkGetPhysicalDeviceProperties(m_physical_device, &physicalDeviceProperties);

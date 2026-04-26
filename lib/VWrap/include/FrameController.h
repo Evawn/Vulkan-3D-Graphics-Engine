@@ -161,6 +161,17 @@ namespace VWrap {
 		void Render();
 
 		/// <summary>
+		/// Submits the current frame's command buffer with additional wait semaphores
+		/// and stages prepended to the existing image-available wait. Used by the
+		/// render graph when async-compute work was submitted earlier in the frame
+		/// and the graphics submit must wait on the async-done semaphore before
+		/// reading anything that work produced. Both vectors must have equal length;
+		/// pass empty vectors for the no-extra-waits case (equivalent to Render()).
+		/// </summary>
+		void Render(const std::vector<VkSemaphore>& extraWaitSemaphores,
+		            const std::vector<VkPipelineStageFlags>& extraWaitStages);
+
+		/// <summary>
 		/// Recreates the swapchain and all associated resources.
 		/// </summary>
 		void RecreateSwapchain();

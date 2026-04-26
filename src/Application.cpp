@@ -177,5 +177,10 @@ void Application::DrawFrame() {
 	}
 
 	// PRESENT ------------------------------------------------
-	m_vk.frameController->Render();
+	// The render graph may have submitted async-compute work earlier in this
+	// frame; if so, the graphics submit needs to wait on its completion
+	// semaphore before reading anything that work produced. The wait list is
+	// empty when no async work was submitted.
+	const auto& gfxWait = m_rendering.GetRenderer().GetGraph().GetGraphicsQueueWait();
+	m_vk.frameController->Render(gfxWait.semaphores, gfxWait.stages);
 }

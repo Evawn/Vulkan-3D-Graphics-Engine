@@ -37,3 +37,8 @@ ComputePassBuilder& ComputePassBuilder::SetPipeline(std::function<ComputePipelin
 	m_pipelineDescFactory = std::move(descFactory);
 	return *this;
 }
+
+ComputePassBuilder& ComputePassBuilder::SetQueueAffinity(QueueAffinity affinity) {
+	m_queueAffinity = affinity;
+	return *this;
+}

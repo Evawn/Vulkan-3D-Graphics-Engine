@@ -86,7 +86,14 @@ void AnimatedGeometryRenderer::RegisterPasses(
 	m_graphics_bindings->Build();
 
 	// Compute pass: write procedural animated voxels into the volume each frame.
+	// Tagged AsyncCompute so the dispatch overlaps with the previous frame's
+	// graphics tail (post-process / UI) on devices with a dedicated compute
+	// queue family. The graph emits the queue-family-ownership transfer barriers
+	// for m_volume and a binary semaphore signal-wait between the async submit
+	// and the graphics submit. On single-queue-family devices the hint is
+	// silently demoted (logged once) and the pass runs on the graphics queue.
 	graph.AddComputePass("Animated Geometry Generate")
+		.SetQueueAffinity(QueueAffinity::AsyncCompute)
 		.Write(m_volume)
 		.SetPipeline([this]() {
 			ComputePipelineDesc d;

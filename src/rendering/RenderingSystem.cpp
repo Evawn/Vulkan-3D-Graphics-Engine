@@ -8,12 +8,15 @@ void RenderingSystem::Init(const RenderingSystemConfig& cfg) {
 	m_offscreenExtent = cfg.initialOffscreenExtent;
 
 	RendererConfig rc{};
-	rc.device            = cfg.vk->device;
-	rc.allocator         = cfg.vk->allocator;
-	rc.msaaSamples       = cfg.vk->msaaSamples;
-	rc.swapchainFormat   = cfg.vk->frameController->GetSwapchain()->GetFormat();
-	rc.depthFormat       = VWrap::FindDepthFormat(cfg.vk->physicalDevice->Get());
-	rc.maxFramesInFlight = cfg.maxFramesInFlight;
+	rc.device              = cfg.vk->device;
+	rc.allocator           = cfg.vk->allocator;
+	rc.msaaSamples         = cfg.vk->msaaSamples;
+	rc.swapchainFormat     = cfg.vk->frameController->GetSwapchain()->GetFormat();
+	rc.depthFormat         = VWrap::FindDepthFormat(cfg.vk->physicalDevice->Get());
+	rc.maxFramesInFlight   = cfg.maxFramesInFlight;
+	rc.computeQueue        = cfg.vk->computeQueue;
+	rc.computeCommandPool  = cfg.vk->computeCommandPool;
+	rc.graphicsQueueFamily = cfg.vk->graphicsQueue->GetQueueFamilyIndex();
 	m_renderer = Renderer(rc);
 
 	m_profiler = GPUProfiler::Create(cfg.vk->device, cfg.maxFramesInFlight);

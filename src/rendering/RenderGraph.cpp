@@ -22,6 +22,24 @@ static ResourceUsage UsageAt(const std::vector<ResourceUsage>& v, size_t i) {
 RenderGraph::RenderGraph(std::shared_ptr<VWrap::Device> device, std::shared_ptr<VWrap::Allocator> allocator)
 	: m_device(device), m_allocator(allocator) {}
 
+void RenderGraph::ConfigureAsync(const RenderGraphAsyncConfig& cfg) {
+	m_asyncCfg = cfg;
+	const bool hasDistinctComputeFamily = cfg.computeQueue && cfg.computeCommandPool &&
+		cfg.computeQueue->GetQueueFamilyIndex() != cfg.graphicsQueueFamily;
+	m_asyncAvailable = hasDistinctComputeFamily;
+	if (!m_asyncAvailable) return;
+
+	// Pre-allocate per-frame async command buffers and binary signal semaphores.
+	// Reused across compiles — these don't depend on graph state, only on the
+	// frames-in-flight count.
+	m_asyncCmdBuffers.clear();
+	m_asyncDoneSemaphores.clear();
+	for (uint32_t i = 0; i < cfg.framesInFlight; i++) {
+		m_asyncCmdBuffers.push_back(VWrap::CommandBuffer::Create(cfg.computeCommandPool));
+		m_asyncDoneSemaphores.push_back(VWrap::Semaphore::Create(m_device));
+	}
+}
+
 ImageHandle RenderGraph::CreateImage(const std::string& name, const ImageDesc& desc) {
 	ImageHandle handle;
 	handle.id = static_cast<uint32_t>(m_images.size());
@@ -745,8 +763,109 @@ void RenderGraph::ComputeBarriers() {
 	std::vector<bool> imageWritten(m_images.size(), false);
 	std::vector<bool> bufferWritten(m_buffers.size(), false);
 
+	// ---- Cross-stream ownership tracking ----
+	// Queue family ownership is per-resource and changes whenever a pass on a
+	// different stream uses a resource a previous stream produced. We track
+	// (a) the current owner stream, (b) the m_executionOrder index of the
+	// producer-most-recently-on-that-stream — this is where the release barrier
+	// gets appended when the next consumer is on a different stream.
+	std::vector<QueueAffinity> imageOwnerStream(m_images.size(), QueueAffinity::Graphics);
+	std::vector<QueueAffinity> bufferOwnerStream(m_buffers.size(), QueueAffinity::Graphics);
+	std::vector<size_t>        imageLastProducerIdx(m_images.size(), SIZE_MAX);
+	std::vector<size_t>        bufferLastProducerIdx(m_buffers.size(), SIZE_MAX);
+
+	const uint32_t graphicsQF = m_asyncCfg.graphicsQueueFamily;
+	const uint32_t asyncQF    = (m_asyncAvailable && m_asyncCfg.computeQueue)
+		? m_asyncCfg.computeQueue->GetQueueFamilyIndex()
+		: graphicsQF;
+	auto qfFor = [&](QueueAffinity s) {
+		return (s == QueueAffinity::AsyncCompute) ? asyncQF : graphicsQF;
+	};
+
+	// Helper: emits a cross-stream ownership transfer for image `img.id`.
+	// Returns true iff the access was handled (caller should skip its normal
+	// barrier path); false iff no transfer was needed (no producer or same
+	// stream — caller proceeds with the legacy intra-stream path).
+	auto tryEmitImageOwnershipTransfer = [&](
+		ImageHandle img, size_t consumerIdx, QueueAffinity consumerStream,
+		VkImageLayout neededLayout, VkPipelineStageFlags consumerStage,
+		VkAccessFlags consumerAccess) -> bool
+	{
+		if (!imageWritten[img.id]) return false;            // first use this frame; no transfer
+		if (imageOwnerStream[img.id] == consumerStream) return false;  // intra-stream
+		const size_t producerIdx = imageLastProducerIdx[img.id];
+		if (producerIdx == SIZE_MAX) return false;          // owner without producer (shouldn't happen)
+
+		// Release on producer's command buffer (executes after producer pass body).
+		ImageBarrier release{};
+		release.image      = img;
+		release.srcStage   = lastImageWriter[img.id].stage;
+		release.srcAccess  = lastImageWriter[img.id].access;
+		release.dstStage   = 0;        // ignored on release half of an ownership transfer
+		release.dstAccess  = 0;
+		release.oldLayout  = currentLayout[img.id];
+		release.newLayout  = neededLayout;
+		release.srcQueueFamily = qfFor(imageOwnerStream[img.id]);
+		release.dstQueueFamily = qfFor(consumerStream);
+		m_barriers[producerIdx].imageReleaseBarriers.push_back(release);
+
+		// Acquire on consumer's command buffer (executes before consumer pass body).
+		ImageBarrier acquire{};
+		acquire.image      = img;
+		acquire.srcStage   = 0;        // ignored on acquire half
+		acquire.srcAccess  = 0;
+		acquire.dstStage   = consumerStage;
+		acquire.dstAccess  = consumerAccess;
+		acquire.oldLayout  = currentLayout[img.id];
+		acquire.newLayout  = neededLayout;
+		acquire.srcQueueFamily = qfFor(imageOwnerStream[img.id]);
+		acquire.dstQueueFamily = qfFor(consumerStream);
+		m_barriers[consumerIdx].imageBarriers.push_back(acquire);
+
+		// Update tracker — consumer now owns it; layout is whatever the consumer asked for.
+		currentLayout[img.id]       = neededLayout;
+		imageOwnerStream[img.id]    = consumerStream;
+		// imageLastProducerIdx unchanged: consumer hasn't written, just acquired.
+		// lastImageWriter unchanged: producer's write info still defines visibility.
+		return true;
+	};
+
+	auto tryEmitBufferOwnershipTransfer = [&](
+		BufferHandle buf, size_t consumerIdx, QueueAffinity consumerStream,
+		VkPipelineStageFlags consumerStage, VkAccessFlags consumerAccess) -> bool
+	{
+		if (!bufferWritten[buf.id]) return false;
+		if (bufferOwnerStream[buf.id] == consumerStream) return false;
+		const size_t producerIdx = bufferLastProducerIdx[buf.id];
+		if (producerIdx == SIZE_MAX) return false;
+
+		BufferBarrier release{};
+		release.buffer    = buf;
+		release.srcStage  = lastBufferWriter[buf.id].stage;
+		release.srcAccess = lastBufferWriter[buf.id].access;
+		release.dstStage  = 0;
+		release.dstAccess = 0;
+		release.srcQueueFamily = qfFor(bufferOwnerStream[buf.id]);
+		release.dstQueueFamily = qfFor(consumerStream);
+		m_barriers[producerIdx].bufferReleaseBarriers.push_back(release);
+
+		BufferBarrier acquire{};
+		acquire.buffer    = buf;
+		acquire.srcStage  = 0;
+		acquire.srcAccess = 0;
+		acquire.dstStage  = consumerStage;
+		acquire.dstAccess = consumerAccess;
+		acquire.srcQueueFamily = qfFor(bufferOwnerStream[buf.id]);
+		acquire.dstQueueFamily = qfFor(consumerStream);
+		m_barriers[consumerIdx].bufferBarriers.push_back(acquire);
+
+		bufferOwnerStream[buf.id] = consumerStream;
+		return true;
+	};
+
 	for (size_t i = 0; i < m_executionOrder.size(); i++) {
 		const auto& ref = m_executionOrder[i];
+		const QueueAffinity passStream = m_executionOrderStreams[i];
 
 		if (ref.type == PassType::Compute) {
 			auto& pass = *m_computePasses[ref.index];
@@ -759,6 +878,11 @@ void RenderGraph::ComputeBarriers() {
 				VkAccessFlags dstAccess;
 				VkPipelineStageFlags dstStage;
 				ImageReadParams(usage, PassType::Compute, required, dstAccess, dstStage);
+
+				if (tryEmitImageOwnershipTransfer(img, i, passStream,
+						required, dstStage, dstAccess)) {
+					continue;
+				}
 
 				bool layoutMatches = (currentLayout[img.id] == required);
 				bool noProducer = !imageWritten[img.id];
@@ -779,7 +903,12 @@ void RenderGraph::ComputeBarriers() {
 
 			// Image writes — emit transition to GENERAL only if layout differs.
 			for (const auto& img : pass.m_writeImages) {
-				if (currentLayout[img.id] != VK_IMAGE_LAYOUT_GENERAL) {
+				if (tryEmitImageOwnershipTransfer(img, i, passStream,
+						VK_IMAGE_LAYOUT_GENERAL,
+						VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+						VK_ACCESS_SHADER_WRITE_BIT)) {
+					// fall through; the acquire transitioned to GENERAL.
+				} else if (currentLayout[img.id] != VK_IMAGE_LAYOUT_GENERAL) {
 					ImageBarrier barrier;
 					barrier.image = img;
 					barrier.srcStage = imageWritten[img.id] ? lastImageWriter[img.id].stage
@@ -801,12 +930,18 @@ void RenderGraph::ComputeBarriers() {
 				};
 				imageWritten[img.id] = true;
 				currentLayout[img.id] = VK_IMAGE_LAYOUT_GENERAL;
+				imageOwnerStream[img.id] = passStream;
+				imageLastProducerIdx[img.id] = i;
 			}
 
 			// Buffer writes
 			for (size_t w = 0; w < pass.m_writeBuffers.size(); w++) {
 				const auto& buf = pass.m_writeBuffers[w];
-				if (bufferWritten[buf.id]) {
+				if (tryEmitBufferOwnershipTransfer(buf, i, passStream,
+						VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+						VK_ACCESS_SHADER_WRITE_BIT)) {
+					// acquire emitted
+				} else if (bufferWritten[buf.id]) {
 					BufferBarrier barrier;
 					barrier.buffer = buf;
 					barrier.srcStage = lastBufferWriter[buf.id].stage;
@@ -821,17 +956,23 @@ void RenderGraph::ComputeBarriers() {
 					VK_ACCESS_SHADER_WRITE_BIT
 				};
 				bufferWritten[buf.id] = true;
+				bufferOwnerStream[buf.id] = passStream;
+				bufferLastProducerIdx[buf.id] = i;
 			}
 
 			// Buffer reads
 			for (size_t r = 0; r < pass.m_readBuffers.size(); r++) {
 				const auto& buf = pass.m_readBuffers[r];
-				if (!bufferWritten[buf.id]) continue;  // no producer to sync against
 
 				ResourceUsage usage = UsageAt(pass.m_readBufferUsages, r);
 				VkAccessFlags dstAccess;
 				VkPipelineStageFlags dstStage;
 				BufferReadParams(usage, PassType::Compute, dstAccess, dstStage);
+
+				if (tryEmitBufferOwnershipTransfer(buf, i, passStream, dstStage, dstAccess)) {
+					continue;
+				}
+				if (!bufferWritten[buf.id]) continue;  // no producer to sync against
 
 				BufferBarrier barrier;
 				barrier.buffer = buf;
@@ -854,15 +995,14 @@ void RenderGraph::ComputeBarriers() {
 				VkPipelineStageFlags dstStage;
 				ImageReadParams(usage, PassType::Graphics, required, dstAccess, dstStage);
 
+				if (tryEmitImageOwnershipTransfer(img, i, passStream,
+						required, dstStage, dstAccess)) {
+					continue;
+				}
+
 				bool layoutMatches = (currentLayout[img.id] == required);
 				bool noProducer = !imageWritten[img.id];
 				if (layoutMatches && noProducer) continue;
-				if (layoutMatches) {
-					// Read-after-read: layout already correct, no producer to sync.
-					// (If imageWritten became true via a prior pass that already
-					//  laid out + made-visible the data, we'd still want a barrier
-					//  on the stage front; keep the safer path of emitting it.)
-				}
 
 				ImageBarrier barrier;
 				barrier.image = img;
@@ -880,12 +1020,16 @@ void RenderGraph::ComputeBarriers() {
 			// Buffer reads (vertex/fragment shader SSBOs / UBOs / vertex+index)
 			for (size_t r = 0; r < pass.m_readBuffers.size(); r++) {
 				const auto& buf = pass.m_readBuffers[r];
-				if (!bufferWritten[buf.id]) continue;
 
 				ResourceUsage usage = UsageAt(pass.m_readBufferUsages, r);
 				VkAccessFlags dstAccess;
 				VkPipelineStageFlags dstStage;
 				BufferReadParams(usage, PassType::Graphics, dstAccess, dstStage);
+
+				if (tryEmitBufferOwnershipTransfer(buf, i, passStream, dstStage, dstAccess)) {
+					continue;
+				}
+				if (!bufferWritten[buf.id]) continue;
 
 				BufferBarrier barrier;
 				barrier.buffer = buf;
@@ -898,25 +1042,75 @@ void RenderGraph::ComputeBarriers() {
 
 			// Buffer writes
 			for (const auto& buf : pass.m_writeBuffers) {
-				if (bufferWritten[buf.id]) {
+				const VkPipelineStageFlags writeStage =
+					VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+				if (tryEmitBufferOwnershipTransfer(buf, i, passStream,
+						writeStage, VK_ACCESS_SHADER_WRITE_BIT)) {
+					// acquired
+				} else if (bufferWritten[buf.id]) {
 					BufferBarrier barrier;
 					barrier.buffer = buf;
 					barrier.srcStage = lastBufferWriter[buf.id].stage;
-					barrier.dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+					barrier.dstStage = writeStage;
 					barrier.srcAccess = lastBufferWriter[buf.id].access;
 					barrier.dstAccess = VK_ACCESS_SHADER_WRITE_BIT;
 					m_barriers[i].bufferBarriers.push_back(barrier);
 				}
 
-				lastBufferWriter[buf.id] = {
-					VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					VK_ACCESS_SHADER_WRITE_BIT
-				};
+				lastBufferWriter[buf.id] = { writeStage, VK_ACCESS_SHADER_WRITE_BIT };
 				bufferWritten[buf.id] = true;
+				bufferOwnerStream[buf.id] = passStream;
+				bufferLastProducerIdx[buf.id] = i;
 			}
+
+			// Render-pass color/depth/resolve writes are emitted via the render
+			// pass's attachment description (initialLayout=UNDEFINED → finalLayout).
+			// Memory dependencies for prior writers are subsumed by render-pass
+			// implicit subpass dependencies; for cross-stream, we still need a
+			// queue-family ownership acquire BEFORE BeginRenderPass so the render
+			// pass executes on the right family. Layout transitions stay with the
+			// render pass — emit the acquire with oldLayout=newLayout (pure
+			// ownership transfer; the render pass's UNDEFINED initial layout
+			// discards prior contents).
+			auto graphicsAttachmentAcquire = [&](ImageHandle img,
+				VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
+				if (!imageWritten[img.id]) return;
+				if (imageOwnerStream[img.id] == passStream) return;
+				const size_t producerIdx = imageLastProducerIdx[img.id];
+				if (producerIdx == SIZE_MAX) return;
+
+				ImageBarrier release{};
+				release.image          = img;
+				release.srcStage       = lastImageWriter[img.id].stage;
+				release.srcAccess      = lastImageWriter[img.id].access;
+				release.dstStage       = 0;
+				release.dstAccess      = 0;
+				release.oldLayout      = currentLayout[img.id];
+				release.newLayout      = currentLayout[img.id];   // ownership-only
+				release.srcQueueFamily = qfFor(imageOwnerStream[img.id]);
+				release.dstQueueFamily = qfFor(passStream);
+				m_barriers[producerIdx].imageReleaseBarriers.push_back(release);
+
+				ImageBarrier acquire{};
+				acquire.image          = img;
+				acquire.srcStage       = 0;
+				acquire.srcAccess      = 0;
+				acquire.dstStage       = dstStage;
+				acquire.dstAccess      = dstAccess;
+				acquire.oldLayout      = currentLayout[img.id];
+				acquire.newLayout      = currentLayout[img.id];
+				acquire.srcQueueFamily = qfFor(imageOwnerStream[img.id]);
+				acquire.dstQueueFamily = qfFor(passStream);
+				m_barriers[i].imageBarriers.push_back(acquire);
+
+				imageOwnerStream[img.id] = passStream;
+			};
 
 			for (const auto& ca : pass.m_colorAttachments) {
 				if (ca.target.id < m_images.size()) {
+					graphicsAttachmentAcquire(ca.target,
+						VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 					VkImageLayout colorFinal = DetermineColorFinalLayout(i, ca.target);
 					currentLayout[ca.target.id] = colorFinal;
 					lastImageWriter[ca.target.id] = {
@@ -924,19 +1118,29 @@ void RenderGraph::ComputeBarriers() {
 						VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 					};
 					imageWritten[ca.target.id] = true;
+					imageOwnerStream[ca.target.id] = passStream;
+					imageLastProducerIdx[ca.target.id] = i;
 				}
 			}
 
 			if (pass.m_hasDepth && pass.m_depthTarget.id < m_images.size()) {
+				graphicsAttachmentAcquire(pass.m_depthTarget,
+					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 				currentLayout[pass.m_depthTarget.id] = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 				lastImageWriter[pass.m_depthTarget.id] = {
 					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
 				};
 				imageWritten[pass.m_depthTarget.id] = true;
+				imageOwnerStream[pass.m_depthTarget.id] = passStream;
+				imageLastProducerIdx[pass.m_depthTarget.id] = i;
 			}
 
 			if (pass.m_hasResolve && pass.m_resolveTarget.id < m_images.size()) {
+				graphicsAttachmentAcquire(pass.m_resolveTarget,
+					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 				VkImageLayout resolveFinal = DetermineResolveFinalLayout(i, pass.m_resolveTarget);
 				currentLayout[pass.m_resolveTarget.id] = resolveFinal;
 				lastImageWriter[pass.m_resolveTarget.id] = {
@@ -944,6 +1148,8 @@ void RenderGraph::ComputeBarriers() {
 					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 				};
 				imageWritten[pass.m_resolveTarget.id] = true;
+				imageOwnerStream[pass.m_resolveTarget.id] = passStream;
+				imageLastProducerIdx[pass.m_resolveTarget.id] = i;
 			}
 		}
 	}
@@ -968,6 +1174,7 @@ void RenderGraph::Compile() {
 		PassResourceAccess acc;
 		if (ref.type == PassType::Graphics) {
 			const auto& pass = *m_graphicsPasses[ref.index];
+			acc.queueAffinity = pass.GetQueueAffinity();  // always Graphics for graphics passes
 			for (const auto& img : pass.m_readImages)  acc.readImages.push_back(img.id);
 			for (const auto& buf : pass.m_readBuffers) acc.readBuffers.push_back(buf.id);
 			for (const auto& ca  : pass.m_colorAttachments) acc.writeImages.push_back(ca.target.id);
@@ -976,6 +1183,7 @@ void RenderGraph::Compile() {
 			for (const auto& buf : pass.m_writeBuffers) acc.writeBuffers.push_back(buf.id);
 		} else {
 			const auto& pass = *m_computePasses[ref.index];
+			acc.queueAffinity = pass.GetQueueAffinity();
 			for (const auto& img : pass.m_readImages)   acc.readImages.push_back(img.id);
 			for (const auto& buf : pass.m_readBuffers)  acc.readBuffers.push_back(buf.id);
 			for (const auto& img : pass.m_writeImages)  acc.writeImages.push_back(img.id);
@@ -983,6 +1191,7 @@ void RenderGraph::Compile() {
 		}
 		dagInputs.passAccess.push_back(std::move(acc));
 	}
+	dagInputs.asyncComputeAvailable = m_asyncAvailable;
 
 	// Sink classification: imported and Persistent resources are implicit
 	// sinks (their output flows somewhere outside the graph or persists across
@@ -1008,10 +1217,21 @@ void RenderGraph::Compile() {
 	if (dagResult.prunedCount > 0) {
 		logger->info("RenderGraph: Pruned {} unreachable pass(es)", dagResult.prunedCount);
 	}
-	m_dag                  = std::move(dagResult.dag);
-	m_dagDeclToNode        = std::move(dagResult.declToNode);
-	m_executionOrder       = std::move(dagResult.executionOrder);
-	m_executionOrderNodes  = std::move(dagResult.executionOrderNodes);
+	if (dagResult.demotedCount > 0) {
+		logger->info("RenderGraph: Demoted {} AsyncCompute pass(es) to graphics queue (no async-capable device or graphics-stream dependency)",
+			dagResult.demotedCount);
+	}
+	m_dag                    = std::move(dagResult.dag);
+	m_dagDeclToNode          = std::move(dagResult.declToNode);
+	m_executionOrder         = std::move(dagResult.executionOrder);
+	m_executionOrderNodes    = std::move(dagResult.executionOrderNodes);
+	m_executionOrderStreams  = std::move(dagResult.executionOrderAffinity);
+
+	// Did anything land on the async stream this build?
+	m_hasAsyncWork = false;
+	for (auto a : m_executionOrderStreams) {
+		if (a == QueueAffinity::AsyncCompute) { m_hasAsyncWork = true; break; }
+	}
 
 	// Build inverse mapping (node id -> decl idx) and the alive bitset, used by
 	// IsImageReadDownstream's forward-BFS traversal to skip pruned descendants.
@@ -1039,11 +1259,49 @@ void RenderGraph::Compile() {
 // RenderGraph — Execute
 // =====================================================================
 
-void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
-                          GPUProfiler* profiler) {
+// Helper: build a VkImageMemoryBarrier from our ImageBarrier descriptor.
+static VkImageMemoryBarrier MakeImageBarrier(const ImageBarrier& b, const ImageResource& res) {
+	VkImageMemoryBarrier imgBarrier{};
+	imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	imgBarrier.srcAccessMask = b.srcAccess;
+	imgBarrier.dstAccessMask = b.dstAccess;
+	imgBarrier.oldLayout = b.oldLayout;
+	imgBarrier.newLayout = b.newLayout;
+	imgBarrier.srcQueueFamilyIndex = b.srcQueueFamily;
+	imgBarrier.dstQueueFamilyIndex = b.dstQueueFamily;
+	imgBarrier.image = res.image ? res.image->Get() : VK_NULL_HANDLE;
+	imgBarrier.subresourceRange.aspectMask =
+		(res.usageFlags & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+			? VK_IMAGE_ASPECT_DEPTH_BIT
+			: VK_IMAGE_ASPECT_COLOR_BIT;
+	imgBarrier.subresourceRange.baseMipLevel = 0;
+	imgBarrier.subresourceRange.levelCount = 1;
+	imgBarrier.subresourceRange.baseArrayLayer = 0;
+	imgBarrier.subresourceRange.layerCount = 1;
+	return imgBarrier;
+}
+
+static VkBufferMemoryBarrier MakeBufferBarrier(const BufferBarrier& b, const BufferResource& res) {
+	VkBufferMemoryBarrier bufBarrier{};
+	bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	bufBarrier.srcAccessMask = b.srcAccess;
+	bufBarrier.dstAccessMask = b.dstAccess;
+	bufBarrier.srcQueueFamilyIndex = b.srcQueueFamily;
+	bufBarrier.dstQueueFamilyIndex = b.dstQueueFamily;
+	bufBarrier.buffer = res.buffer ? res.buffer->Get() : VK_NULL_HANDLE;
+	bufBarrier.offset = 0;
+	bufBarrier.size = VK_WHOLE_SIZE;
+	return bufBarrier;
+}
+
+void RenderGraph::RecordStream(std::shared_ptr<VWrap::CommandBuffer> cmd,
+                               uint32_t frameIndex, GPUProfiler* profiler,
+                               QueueAffinity targetStream) {
 	auto vk_cmd = cmd->Get();
 
 	for (size_t i = 0; i < m_executionOrder.size(); i++) {
+		if (m_executionOrderStreams[i] != targetStream) continue;
+
 		const auto& ref = m_executionOrder[i];
 
 		bool enabled = true;
@@ -1053,46 +1311,20 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 			enabled = m_computePasses[ref.index]->IsEnabled();
 		if (!enabled) continue;
 
-		// Insert image barriers
+		// Pre-pass barriers: intra-stream + cross-stream acquires.
 		for (const auto& barrier : m_barriers[i].imageBarriers) {
-			const auto& res = m_images[barrier.image.id];
-
-			VkImageMemoryBarrier imgBarrier{};
-			imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-			imgBarrier.srcAccessMask = barrier.srcAccess;
-			imgBarrier.dstAccessMask = barrier.dstAccess;
-			imgBarrier.oldLayout = barrier.oldLayout;
-			imgBarrier.newLayout = barrier.newLayout;
-			imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			imgBarrier.image = res.image ? res.image->Get() : VK_NULL_HANDLE;
-			imgBarrier.subresourceRange.aspectMask =
-				(res.usageFlags & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
-					? VK_IMAGE_ASPECT_DEPTH_BIT
-					: VK_IMAGE_ASPECT_COLOR_BIT;
-			imgBarrier.subresourceRange.baseMipLevel = 0;
-			imgBarrier.subresourceRange.levelCount = 1;
-			imgBarrier.subresourceRange.baseArrayLayer = 0;
-			imgBarrier.subresourceRange.layerCount = 1;
-
-			cmd->CmdPipelineBarrier(barrier.srcStage, barrier.dstStage, { imgBarrier });
+			VkImageMemoryBarrier imgBarrier = MakeImageBarrier(barrier, m_images[barrier.image.id]);
+			// Acquire halves of an ownership transfer specify srcStage=0; substitute
+			// TOP_OF_PIPE_BIT on the source mask so vkCmdPipelineBarrier accepts it.
+			VkPipelineStageFlags srcStage = barrier.srcStage ? barrier.srcStage : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			VkPipelineStageFlags dstStage = barrier.dstStage ? barrier.dstStage : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+			cmd->CmdPipelineBarrier(srcStage, dstStage, { imgBarrier });
 		}
-
-		// Insert buffer barriers
 		for (const auto& barrier : m_barriers[i].bufferBarriers) {
-			const auto& res = m_buffers[barrier.buffer.id];
-
-			VkBufferMemoryBarrier bufBarrier{};
-			bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-			bufBarrier.srcAccessMask = barrier.srcAccess;
-			bufBarrier.dstAccessMask = barrier.dstAccess;
-			bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			bufBarrier.buffer = res.buffer ? res.buffer->Get() : VK_NULL_HANDLE;
-			bufBarrier.offset = 0;
-			bufBarrier.size = VK_WHOLE_SIZE;
-
-			cmd->CmdPipelineBarrier(barrier.srcStage, barrier.dstStage, {}, { bufBarrier });
+			VkBufferMemoryBarrier bufBarrier = MakeBufferBarrier(barrier, m_buffers[barrier.buffer.id]);
+			VkPipelineStageFlags srcStage = barrier.srcStage ? barrier.srcStage : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			VkPipelineStageFlags dstStage = barrier.dstStage ? barrier.dstStage : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+			cmd->CmdPipelineBarrier(srcStage, dstStage, {}, { bufBarrier });
 		}
 
 		if (profiler) profiler->CmdBeginPass(cmd, frameIndex, static_cast<uint32_t>(i));
@@ -1168,7 +1400,72 @@ void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t fr
 		}
 
 		if (profiler) profiler->CmdEndPass(cmd, frameIndex, static_cast<uint32_t>(i));
+
+		// Post-pass barriers: cross-stream releases (only populated for passes
+		// that produce resources consumed on a different queue stream).
+		for (const auto& barrier : m_barriers[i].imageReleaseBarriers) {
+			VkImageMemoryBarrier imgBarrier = MakeImageBarrier(barrier, m_images[barrier.image.id]);
+			VkPipelineStageFlags srcStage = barrier.srcStage ? barrier.srcStage : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			VkPipelineStageFlags dstStage = barrier.dstStage ? barrier.dstStage : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+			cmd->CmdPipelineBarrier(srcStage, dstStage, { imgBarrier });
+		}
+		for (const auto& barrier : m_barriers[i].bufferReleaseBarriers) {
+			VkBufferMemoryBarrier bufBarrier = MakeBufferBarrier(barrier, m_buffers[barrier.buffer.id]);
+			VkPipelineStageFlags srcStage = barrier.srcStage ? barrier.srcStage : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			VkPipelineStageFlags dstStage = barrier.dstStage ? barrier.dstStage : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+			cmd->CmdPipelineBarrier(srcStage, dstStage, {}, { bufBarrier });
+		}
 	}
+}
+
+void RenderGraph::Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
+                          GPUProfiler* profiler) {
+	m_graphicsQueueWait.semaphores.clear();
+	m_graphicsQueueWait.stages.clear();
+
+	if (m_hasAsyncWork && m_asyncAvailable && frameIndex < m_asyncCmdBuffers.size()) {
+		auto asyncCb = m_asyncCmdBuffers[frameIndex];
+
+		// Reset + begin. The previous frame's signal of this slot's semaphore
+		// has already been consumed by the previous graphics submit's wait,
+		// and the in-flight fence (held by FrameController) guarantees the
+		// previous async cb has retired before we re-record this one.
+		vkResetCommandBuffer(asyncCb->Get(), 0);
+		asyncCb->Begin();
+		// Async cb intentionally skips per-pass profiler timestamps: the query
+		// pool is reset by the graphics cb (which executes after the async one
+		// signals + the graphics submit waits, then runs reset → write). Any
+		// timestamps written from the async queue would be wiped before the
+		// host could read them. Re-enable when the profiler grows host-side
+		// vkResetQueryPool support.
+		RecordStream(asyncCb, frameIndex, /*profiler=*/nullptr, QueueAffinity::AsyncCompute);
+		asyncCb->End();
+
+		VkSubmitInfo asyncSubmit{};
+		asyncSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		VkCommandBuffer asyncCbHandle = asyncCb->Get();
+		asyncSubmit.commandBufferCount = 1;
+		asyncSubmit.pCommandBuffers = &asyncCbHandle;
+		VkSemaphore signalSem = m_asyncDoneSemaphores[frameIndex]->Get();
+		asyncSubmit.signalSemaphoreCount = 1;
+		asyncSubmit.pSignalSemaphores = &signalSem;
+		if (vkQueueSubmit(m_asyncCfg.computeQueue->Get(), 1, &asyncSubmit, VK_NULL_HANDLE) != VK_SUCCESS) {
+			throw std::runtime_error("RenderGraph: async-compute submit failed");
+		}
+
+		// Conservative wait stage: any consumer-shader / transfer / draw-indirect
+		// stage on the graphics queue. Lets graphics fixed-function setup proceed
+		// in parallel with async work, only stalling at the consumption boundary.
+		m_graphicsQueueWait.semaphores.push_back(signalSem);
+		m_graphicsQueueWait.stages.push_back(
+			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+			VK_PIPELINE_STAGE_TRANSFER_BIT |
+			VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+	}
+
+	RecordStream(cmd, frameIndex, profiler, QueueAffinity::Graphics);
 }
 
 // =====================================================================
@@ -1218,6 +1515,8 @@ void RenderGraph::Clear() {
 	m_declarationOrder.clear();
 	m_executionOrder.clear();
 	m_executionOrderNodes.clear();
+	m_executionOrderStreams.clear();
+	m_hasAsyncWork = false;
 	m_dag.Clear();
 	m_dagDeclToNode.clear();
 	m_nodeToDecl.clear();
@@ -1225,6 +1524,8 @@ void RenderGraph::Clear() {
 	m_explicitImageSinks.clear();
 	m_explicitBufferSinks.clear();
 	m_barriers.clear();
+	m_graphicsQueueWait.semaphores.clear();
+	m_graphicsQueueWait.stages.clear();
 	m_compiled = false;
 
 	// Bump generation counters so any handle that survives this Clear() fails

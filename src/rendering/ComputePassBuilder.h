@@ -17,6 +17,13 @@ public:
 	// RecreatePipelines() so SPV is always re-read.
 	ComputePassBuilder& SetPipeline(std::function<ComputePipelineDesc()> descFactory);
 
+	// Hint that this compute pass should run on a dedicated compute queue
+	// concurrently with graphics work. The graph honors this only when a
+	// separate compute queue family exists AND the pass has no graphics-stream
+	// dependency; otherwise it logs a one-line demotion warning and runs the
+	// pass on the graphics queue. Default is QueueAffinity::Graphics.
+	ComputePassBuilder& SetQueueAffinity(QueueAffinity affinity);
+
 private:
 	friend class RenderGraph;
 

@@ -4,7 +4,18 @@
 Renderer::Renderer(const RendererConfig& config)
 	: m_config(config)
 	, m_graph(config.device, config.allocator)
-{}
+{
+	// Wire async-compute queue + per-frame command buffers / semaphores into the
+	// graph. If config.computeQueue shares the graphics family, ConfigureAsync
+	// records that and treats async as unavailable — every AsyncCompute hint
+	// will be silently demoted at Compile time.
+	RenderGraphAsyncConfig acfg{};
+	acfg.computeQueue        = config.computeQueue;
+	acfg.computeCommandPool  = config.computeCommandPool;
+	acfg.graphicsQueueFamily = config.graphicsQueueFamily;
+	acfg.framesInFlight      = config.maxFramesInFlight;
+	m_graph.ConfigureAsync(acfg);
+}
 
 RendererCaps Renderer::GetCaps() const {
 	RendererCaps caps{};

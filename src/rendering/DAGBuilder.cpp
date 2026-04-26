@@ -124,16 +124,68 @@ DAGBuildResult DAGBuilder::Build(const DAGBuildInputs& in) {
 		nodeToDecl[result.declToNode[i]] = i;
 	}
 
+	// 4a. Resolve queue affinities, by node id. Start from the user's request,
+	//     then iteratively demote any AsyncCompute node whose dependencies
+	//     include a Graphics-stream node, until the assignment is stable.
+	//     Demotion cascades naturally because once a node demotes to Graphics,
+	//     its dependents see a Graphics dependency on the next pass.
+	std::vector<QueueAffinity> nodeAffinity(passCount, QueueAffinity::Graphics);
+	for (size_t i = 0; i < passCount; i++) {
+		uint32_t node = result.declToNode[i];
+		if (in.passAccess[i].queueAffinity == QueueAffinity::AsyncCompute &&
+			in.asyncComputeAvailable && reachable[node]) {
+			nodeAffinity[node] = QueueAffinity::AsyncCompute;
+		}
+	}
+	// Walk in topo order so demotions propagate forward in one pass.
+	for (uint32_t nodeId : sorted) {
+		if (nodeAffinity[nodeId] != QueueAffinity::AsyncCompute) continue;
+		for (uint32_t dep : result.dag.Dependencies(nodeId)) {
+			if (nodeAffinity[dep] == QueueAffinity::Graphics) {
+				nodeAffinity[nodeId] = QueueAffinity::Graphics;
+				break;
+			}
+		}
+	}
+	// Count demotions: requested AsyncCompute but resolved to Graphics.
+	for (size_t i = 0; i < passCount; i++) {
+		uint32_t node = result.declToNode[i];
+		if (in.passAccess[i].queueAffinity == QueueAffinity::AsyncCompute &&
+			nodeAffinity[node] != QueueAffinity::AsyncCompute) {
+			result.demotedCount++;
+		}
+	}
+
+	// 4b. Build the (pruned, sorted) execution order and parallel affinity vector.
 	result.executionOrder.reserve(passCount);
 	result.executionOrderNodes.reserve(passCount);
+	result.executionOrderAffinity.reserve(passCount);
 	for (uint32_t nodeId : sorted) {
 		size_t declIdx = nodeToDecl[nodeId];
 		if (reachable[nodeId]) {
 			result.executionOrder.push_back(in.declarationOrder[declIdx]);
 			result.executionOrderNodes.push_back(nodeId);
+			result.executionOrderAffinity.push_back(nodeAffinity[nodeId]);
 		} else {
 			result.declToNode[declIdx] = INVALID;
 			result.prunedCount++;
+		}
+	}
+
+	// 4c. Cross-stream edges: every dependency that crosses queue affinities
+	//     becomes a sync edge. The graph turns these into queue-family ownership
+	//     transfer barriers + a semaphore signal/wait pair.
+	for (uint32_t consumer : sorted) {
+		if (!reachable[consumer]) continue;
+		QueueAffinity consumerStream = nodeAffinity[consumer];
+		for (uint32_t producer : result.dag.Dependencies(consumer)) {
+			if (!reachable[producer]) continue;
+			QueueAffinity producerStream = nodeAffinity[producer];
+			if (producerStream != consumerStream) {
+				result.crossStreamEdges.push_back({
+					producer, consumer, producerStream, consumerStream
+				});
+			}
 		}
 	}
 

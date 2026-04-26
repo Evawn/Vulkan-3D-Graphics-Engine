@@ -17,6 +17,14 @@ struct RendererConfig {
 	VkFormat swapchainFormat;
 	VkFormat depthFormat;
 	uint32_t maxFramesInFlight;
+
+	// Optional async-compute plumbing. Set by RenderingSystem from VulkanContext.
+	// When the compute queue's family differs from graphicsQueueFamily, the
+	// graph honors AsyncCompute affinity hints; otherwise it silently demotes
+	// them all to the graphics queue.
+	std::shared_ptr<VWrap::Queue>       computeQueue;
+	std::shared_ptr<VWrap::CommandPool> computeCommandPool;
+	uint32_t                            graphicsQueueFamily = 0;
 };
 
 class Renderer {

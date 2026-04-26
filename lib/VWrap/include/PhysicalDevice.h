@@ -65,5 +65,14 @@ namespace VWrap
 			return props;
 		}
 
+		/// <summary>
+		/// True iff the device exposes a compute queue family that is distinct from
+		/// the graphics queue family. When false, compute and graphics share a queue
+		/// family and there is no async-compute parallelism to be had — the render
+		/// graph silently demotes any AsyncCompute affinity hints back to the
+		/// graphics queue in this case.
+		/// </summary>
+		bool HasAsyncComputeQueue();
+
 	};
 }

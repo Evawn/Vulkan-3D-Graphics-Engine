@@ -59,6 +59,20 @@ enum class PassType { Graphics, Compute };
 enum class LoadOp { Clear, Load, DontCare };
 enum class StoreOp { Store, DontCare };
 
+// Which queue stream a pass should be scheduled onto. Compute passes default to
+// Graphics (the legacy behavior — record into the same primary command buffer
+// as graphics passes); AsyncCompute is a hint that the pass should run on a
+// dedicated compute queue concurrently with graphics work. Graphics passes are
+// always Graphics-affinity (the enum is on PassBuilderBase to keep the type
+// uniform, but the graph asserts affinity stays Graphics for graphics passes).
+//
+// AsyncCompute is a *hint*: the graph silently demotes back to Graphics when
+// (a) the device has no separate compute queue family, or (b) the pass has a
+// dependency on a graphics-stream pass — see DAGBuilder for the demotion rule.
+// In both cases a one-time log line records the demotion so the user knows the
+// tag was ignored.
+enum class QueueAffinity { Graphics, AsyncCompute };
+
 // Reference to a pass within RenderGraph's storage. Promoted here so DAGBuilder
 // (which is not a friend of RenderGraph) can name it without pulling in
 // RenderGraph.h.
@@ -165,6 +179,13 @@ struct BufferResource {
 };
 
 // ---- Barriers ----
+//
+// srcQueueFamily / dstQueueFamily default to VK_QUEUE_FAMILY_IGNORED (the
+// intra-queue case). When the graph synthesizes a cross-stream handoff, it
+// emits a *release* on the producer's command buffer (dstQueueFamily set to
+// the consumer's family) and a matching *acquire* on the consumer's command
+// buffer (srcQueueFamily set to the producer's family). The two halves are
+// stitched together by a semaphore between queue submits — see RenderGraph::Execute.
 
 struct ImageBarrier {
 	ImageHandle image;
@@ -174,6 +195,8 @@ struct ImageBarrier {
 	VkAccessFlags dstAccess;
 	VkImageLayout oldLayout;
 	VkImageLayout newLayout;
+	uint32_t srcQueueFamily = VK_QUEUE_FAMILY_IGNORED;
+	uint32_t dstQueueFamily = VK_QUEUE_FAMILY_IGNORED;
 };
 
 struct BufferBarrier {
@@ -182,6 +205,8 @@ struct BufferBarrier {
 	VkPipelineStageFlags dstStage;
 	VkAccessFlags srcAccess;
 	VkAccessFlags dstAccess;
+	uint32_t srcQueueFamily = VK_QUEUE_FAMILY_IGNORED;
+	uint32_t dstQueueFamily = VK_QUEUE_FAMILY_IGNORED;
 };
 
 // ---- Introspection (read-only snapshots) ----

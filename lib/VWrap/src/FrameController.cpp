@@ -35,14 +35,28 @@ namespace VWrap {
 	}
 
 	void FrameController::Render() {
+		Render({}, {});
+	}
+
+	void FrameController::Render(const std::vector<VkSemaphore>& extraWaitSemaphores,
+	                             const std::vector<VkPipelineStageFlags>& extraWaitStages) {
+		// Compose the wait list: image-available (always) + caller-supplied extras.
+		std::vector<VkSemaphore> waitSemaphores;
+		std::vector<VkPipelineStageFlags> waitStages;
+		waitSemaphores.reserve(1 + extraWaitSemaphores.size());
+		waitStages.reserve(1 + extraWaitStages.size());
+		waitSemaphores.push_back(m_image_available_semaphores[m_current_frame]->Get());
+		waitStages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		for (size_t i = 0; i < extraWaitSemaphores.size() && i < extraWaitStages.size(); i++) {
+			waitSemaphores.push_back(extraWaitSemaphores[i]);
+			waitStages.push_back(extraWaitStages[i]);
+		}
+
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-		VkSemaphore waitSemaphores[] = { m_image_available_semaphores[m_current_frame]->Get() };
-		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-		submitInfo.waitSemaphoreCount = 1;
-		submitInfo.pWaitSemaphores = waitSemaphores;
-		submitInfo.pWaitDstStageMask = waitStages;
+		submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+		submitInfo.pWaitSemaphores = waitSemaphores.data();
+		submitInfo.pWaitDstStageMask = waitStages.data();
 
 		submitInfo.commandBufferCount = 1;
 

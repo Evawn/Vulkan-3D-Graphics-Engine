@@ -18,6 +18,12 @@ public:
 	bool IsEnabled() const { return m_enabled; }
 	void SetEnabled(bool enabled) { m_enabled = enabled; }
 
+	// Stream the pass should run on. Default Graphics; ComputePassBuilder exposes
+	// the public setter that lets a technique opt into AsyncCompute. The graph
+	// resolves this at Compile time (with possible demotion) and stores the final
+	// per-pass affinity alongside the execution order.
+	QueueAffinity GetQueueAffinity() const { return m_queueAffinity; }
+
 	// Attach a binding table; the graph calls bindingTable->Update(graph) after
 	// Compile() and after every Resize() so descriptors stay in sync with
 	// graph-allocated resources.
@@ -28,6 +34,7 @@ protected:
 
 	std::string m_name;
 	bool m_enabled = true;
+	QueueAffinity m_queueAffinity = QueueAffinity::Graphics;
 	RenderGraph& m_graph;
 
 	std::vector<ImageHandle> m_readImages;
