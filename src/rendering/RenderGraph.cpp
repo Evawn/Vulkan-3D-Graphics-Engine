@@ -1,5 +1,6 @@
 #include "RenderGraph.h"
 #include "BindingTable.h"
+#include "DAGBuilder.h"
 #include "GPUProfiler.h"
 #include "Utils.h"
 #include <spdlog/spdlog.h>
@@ -104,14 +105,14 @@ ImageHandle RenderGraph::ImportImage(const std::string& name,
 GraphicsPassBuilder& RenderGraph::AddGraphicsPass(const std::string& name) {
 	auto builder = std::make_unique<GraphicsPassBuilder>(name, *this);
 	m_graphicsPasses.push_back(std::move(builder));
-	m_executionOrder.push_back({ PassType::Graphics, m_graphicsPasses.size() - 1 });
+	m_declarationOrder.push_back({ PassType::Graphics, m_graphicsPasses.size() - 1 });
 	return *m_graphicsPasses.back();
 }
 
 ComputePassBuilder& RenderGraph::AddComputePass(const std::string& name) {
 	auto builder = std::make_unique<ComputePassBuilder>(name, *this);
 	m_computePasses.push_back(std::move(builder));
-	m_executionOrder.push_back({ PassType::Compute, m_computePasses.size() - 1 });
+	m_declarationOrder.push_back({ PassType::Compute, m_computePasses.size() - 1 });
 	return *m_computePasses.back();
 }
 
@@ -123,6 +124,8 @@ void RenderGraph::SetPassEnabled(const std::string& name, bool enabled) {
 		if (comp->GetName() == name) { comp->SetEnabled(enabled); return; }
 	}
 }
+
+// MarkSink defined after AssertImageHandle / AssertBufferHandle below.
 
 // =====================================================================
 // RenderGraph — Resource access
@@ -183,6 +186,16 @@ std::shared_ptr<VWrap::Buffer> RenderGraph::GetBuffer(BufferHandle handle) const
 VkBuffer RenderGraph::GetVkBuffer(BufferHandle handle) const {
 	AssertBufferHandle(handle, m_buffers);
 	return m_buffers[handle.id].buffer->Get();
+}
+
+void RenderGraph::MarkSink(ImageHandle handle) {
+	AssertImageHandle(handle, m_images);
+	m_explicitImageSinks.push_back(handle.id);
+}
+
+void RenderGraph::MarkSink(BufferHandle handle) {
+	AssertBufferHandle(handle, m_buffers);
+	m_explicitBufferSinks.push_back(handle.id);
 }
 
 void RenderGraph::UpdateImport(ImageHandle handle, std::shared_ptr<VWrap::ImageView> view) {
@@ -454,17 +467,41 @@ void RenderGraph::AllocateTransientResources() {
 }
 
 bool RenderGraph::IsImageReadDownstream(size_t afterOrderIndex, ImageHandle image) const {
-	for (size_t i = afterOrderIndex + 1; i < m_executionOrder.size(); i++) {
-		const auto& ref = m_executionOrder[i];
-		if (ref.type == PassType::Graphics) {
-			const auto& pass = *m_graphicsPasses[ref.index];
-			for (const auto& r : pass.m_readImages) {
-				if (r.id == image.id) return true;
-			}
-		} else {
-			const auto& pass = *m_computePasses[ref.index];
-			for (const auto& r : pass.m_readImages) {
-				if (r.id == image.id) return true;
+	// Forward BFS over the DAG from the producer node. Visits only descendants
+	// that depend on this pass (via any resource); for each live descendant,
+	// check whether image is in its read set. Pruned descendants are visited
+	// (their dependents may still be alive) but their reads are skipped since
+	// they don't actually run.
+	if (afterOrderIndex >= m_executionOrderNodes.size()) return false;
+	uint32_t startNode = m_executionOrderNodes[afterOrderIndex];
+
+	std::vector<bool> visited(m_dag.NodeCount(), false);
+	std::vector<uint32_t> stack;
+	stack.reserve(m_dag.NodeCount());
+	stack.push_back(startNode);
+	visited[startNode] = true;
+
+	while (!stack.empty()) {
+		uint32_t u = stack.back();
+		stack.pop_back();
+		for (uint32_t v : m_dag.Dependents(u)) {
+			if (visited[v]) continue;
+			visited[v] = true;
+			stack.push_back(v);
+			if (!m_nodeAlive[v]) continue;   // pruned — doesn't actually run
+
+			size_t declIdx = m_nodeToDecl[v];
+			const auto& ref = m_declarationOrder[declIdx];
+			if (ref.type == PassType::Graphics) {
+				const auto& pass = *m_graphicsPasses[ref.index];
+				for (const auto& r : pass.m_readImages) {
+					if (r.id == image.id) return true;
+				}
+			} else {
+				const auto& pass = *m_computePasses[ref.index];
+				for (const auto& r : pass.m_readImages) {
+					if (r.id == image.id) return true;
+				}
 			}
 		}
 	}
@@ -574,11 +611,14 @@ void RenderGraph::BuildComputePipeline(ComputePassBuilder& pass) {
 }
 
 void RenderGraph::CreatePipelines() {
-	for (auto& gfx : m_graphicsPasses) {
-		BuildGraphicsPipeline(*gfx);
-	}
-	for (auto& comp : m_computePasses) {
-		BuildComputePipeline(*comp);
+	// Walk m_executionOrder so pruned passes don't get pipelines built against
+	// null render passes (CreateRenderPasses also skips pruned passes).
+	for (const auto& ref : m_executionOrder) {
+		if (ref.type == PassType::Graphics) {
+			BuildGraphicsPipeline(*m_graphicsPasses[ref.index]);
+		} else {
+			BuildComputePipeline(*m_computePasses[ref.index]);
+		}
 	}
 }
 
@@ -594,11 +634,12 @@ void RenderGraph::UpdateBindings() {
 void RenderGraph::RecreatePipelines() {
 	auto logger = spdlog::get("Render");
 	logger->info("RenderGraph: Recreating pipelines");
-	for (auto& gfx : m_graphicsPasses) {
-		BuildGraphicsPipeline(*gfx);
-	}
-	for (auto& comp : m_computePasses) {
-		BuildComputePipeline(*comp);
+	for (const auto& ref : m_executionOrder) {
+		if (ref.type == PassType::Graphics) {
+			BuildGraphicsPipeline(*m_graphicsPasses[ref.index]);
+		} else {
+			BuildComputePipeline(*m_computePasses[ref.index]);
+		}
 	}
 }
 
@@ -911,7 +952,76 @@ void RenderGraph::ComputeBarriers() {
 void RenderGraph::Compile() {
 	auto logger = spdlog::get("Render");
 	logger->info("RenderGraph: Compiling ({} passes, {} images, {} buffers)",
-		m_executionOrder.size(), m_images.size(), m_buffers.size());
+		m_declarationOrder.size(), m_images.size(), m_buffers.size());
+
+	// Project each pass's read/write sets down to plain resource ids and hand
+	// them to DAGBuilder. RenderGraph is a friend of the pass builders so this
+	// is the only place that needs to peek at their private members; DAGBuilder
+	// stays decoupled from the pass-builder types.
+	DAGBuildInputs dagInputs;
+	dagInputs.declarationOrder = m_declarationOrder;
+	dagInputs.imageCount  = m_images.size();
+	dagInputs.bufferCount = m_buffers.size();
+	dagInputs.passAccess.reserve(m_declarationOrder.size());
+
+	for (const auto& ref : m_declarationOrder) {
+		PassResourceAccess acc;
+		if (ref.type == PassType::Graphics) {
+			const auto& pass = *m_graphicsPasses[ref.index];
+			for (const auto& img : pass.m_readImages)  acc.readImages.push_back(img.id);
+			for (const auto& buf : pass.m_readBuffers) acc.readBuffers.push_back(buf.id);
+			for (const auto& ca  : pass.m_colorAttachments) acc.writeImages.push_back(ca.target.id);
+			if (pass.m_hasDepth)   acc.writeImages.push_back(pass.m_depthTarget.id);
+			if (pass.m_hasResolve) acc.writeImages.push_back(pass.m_resolveTarget.id);
+			for (const auto& buf : pass.m_writeBuffers) acc.writeBuffers.push_back(buf.id);
+		} else {
+			const auto& pass = *m_computePasses[ref.index];
+			for (const auto& img : pass.m_readImages)   acc.readImages.push_back(img.id);
+			for (const auto& buf : pass.m_readBuffers)  acc.readBuffers.push_back(buf.id);
+			for (const auto& img : pass.m_writeImages)  acc.writeImages.push_back(img.id);
+			for (const auto& buf : pass.m_writeBuffers) acc.writeBuffers.push_back(buf.id);
+		}
+		dagInputs.passAccess.push_back(std::move(acc));
+	}
+
+	// Sink classification: imported and Persistent resources are implicit
+	// sinks (their output flows somewhere outside the graph or persists across
+	// frames). Plus any explicit MarkSink calls.
+	dagInputs.imageIsSink.assign(m_images.size(), false);
+	for (size_t i = 0; i < m_images.size(); i++) {
+		if (m_images[i].imported) dagInputs.imageIsSink[i] = true;
+		if (m_images[i].desc.lifetime == Lifetime::Persistent) dagInputs.imageIsSink[i] = true;
+	}
+	for (uint32_t id : m_explicitImageSinks) {
+		if (id < dagInputs.imageIsSink.size()) dagInputs.imageIsSink[id] = true;
+	}
+	dagInputs.bufferIsSink.assign(m_buffers.size(), false);
+	for (size_t i = 0; i < m_buffers.size(); i++) {
+		if (m_buffers[i].imported) dagInputs.bufferIsSink[i] = true;
+		if (m_buffers[i].desc.lifetime == Lifetime::Persistent) dagInputs.bufferIsSink[i] = true;
+	}
+	for (uint32_t id : m_explicitBufferSinks) {
+		if (id < dagInputs.bufferIsSink.size()) dagInputs.bufferIsSink[id] = true;
+	}
+
+	auto dagResult = DAGBuilder::Build(dagInputs);
+	if (dagResult.prunedCount > 0) {
+		logger->info("RenderGraph: Pruned {} unreachable pass(es)", dagResult.prunedCount);
+	}
+	m_dag                  = std::move(dagResult.dag);
+	m_dagDeclToNode        = std::move(dagResult.declToNode);
+	m_executionOrder       = std::move(dagResult.executionOrder);
+	m_executionOrderNodes  = std::move(dagResult.executionOrderNodes);
+
+	// Build inverse mapping (node id -> decl idx) and the alive bitset, used by
+	// IsImageReadDownstream's forward-BFS traversal to skip pruned descendants.
+	m_nodeToDecl.assign(m_dag.NodeCount(), 0);
+	for (size_t i = 0; i < m_dagDeclToNode.size(); i++) {
+		uint32_t node = m_dagDeclToNode[i];
+		if (node != DAGBuilder::INVALID_NODE) m_nodeToDecl[node] = i;
+	}
+	m_nodeAlive.assign(m_dag.NodeCount(), false);
+	for (uint32_t n : m_executionOrderNodes) m_nodeAlive[n] = true;
 
 	AccumulateUsageFlags();
 	AllocateTransientResources();
@@ -1105,7 +1215,15 @@ void RenderGraph::Clear() {
 	m_buffers.clear();
 	m_graphicsPasses.clear();
 	m_computePasses.clear();
+	m_declarationOrder.clear();
 	m_executionOrder.clear();
+	m_executionOrderNodes.clear();
+	m_dag.Clear();
+	m_dagDeclToNode.clear();
+	m_nodeToDecl.clear();
+	m_nodeAlive.clear();
+	m_explicitImageSinks.clear();
+	m_explicitBufferSinks.clear();
 	m_barriers.clear();
 	m_compiled = false;
 

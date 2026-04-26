@@ -59,6 +59,14 @@ enum class PassType { Graphics, Compute };
 enum class LoadOp { Clear, Load, DontCare };
 enum class StoreOp { Store, DontCare };
 
+// Reference to a pass within RenderGraph's storage. Promoted here so DAGBuilder
+// (which is not a friend of RenderGraph) can name it without pulling in
+// RenderGraph.h.
+struct PassRef {
+	PassType type;
+	size_t   index;
+};
+
 // ---- Resource usage ----
 //
 // How a Read()/Write() declaration intends to use the resource. The graph maps

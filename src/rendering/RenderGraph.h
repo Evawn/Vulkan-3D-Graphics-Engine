@@ -3,6 +3,7 @@
 #include "RenderGraphTypes.h"
 #include "GraphicsPassBuilder.h"
 #include "ComputePassBuilder.h"
+#include "PassDAG.h"
 #include "Device.h"
 #include "Allocator.h"
 #include <memory>
@@ -30,6 +31,15 @@ public:
 	GraphicsPassBuilder& AddGraphicsPass(const std::string& name);
 	ComputePassBuilder& AddComputePass(const std::string& name);
 	void SetPassEnabled(const std::string& name, bool enabled);
+
+	// Mark a resource as a graph sink. The pass that last writes this resource
+	// is preserved during DAG pruning, along with anything it transitively
+	// depends on. Imported and Persistent resources are implicit sinks already;
+	// MarkSink is the explicit opt-in for transient resources whose output
+	// matters for reasons the graph can't infer (e.g. screenshot capture
+	// targets, user-facing outputs not consumed by another pass).
+	void MarkSink(ImageHandle handle);
+	void MarkSink(BufferHandle handle);
 
 	// ---- Lifecycle ----
 	void Compile();
@@ -77,9 +87,27 @@ private:
 	std::vector<std::unique_ptr<GraphicsPassBuilder>> m_graphicsPasses;
 	std::vector<std::unique_ptr<ComputePassBuilder>> m_computePasses;
 
-	// Execution order
-	struct PassRef { PassType type; size_t index; };
+	// Pass declaration order — populated by Add*Pass as the user constructs the
+	// graph. Compile() feeds this into DAGBuilder, which produces the topo-sorted
+	// m_executionOrder. In Phase 1 they're equal-by-construction (the DAG only
+	// records edges that go forward in declaration order, so the topo sort
+	// reproduces declaration order); the rename signals that the input/output
+	// distinction now exists.
+	std::vector<PassRef> m_declarationOrder;
 	std::vector<PassRef> m_executionOrder;
+
+	// DAG over passes — built in Compile(), referenced by IsImageReadDownstream
+	// and (Phase 2) future barrier / reachability queries.
+	PassDAG               m_dag;
+	std::vector<uint32_t> m_dagDeclToNode;       // decl idx -> node id (INVALID if pruned)
+	std::vector<uint32_t> m_executionOrderNodes; // parallel to m_executionOrder; DAG node ids
+	std::vector<size_t>   m_nodeToDecl;          // node id -> decl idx (inverse of declToNode)
+	std::vector<bool>     m_nodeAlive;           // node id -> is in m_executionOrder
+
+	// Explicit sink resources marked by callers via MarkSink(). Combined with
+	// imported / Persistent resources (implicit sinks) at Compile time.
+	std::vector<uint32_t> m_explicitImageSinks;
+	std::vector<uint32_t> m_explicitBufferSinks;
 
 	// Pre-computed barriers per execution step
 	struct PassBarriers {
