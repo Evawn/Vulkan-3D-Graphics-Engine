@@ -52,17 +52,27 @@ void AnimatedGeometryRenderer::RegisterPasses(
 	m_camera = ctx.camera;
 	m_lighting = ctx.lighting;
 	m_start_time = std::chrono::steady_clock::now();
+	m_assets = ctx.assets;
+	m_world  = ctx.world;
 
-	glm::uvec3 vs = m_volume_size;
+	// First-time setup: register a procedural voxel volume + scene node so the
+	// extractor emits one BrickmapVolume item per frame for our trace pass.
+	if (!m_volume_asset.valid()) {
+		m_volume_asset = m_assets->CreateProceduralVoxelVolume(
+			"animated_geometry_volume", m_volume_size, VK_FORMAT_R8_UINT);
+		if (m_world && !m_node) {
+			m_node = m_world->GetRoot().AddChild("animated_geometry_node");
+			Component c{};
+			c.type  = ComponentType::VoxelVolume;
+			c.asset = m_volume_asset;
+			m_node->AddComponent(c);
+		}
+	}
+
+	const auto* vol = m_assets->GetVoxelVolume(m_volume_asset);
+	m_volume = vol ? vol->volumeImage : ImageHandle{};
+	const glm::uvec3 vs = vol ? vol->size : m_volume_size;
 	logger->info("AnimatedGeometryRenderer: volume={}x{}x{}", vs.x, vs.y, vs.z);
-
-	m_volume = graph.CreateImage("animated_geometry_volume", {
-		vs.x, vs.y, vs.z,
-		VK_FORMAT_R8_UINT,
-		VK_SAMPLE_COUNT_1_BIT,
-		VK_IMAGE_TYPE_3D,
-		0
-	});
 
 	// Palette + volume sampler: external resources the technique owns. Built
 	// here so binding-table sources can capture them.
@@ -126,9 +136,11 @@ void AnimatedGeometryRenderer::RegisterPasses(
 		})
 		.SetBindings(m_compute_bindings);
 
-	// Graphics pass: single-level DDA fragment shader.
+	// Graphics pass: single-level DDA fragment shader. Consumes BrickmapVolume
+	// items emitted by the SceneExtractor (one per scene node carrying our
+	// VoxelVolumeComponent). v1 still draws a fullscreen quad per item.
 	auto& tracePass = graph.AddGraphicsPass("Animated Geometry Trace");
-	tracePass.AcceptsItemTypes({ RenderItemType::Fullscreen });
+	tracePass.AcceptsItemTypes({ RenderItemType::BrickmapVolume });
 	tracePass
 		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
@@ -187,22 +199,13 @@ void AnimatedGeometryRenderer::RegisterPasses(
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(AnimatedGeometryTracePC), &pc);
 
 			if (!ctx.scene) return;
-			for (const auto& item : ctx.scene->Get(RenderItemType::Fullscreen)) {
+			for (const auto& item : ctx.scene->Get(RenderItemType::BrickmapVolume)) {
 				DrawFullscreenItem(ctx, item);
 			}
 		})
 		.SetBindings(m_graphics_bindings);
 
 	logger->debug("AnimatedGeometryRenderer: Initialized via RegisterPasses");
-}
-
-void AnimatedGeometryRenderer::EmitItems(RenderScene& scene, const RenderContext& ctx) {
-	(void)ctx;
-	RenderItem item{};
-	item.type        = RenderItemType::Fullscreen;
-	item.voxelAsset  = m_volume;
-	item.frameCount  = 1;
-	scene.Add(item);
 }
 
 std::vector<std::string> AnimatedGeometryRenderer::GetShaderPaths() const {

@@ -2,6 +2,8 @@
 
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
+#include "AssetRegistry.h"
+#include "Scene.h"
 #include "BindingTable.h"
 #include "PaletteResource.h"
 #include "SceneLighting.h"
@@ -25,8 +27,14 @@ private:
 	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
 	std::shared_ptr<Camera> m_camera;
 
-	// Graph-managed 128^3 3D storage image (R8_UINT material indices).
+	// Volume lives in AssetRegistry as a procedural voxel asset (no host data;
+	// the Generate compute pass writes into it). The technique holds the AssetID
+	// and resolves the live ImageHandle on each graph rebuild.
+	AssetID     m_volume_asset;
 	ImageHandle m_volume;
+	AssetRegistry* m_assets = nullptr;
+	Scene*         m_world  = nullptr;
+	SceneNode*     m_node   = nullptr;
 
 	// Shared 256-entry palette texture + sampler.
 	std::unique_ptr<PaletteResource> m_palette;
@@ -64,11 +72,6 @@ public:
 		RenderGraph& graph,
 		const RenderContext& ctx,
 		const TechniqueTargets& targets) override;
-
-	// Drops one Fullscreen item per frame so the trace pass has something to
-	// iterate. This technique is the placeholder for the future foliage
-	// renderer, which will instead emit InstancedVoxelMesh items here.
-	void EmitItems(RenderScene& scene, const RenderContext& ctx) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
 

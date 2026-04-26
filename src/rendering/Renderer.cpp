@@ -54,10 +54,17 @@ void Renderer::Build(
 	const RenderContext& ctx,
 	std::shared_ptr<VWrap::ImageView> swapchainView,
 	VkExtent2D swapchainExtent,
-	std::function<void(PassContext&)> presentRecordFn)
+	std::function<void(PassContext&)> presentRecordFn,
+	std::function<void(RenderGraph&)> beforeRegisterFn,
+	std::function<void(RenderGraph&)> afterCompileFn)
 {
 	m_graph.Clear();
 	m_offscreenExtent = ctx.extent;
+
+	// Asset registry hook (optional): declare persistent buffers/images that
+	// outlive techniques. Runs before RegisterPasses so techniques can query
+	// handles via the registry and reference them in BindingTables.
+	if (beforeRegisterFn) beforeRegisterFn(m_graph);
 
 	// Ensure the post-process chain has up-to-date context (effects may be
 	// registered by Application before Build() is first called).
@@ -67,7 +74,7 @@ void Renderer::Build(
 	ppCtx.sceneFormat = m_config.swapchainFormat;
 	ppCtx.maxFramesInFlight = m_config.maxFramesInFlight;
 	ppCtx.camera = ctx.camera;
-	ppCtx.lighting = &m_lighting;
+	ppCtx.lighting = ctx.lighting;
 	m_postProcess.SetContext(ppCtx);
 
 	// Ask the technique what scene-image stack it needs, then allocate it.
@@ -95,6 +102,11 @@ void Renderer::Build(
 		.SetRecord(std::move(presentRecordFn));
 
 	m_graph.Compile();
+
+	// Asset registry hook (optional): upload host-side data (mesh vertices,
+	// .vox volumes) into the now-allocated device resources before any pass
+	// uses them.
+	if (afterCompileFn) afterCompileFn(m_graph);
 
 	// Post-compile hook: techniques run any one-shot work that needs the graph's
 	// allocated resources (e.g. seeding a storage image). Descriptor writes are
@@ -132,11 +144,14 @@ void Renderer::Rebuild(
 	RenderTechnique* technique,
 	const RenderContext& ctx,
 	VWrap::FrameController& fc,
-	std::function<void(PassContext&)> presentRecordFn)
+	std::function<void(PassContext&)> presentRecordFn,
+	std::function<void(RenderGraph&)> beforeRegisterFn,
+	std::function<void(RenderGraph&)> afterCompileFn)
 {
 	auto swapchainView = fc.GetImageViews()[0];
 	auto swapchainExtent = fc.GetSwapchain()->GetExtent();
-	Build(technique, ctx, swapchainView, swapchainExtent, std::move(presentRecordFn));
+	Build(technique, ctx, swapchainView, swapchainExtent, std::move(presentRecordFn),
+	      std::move(beforeRegisterFn), std::move(afterCompileFn));
 }
 
 std::shared_ptr<VWrap::ImageView> Renderer::GetFinalSceneView() const {

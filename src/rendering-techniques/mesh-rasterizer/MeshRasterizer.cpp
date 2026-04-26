@@ -8,6 +8,13 @@
 #include <algorithm>
 #include <map>
 
+#include <glm/gtc/quaternion.hpp>
+
+namespace {
+constexpr const char* kMeshAssetName = "mesh_rasterizer_obj";
+constexpr const char* kSceneNodeName = "mesh_rasterizer_node";
+}
+
 RenderTargetDesc MeshRasterizer::DescribeTargets(const RendererCaps& caps) const {
 	RenderTargetDesc desc{};
 	desc.color.format       = caps.swapchainFormat;
@@ -28,32 +35,56 @@ void MeshRasterizer::RegisterPasses(
 	m_allocator = ctx.allocator;
 	m_graphics_pool = ctx.graphicsPool;
 	m_camera = ctx.camera;
-	m_graph = &graph;
+	m_graph  = &graph;
+	m_assets = ctx.assets;
+	m_world  = ctx.world;
 
 	m_sampler = VWrap::Sampler::Create(m_device);
 
-	m_model_path = std::string(config::ASSET_DIR) + "/models/indoor plant_02.obj";
-	m_texture_path = std::string(config::ASSET_DIR) + "/textures/indoor plant_02_COL.jpg";
-
 	auto logger = spdlog::get("Render");
 
-	// Texture — fall back to 1x1 white placeholder if missing
-	try {
-		VWrap::CommandBuffer::UploadTextureToImage(m_graphics_pool, m_allocator, m_texture_image, m_texture_path.c_str());
-	} catch (const std::exception& e) {
-		logger->warn("Texture not found ({}), using placeholder", m_texture_path);
-		CreatePlaceholderTexture();
-	}
-	m_texture_image_view = VWrap::ImageView::Create(m_device, m_texture_image);
+	// First-time setup only — re-entered on every graph rebuild, so guard the
+	// one-shot pieces (asset registration, scene node creation) on m_mesh_asset
+	// validity. Texture loading is also one-shot today (no graph dependency).
+	if (!m_mesh_asset.valid()) {
+		m_model_path   = std::string(config::ASSET_DIR) + "/models/indoor plant_02.obj";
+		m_texture_path = std::string(config::ASSET_DIR) + "/textures/indoor plant_02_COL.jpg";
 
-	// Model — start with empty geometry if file is missing
-	try {
-		LoadModel();
-	} catch (const std::exception& e) {
-		logger->warn("Model not found ({}), waiting for user to select one", m_model_path);
+		try {
+			VWrap::CommandBuffer::UploadTextureToImage(m_graphics_pool, m_allocator, m_texture_image, m_texture_path.c_str());
+		} catch (const std::exception& e) {
+			logger->warn("Texture not found ({}), using placeholder", m_texture_path);
+			CreatePlaceholderTexture();
+		}
+		m_texture_image_view = VWrap::ImageView::Create(m_device, m_texture_image);
+
+		try {
+			LoadModel();
+		} catch (const std::exception& e) {
+			logger->warn("Model not found ({}), waiting for user to select one", m_model_path);
+		}
+
+		// Hand parsed mesh data to the registry. m_vertices / m_indices are
+		// drained by the move; the registry now owns the canonical copy.
+		glm::vec3 amin(0.0f), amax(0.0f);
+		ComputeMeshBounds(amin, amax);
+		m_mesh_asset = m_assets->RegisterMesh(kMeshAssetName,
+			std::move(m_vertices), std::move(m_indices), amin, amax, m_model_path);
+		m_vertices.clear();
+		m_indices.clear();
+
+		// Add a scene node carrying a Mesh component; the extractor emits one
+		// RenderItem::Mesh per frame from this. The transform is updated each
+		// frame in the record callback.
+		if (m_world && !m_node) {
+			m_node = m_world->GetRoot().AddChild(kSceneNodeName);
+			Component c{};
+			c.type  = ComponentType::Mesh;
+			c.asset = m_mesh_asset;
+			m_node->AddComponent(c);
+		}
 	}
 
-	DeclareGeometryBuffers(graph);
 	CreateUniformBuffers(ctx.maxFramesInFlight);
 
 	// Binding table: per-frame UBO at binding 0 + texture sampler at binding 1.
@@ -98,6 +129,19 @@ void MeshRasterizer::RegisterPasses(
 			vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 				pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
+			// Per-frame node animation. There's no Tick() hook on RenderTechnique
+			// yet, so we update the scene node here — the new transform is picked
+			// up by extraction *next* frame (one-frame lag, acceptable for a
+			// smooth continuous rotation).
+			if (m_node) {
+				m_accumulated_rotation += m_rotation_speed * 0.016f;
+				static const glm::quat yUpToZUp = glm::angleAxis(glm::radians(90.0f),
+					glm::vec3(1.0f, 0.0f, 0.0f));
+				glm::quat spin = glm::angleAxis(m_accumulated_rotation, glm::vec3(0.0f, 0.0f, 1.0f));
+				m_node->rotation = spin * yUpToZUp;
+				m_node->scale    = glm::vec3(m_model_scale);
+			}
+
 			if (!pctx.scene) return;
 			for (const auto& item : pctx.scene->Get(RenderItemType::Mesh)) {
 				UpdateUniformBuffer(pctx.frameIndex, item.transform);
@@ -109,73 +153,23 @@ void MeshRasterizer::RegisterPasses(
 
 void MeshRasterizer::OnPostCompile(RenderGraph& graph) {
 	(void)graph;
-	if (m_pending_geometry_upload) {
-		UploadGeometry();
-		m_pending_geometry_upload = false;
-	}
+	// Geometry upload is handled by AssetRegistry::UploadPending — runs between
+	// graph.Compile() and OnPostCompile, so by the time we get here, the
+	// vertex/index buffers backing m_mesh_asset already hold our data.
 }
 
-void MeshRasterizer::EmitItems(RenderScene& scene, const RenderContext& ctx) {
-	(void)ctx;
-	// Single static mesh today. Skip emission entirely if the OBJ failed to load
-	// — the pass record callback then iterates an empty bucket and the draw is
-	// suppressed naturally (no special-casing in the pass).
-	if (m_indices.empty() || m_vertex_buffer.id == UINT32_MAX) return;
-
-	m_accumulated_rotation += m_rotation_speed * 0.016f;
-
-	// OBJ convention is Y-up; engine is Z-up — rotate -90° around X to correct.
-	static const glm::mat4 yUpToZUp = glm::rotate(glm::mat4(1.0f),
-		glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-
-	glm::mat4 model = glm::rotate(glm::mat4(1.0f), m_accumulated_rotation, glm::vec3(0.0f, 0.0f, 1.0f));
-	model = glm::scale(model, glm::vec3(m_model_scale));
-	model = model * yUpToZUp;
-
-	RenderItem item{};
-	item.type           = RenderItemType::Mesh;
-	item.vertexBuffer   = m_vertex_buffer;
-	item.indexBuffer    = m_index_buffer;
-	item.indexCount     = static_cast<uint32_t>(m_indices.size());
-	item.firstIndex     = 0;
-	item.vertexOffset   = 0;
-	item.instanceCount  = 1;
-	item.firstInstance  = 0;
-	item.transform      = model;
-	scene.Add(item);
-}
-
-void MeshRasterizer::DeclareGeometryBuffers(RenderGraph& graph) {
+void MeshRasterizer::ComputeMeshBounds(glm::vec3& outMin, glm::vec3& outMax) const {
 	if (m_vertices.empty()) {
-		m_vertex_buffer = {};
-		m_index_buffer = {};
+		outMin = glm::vec3(0.0f);
+		outMax = glm::vec3(0.0f);
 		return;
 	}
-
-	const VkDeviceSize vbSize = sizeof(m_vertices[0]) * m_vertices.size();
-	const VkDeviceSize ibSize = sizeof(m_indices[0])  * m_indices.size();
-
-	BufferDesc vbDesc{};
-	vbDesc.size = vbSize;
-	vbDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	vbDesc.lifetime = Lifetime::Persistent;
-	m_vertex_buffer = graph.CreateBuffer("mesh_vertices", vbDesc);
-
-	BufferDesc ibDesc{};
-	ibDesc.size = ibSize;
-	ibDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	ibDesc.lifetime = Lifetime::Persistent;
-	m_index_buffer = graph.CreateBuffer("mesh_indices", ibDesc);
-
-	m_pending_geometry_upload = true;
-}
-
-void MeshRasterizer::UploadGeometry() {
-	if (m_vertices.empty() || !m_graph) return;
-	const VkDeviceSize vbSize = sizeof(m_vertices[0]) * m_vertices.size();
-	const VkDeviceSize ibSize = sizeof(m_indices[0])  * m_indices.size();
-	m_graph->UploadBufferData(m_vertex_buffer, m_vertices.data(), vbSize, m_graphics_pool);
-	m_graph->UploadBufferData(m_index_buffer,  m_indices.data(),  ibSize, m_graphics_pool);
+	outMin = m_vertices[0].pos;
+	outMax = m_vertices[0].pos;
+	for (const auto& v : m_vertices) {
+		outMin = glm::min(outMin, v.pos);
+		outMax = glm::max(outMax, v.pos);
+	}
 }
 
 void MeshRasterizer::CreateUniformBuffers(uint32_t frames) {
@@ -345,8 +339,20 @@ void MeshRasterizer::ReloadModel(const std::string& newPath) {
 		return;
 	}
 
-	// Geometry sizes likely changed — request a graph rebuild so the persistent
-	// buffers are re-declared at the new size. OnPostCompile will then upload.
+	// Hand the new geometry to the registry. If the new geometry is larger or
+	// smaller than the existing buffer, the registry returns true → request a
+	// graph rebuild so persistent buffers re-allocate at the right size. If
+	// the size is unchanged, the next graph build (or in-place re-upload via
+	// the registry) will push the new bytes; we still request a rebuild to
+	// keep things simple in v1.
+	glm::vec3 amin(0.0f), amax(0.0f);
+	ComputeMeshBounds(amin, amax);
+	if (m_assets) {
+		m_assets->ReplaceMesh(m_mesh_asset,
+			std::move(m_vertices), std::move(m_indices), amin, amax, m_model_path);
+	}
+	m_vertices.clear();
+	m_indices.clear();
 	if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 
 	// Reload texture — uses path from MTL if found, otherwise keeps current path

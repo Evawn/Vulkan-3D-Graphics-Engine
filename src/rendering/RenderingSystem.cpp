@@ -7,6 +7,10 @@ void RenderingSystem::Init(const RenderingSystemConfig& cfg) {
 	m_cfg = cfg;
 	m_offscreenExtent = cfg.initialOffscreenExtent;
 
+	// Hand the camera to the scene — this is the canonical owner from now on.
+	// Application keeps a shared_ptr so CameraController can drive it.
+	m_world.SetActiveCamera(cfg.camera);
+
 	RendererConfig rc{};
 	rc.device              = cfg.vk->device;
 	rc.allocator           = cfg.vk->allocator;
@@ -58,13 +62,17 @@ RenderContext RenderingSystem::BuildRenderContext() const {
 	ctx.computePool       = m_cfg.vk->computeCommandPool;
 	ctx.extent            = m_offscreenExtent;
 	ctx.maxFramesInFlight = m_cfg.maxFramesInFlight;
-	ctx.camera            = m_cfg.camera;
-	// Lighting lives inside the Renderer; const_cast is incidental — see
-	// Application::BuildRenderContext (the original site of this pattern).
-	ctx.lighting          = const_cast<SceneLighting*>(&m_renderer.GetLighting());
-	// Scene is owned here; const_cast follows the same pattern (RenderContext
-	// is logically a non-owning bundle, and m_scene is mutable engine state).
+	// Camera lives on the Scene now — this is the canonical accessor. The
+	// shared_ptr is the same one Application created and drives via
+	// CameraController; we just route it through the scene.
+	ctx.camera            = m_world.GetActiveCamera();
+	// Lighting / scene / world / assets all live on RenderingSystem; const_cast
+	// is incidental — RenderContext is logically a non-owning bundle, and these
+	// members are all mutable engine state.
+	ctx.lighting          = const_cast<SceneLighting*>(&m_lighting);
 	ctx.scene             = const_cast<RenderScene*>(&m_scene);
+	ctx.world             = const_cast<Scene*>(&m_world);
+	ctx.assets            = const_cast<AssetRegistry*>(&m_assets);
 	return ctx;
 }
 
@@ -75,11 +83,22 @@ void RenderingSystem::RebuildGraph() {
 	// std::move it into the UI pass without invalidating our stored copy on the
 	// next rebuild.
 	std::function<void(PassContext&)> uiCopy = m_uiRecord;
+
+	// Asset registry hooks: declare persistent buffers/images before the
+	// technique RegisterPasses (so techniques can query handles), then upload
+	// host data after Compile (when the device resources are allocated).
+	auto declareAssets = [this](RenderGraph& g) { m_assets.DeclareGraphResources(g); };
+	auto uploadAssets  = [this](RenderGraph& g) {
+		m_assets.UploadPending(g, m_cfg.vk->graphicsCommandPool);
+	};
+
 	m_renderer.Rebuild(
 		m_techniques[m_activeIndex].get(),
 		BuildRenderContext(),
 		*m_cfg.vk->frameController,
-		std::move(uiCopy));
+		std::move(uiCopy),
+		std::move(declareAssets),
+		std::move(uploadAssets));
 
 	if (m_profiler) {
 		m_profiler->SetPassCount(static_cast<uint32_t>(m_renderer.GetGraph().GetPassCount()));
@@ -213,15 +232,12 @@ void RenderingSystem::CaptureScreenshot() {
 }
 
 void RenderingSystem::DrawFrame(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex) {
-	// Per-frame scene rebuild. Clear once, then let every active technique drop
-	// items in. The graph reads this through PassContext::scene during Execute.
-	// Future scene-graph integration replaces the per-technique loop with a
-	// single graph-traversal-emits-items call; nothing else here changes.
+	// Per-frame scene rebuild. Clear the materialized item list once and let
+	// the extractor walk the world tree to refill it. Techniques are pure
+	// consumers — they never write to m_scene; pass record callbacks read
+	// items via PassContext::scene during graph Execute.
 	m_scene.Clear();
-	auto rctx = BuildRenderContext();
-	for (auto& tech : m_techniques) {
-		tech->EmitItems(m_scene, rctx);
-	}
+	m_extractor.Extract(m_world, m_assets, m_scene);
 	m_renderer.GetGraph().SetScene(&m_scene);
 
 	m_lastMetrics = m_profiler->GetMetrics(frameIndex);

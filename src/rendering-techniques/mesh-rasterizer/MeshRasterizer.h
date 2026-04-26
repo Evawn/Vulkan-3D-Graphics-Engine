@@ -2,6 +2,8 @@
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
 #include "RenderScene.h"
+#include "AssetRegistry.h"
+#include "Scene.h"
 #include "BindingTable.h"
 #include "Buffer.h"
 #include "Image.h"
@@ -26,7 +28,9 @@ struct UniformBufferObject {
 class MeshRasterizer : public RenderTechnique
 {
 private:
-	std::vector<uint32_t> m_indices;
+	// CPU-side geometry held only as a staging buffer for the next AssetRegistry
+	// upload. Cleared after RegisterMesh; the registry then owns the canonical copy.
+	std::vector<uint32_t>      m_indices;
 	std::vector<VWrap::Vertex> m_vertices;
 
 	std::shared_ptr<VWrap::Device> m_device;
@@ -38,19 +42,22 @@ private:
 	std::shared_ptr<VWrap::Image> m_texture_image;
 	std::shared_ptr<VWrap::Sampler> m_sampler;
 
-	// Geometry now lives in graph-owned Lifetime::Persistent buffers, addressed
-	// by handle. The technique uploads on RegisterPasses (post-Compile via the
-	// post-compile hook) and re-uploads on model reload. Items reference these
-	// handles; the future scene graph references them the same way.
-	BufferHandle m_vertex_buffer;
-	BufferHandle m_index_buffer;
-	bool m_pending_geometry_upload = false;
+	// Geometry lives in AssetRegistry-managed buffers, addressed by AssetID.
+	// The registry declares the persistent graph buffers on each rebuild and
+	// uploads after Compile; the technique only references the asset.
+	AssetID m_mesh_asset;
 	std::vector<std::shared_ptr<VWrap::Buffer>> m_uniform_buffers;
 	std::vector<void*> m_uniform_buffers_mapped;
 
 	std::shared_ptr<BindingTable> m_bindings;
 
-	RenderGraph* m_graph = nullptr;
+	RenderGraph*   m_graph    = nullptr;
+	AssetRegistry* m_assets   = nullptr;
+	Scene*         m_world    = nullptr;
+	// Scene node carrying the mesh component. Created once during RegisterPasses
+	// (so the extractor has something to walk on the first frame). The transform
+	// is updated each frame from m_accumulated_rotation in the record callback.
+	SceneNode*     m_node     = nullptr;
 
 	// Tunable parameters
 	float m_rotation_speed = 0.0f;
@@ -67,8 +74,6 @@ private:
 
 	std::vector<TechniqueParameter> m_parameters;
 
-	void DeclareGeometryBuffers(RenderGraph& graph);
-	void UploadGeometry();
 	void CreateUniformBuffers(uint32_t frames);
 	void WriteDescriptors();
 	void LoadModel();
@@ -76,6 +81,10 @@ private:
 	void ReloadTexture(const std::string& newPath);
 	void CreatePlaceholderTexture();
 	void UpdateUniformBuffer(uint32_t frame, const glm::mat4& itemTransform);
+	// Compute axis-aligned bounds over m_vertices, post-load. Used by the
+	// AssetRegistry record so future culling / instance-bounds passes can
+	// query without re-walking vertex data.
+	void ComputeMeshBounds(glm::vec3& outMin, glm::vec3& outMax) const;
 
 public:
 	std::string GetDisplayName() const override { return "Mesh Rasterizer"; }
@@ -88,11 +97,6 @@ public:
 		const TechniqueTargets& targets) override;
 
 	void OnPostCompile(RenderGraph& graph) override;
-
-	// Drops a single Mesh item per frame for the static OBJ. The future scene
-	// graph emits N items here (one per scene node carrying a mesh component);
-	// nothing else changes.
-	void EmitItems(RenderScene& scene, const RenderContext& ctx) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
 

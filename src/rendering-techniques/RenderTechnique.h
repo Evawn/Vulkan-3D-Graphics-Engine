@@ -17,6 +17,8 @@
 
 class RenderGraph;
 class RenderScene;
+class Scene;
+class AssetRegistry;
 struct SceneLighting;
 
 struct RenderContext {
@@ -29,13 +31,16 @@ struct RenderContext {
 	std::shared_ptr<Camera> camera;
 	SceneLighting* lighting = nullptr;  // shared, non-owning; renderer-owned state
 
-	// Per-frame scene the technique reads / writes. RenderingSystem owns it,
-	// clears it before EmitItems(), and forwards it through both this context
-	// (so RegisterPasses can capture it) and PassContext::scene (so record
-	// callbacks can iterate items). The future scene graph replaces the
-	// per-technique EmitItems shim with a graph-driven traversal that fills
-	// this same RenderScene; nothing on the consumer side changes.
+	// Per-frame extracted item list. The SceneExtractor fills this from m_world
+	// each frame; pass record callbacks read from it via PassContext::scene.
+	// Techniques never write here — production goes through the scene tree.
 	RenderScene* scene = nullptr;
+
+	// Source-of-truth scene tree + asset storage. Techniques use these during
+	// RegisterPasses / Reload to create scene nodes and register / look up
+	// assets. They are stable across frames; ownership lives on RenderingSystem.
+	Scene*         world  = nullptr;
+	AssetRegistry* assets = nullptr;
 };
 
 // Capabilities the Renderer exposes to techniques so DescribeTargets() can pick
@@ -91,18 +96,12 @@ public:
 	// is for one-shot post-compile work like seeding storage buffers/images.
 	virtual void OnPostCompile(RenderGraph& graph) { (void)graph; }
 
-	// Per-frame: drop RenderItems into the scene that the passes registered by
-	// this technique will consume. RenderingSystem clears the scene each frame
-	// before invoking this on every active technique.
-	//
-	// This virtual is the seam the future scene graph will plug into — when it
-	// lands, a single graph-traversal-emits-items call replaces the per-technique
-	// loop in RenderingSystem::DrawFrame. Techniques that *consume* items (rather
-	// than *own* their geometry) won't override this at all; they only declare
-	// .AcceptsItemTypes(...) and iterate scene->Get(...) in their record callback.
-	virtual void EmitItems(RenderScene& scene, const RenderContext& ctx) {
-		(void)scene; (void)ctx;
-	}
+	// Note: EmitItems() removed. RenderItems are now produced exclusively by
+	// SceneExtractor walking the world tree. Techniques are pure consumers —
+	// they declare .AcceptsItemTypes(...) and iterate ctx.scene->Get(...) in
+	// their record callback. To make a technique render something, attach a
+	// matching component to a SceneNode in the world (typically during the
+	// technique's first RegisterPasses).
 
 	// ---- Hot-reload + metrics ----
 	virtual std::vector<std::string> GetShaderPaths() const = 0;

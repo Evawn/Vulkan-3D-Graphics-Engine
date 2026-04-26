@@ -3,6 +3,10 @@
 #include "Renderer.h"
 #include "RenderTechnique.h"
 #include "RenderScene.h"
+#include "SceneLighting.h"
+#include "Scene.h"
+#include "SceneExtractor.h"
+#include "AssetRegistry.h"
 #include "AppEvent.h"
 #include "VulkanContext.h"
 #include "Camera.h"
@@ -28,6 +32,8 @@
 struct RenderingSystemConfig {
 	VWrap::VulkanContext* vk = nullptr;          // non-owning; Application owns the context
 	uint32_t              maxFramesInFlight = 1;
+	// Camera handed to the Scene — shared_ptr because the input system / camera
+	// controller in Application also retains a reference to drive movement.
 	std::shared_ptr<Camera> camera;
 	VkExtent2D            initialOffscreenExtent{};
 };
@@ -77,13 +83,19 @@ public:
 	// ---- Editor wiring ----
 	std::vector<std::unique_ptr<RenderTechnique>>& GetTechniques()        { return m_techniques; }
 	size_t* GetActiveTechniqueIndexPtr()                                  { return &m_activeIndex; }
-	SceneLighting&    GetLighting()                                       { return m_renderer.GetLighting(); }
+	SceneLighting&    GetLighting()                                       { return m_lighting; }
 	PostProcessChain& GetPostProcess()                                    { return m_renderer.GetPostProcess(); }
 	const GraphSnapshot* GetGraphSnapshot() const                         { return &m_graphSnapshot; }
 	GPUProfiler*      GetProfiler()                                       { return m_profiler.get(); }
 	GPUProfiler::PerformanceMetrics GetLastMetrics() const                { return m_lastMetrics; }
 	std::shared_ptr<VWrap::ImageView> GetFinalSceneView() const           { return m_renderer.GetFinalSceneView(); }
 	Renderer&         GetRenderer()                                       { return m_renderer; }
+
+	// ---- Scene module access (techniques + Application populate the scene) ----
+	Scene&            GetScene()                                          { return m_world; }
+	const Scene&      GetScene() const                                    { return m_world; }
+	AssetRegistry&    GetAssets()                                         { return m_assets; }
+	const AssetRegistry& GetAssets() const                                { return m_assets; }
 
 	// Application registers callbacks here so the scene-texture binding (ImGui
 	// viewport image) can be dropped/re-acquired around graph rebuilds. Setting
@@ -121,9 +133,27 @@ private:
 	std::function<void()> m_onAfterGraphRebuild;
 	std::function<void(const std::string&)> m_onScreenshotSaved;
 
-	// Frame-local item list. Cleared each DrawFrame, refilled by every active
-	// technique's EmitItems(). Plumbed into RenderContext (RegisterPasses-time)
-	// and into PassContext (record-time) so passes consume what techniques (and
-	// eventually the scene graph) emit.
+	// Frame-local item list. Cleared each DrawFrame, refilled by SceneExtractor
+	// from m_world. Plumbed into RenderContext (RegisterPasses-time) and into
+	// PassContext (record-time) so passes consume what extraction emits.
 	RenderScene m_scene;
+
+	// Scene-wide lighting state. Owned here as the staging point for the future
+	// Scene module — the eventual Scene will own this, but for now RenderingSystem
+	// is the canonical owner. Techniques and post-process effects access it via
+	// RenderContext::lighting / PostProcessContext::lighting.
+	SceneLighting m_lighting{};
+
+	// World state: source-of-truth scene tree, owned here. Techniques and the
+	// application populate it during Init / on file picks; the extractor walks
+	// it every frame to fill m_scene.
+	Scene m_world;
+
+	// Engine-wide asset storage. Techniques register their assets here; the
+	// registry declares persistent graph resources before each technique
+	// RegisterPasses, and uploads host data after Compile.
+	AssetRegistry m_assets;
+
+	// Per-frame producer that consumes m_world + m_assets and writes m_scene.
+	SceneExtractor m_extractor;
 };

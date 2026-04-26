@@ -2,7 +2,6 @@
 
 #include "RenderGraph.h"
 #include "RenderTechnique.h"
-#include "SceneLighting.h"
 #include "post-process/PostProcessChain.h"
 #include "FrameController.h"
 #include "Sampler.h"
@@ -34,12 +33,20 @@ public:
 
 	// Build the full render graph for a technique.
 	// presentRecordFn: UI/ImGui drawing callback provided by Application.
+	// beforeRegisterFn (optional): runs after graph.Clear() and before the
+	//   technique's RegisterPasses — the AssetRegistry uses this slot to
+	//   declare its persistent buffers/images so techniques can query handles.
+	// afterCompileFn (optional): runs after graph.Compile() and before the
+	//   technique's OnPostCompile — the AssetRegistry uses this slot to
+	//   upload host data into the now-allocated device resources.
 	void Build(
 		RenderTechnique* technique,
 		const RenderContext& ctx,
 		std::shared_ptr<VWrap::ImageView> swapchainView,
 		VkExtent2D swapchainExtent,
-		std::function<void(PassContext&)> presentRecordFn);
+		std::function<void(PassContext&)> presentRecordFn,
+		std::function<void(RenderGraph&)> beforeRegisterFn = nullptr,
+		std::function<void(RenderGraph&)> afterCompileFn   = nullptr);
 
 	// Execute the compiled graph for one frame.
 	void Execute(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex,
@@ -64,7 +71,9 @@ public:
 		RenderTechnique* technique,
 		const RenderContext& ctx,
 		VWrap::FrameController& fc,
-		std::function<void(PassContext&)> presentRecordFn);
+		std::function<void(PassContext&)> presentRecordFn,
+		std::function<void(RenderGraph&)> beforeRegisterFn = nullptr,
+		std::function<void(RenderGraph&)> afterCompileFn   = nullptr);
 
 	// Access to graph resources (for screenshot capture, ImGui texture registration).
 	RenderGraph& GetGraph() { return m_graph; }
@@ -86,9 +95,6 @@ public:
 	PostProcessChain& GetPostProcess() { return m_postProcess; }
 	const PostProcessChain& GetPostProcess() const { return m_postProcess; }
 
-	SceneLighting& GetLighting() { return m_lighting; }
-	const SceneLighting& GetLighting() const { return m_lighting; }
-
 private:
 	// Allocate scene images (color/depth/resolve) according to a technique's
 	// declared target needs, returning the handles the technique receives via
@@ -108,6 +114,5 @@ private:
 	ImageHandle m_swapchain;
 	VkExtent2D m_offscreenExtent{};
 
-	SceneLighting m_lighting{};
 	PostProcessChain m_postProcess;
 };

@@ -60,33 +60,54 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	m_lighting = ctx.lighting;
 	m_start_time = std::chrono::steady_clock::now();
 
-	m_graph = &graph;
+	m_graph  = &graph;
+	m_assets = ctx.assets;
+	m_world  = ctx.world;
 
-	glm::uvec3 vs = m_volume_size;
-	glm::uvec3 grid_dim = vs / 8u;
-	uint32_t grid_cells = grid_dim.x * grid_dim.y * grid_dim.z;
+	// First-time setup: register a procedural voxel-volume asset and wire up
+	// the scene node carrying it. Subsequent graph rebuilds skip this; the
+	// asset is already known to the registry and the scene node already exists.
+	if (!m_volume_asset.valid()) {
+		m_volume_asset = m_assets->CreateProceduralVoxelVolume(
+			"brickmap_palette_volume", m_volume_size, VK_FORMAT_R8_UINT);
+		if (m_world && !m_node) {
+			m_node = m_world->GetRoot().AddChild("brickmap_palette_node");
+			Component c{};
+			c.type  = ComponentType::VoxelVolume;
+			c.asset = m_volume_asset;
+			m_node->AddComponent(c);
+		}
+	} else {
+		// Procedural-volume size may have changed (.vox load → procedural
+		// transition); make sure the registry reflects current state.
+		auto* va = m_assets->GetVoxelVolume(m_volume_asset);
+		if (va && va->isProcedural && va->size != m_volume_size) {
+			m_assets->ResizeProceduralVoxelVolume(m_volume_asset, m_volume_size);
+		}
+	}
+
+	// Resolve the live ImageHandle (re-allocated by the registry's
+	// DeclareGraphResources earlier in this build).
+	const auto* vol = m_assets->GetVoxelVolume(m_volume_asset);
+	m_volume = vol ? vol->volumeImage : ImageHandle{};
+	const glm::uvec3 vs = vol ? vol->size : m_volume_size;
+	const glm::uvec3 grid_dim = vs / 8u;
+	const uint32_t grid_cells = grid_dim.x * grid_dim.y * grid_dim.z;
 	// Header is 8 uint32 (32 bytes): vs_x, vs_y, vs_z, brick_size, gd_x, gd_y, gd_z, brick_count
 	VkDeviceSize brickmapSize = (8 + grid_cells + grid_cells * 128) * sizeof(uint32_t);
 
 	logger->info("BrickmapPaletteRenderer: volume={}x{}x{}, grid={}x{}x{}, buffer={} bytes",
 		vs.x, vs.y, vs.z, grid_dim.x, grid_dim.y, grid_dim.z, brickmapSize);
 
-	m_volume = graph.CreateImage("brickmap_palette_volume", {
-		vs.x, vs.y, vs.z,
-		VK_FORMAT_R8_UINT,
-		VK_SAMPLE_COUNT_1_BIT,
-		VK_IMAGE_TYPE_3D,
-		VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-		Lifetime::Persistent  // holds uploaded .vox data; no producer pass refills it
-	});
-
 	m_brickmap_buffer = graph.CreateBuffer("brickmap_palette_data", {
 		brickmapSize,
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
 	});
 
-	m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
-	m_palette->Create();
+	if (!m_palette) {
+		m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
+		m_palette->Create();
+	}
 
 	// Binding tables.
 	m_compute_bindings = std::make_shared<BindingTable>(m_device, 1);
@@ -186,9 +207,13 @@ void BrickmapPaletteRenderer::RegisterPasses(
 		})
 		.SetBindings(m_build_bindings);
 
-	// Graphics pass: brickmap two-level DDA ray-march with palette colors
+	// Graphics pass: brickmap two-level DDA ray-march with palette colors.
+	// Consumes BrickmapVolume items emitted by the SceneExtractor (one per
+	// scene node carrying VoxelVolumeComponent). For v1 the trace shader
+	// still draws a fullscreen quad — bounding-box rasterization is the
+	// foliage-step migration of this technique.
 	auto& tracePass = graph.AddGraphicsPass("Brickmap Palette Trace");
-	tracePass.AcceptsItemTypes({ RenderItemType::Fullscreen });
+	tracePass.AcceptsItemTypes({ RenderItemType::BrickmapVolume });
 	tracePass
 		.SetColorAttachment(targets.color, LoadOp::Clear, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
@@ -245,7 +270,11 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BrickmapPaletteTracePC), &pc);
 
 			if (!ctx.scene) return;
-			for (const auto& item : ctx.scene->Get(RenderItemType::Fullscreen)) {
+			// V1 BrickmapVolume items still drive a fullscreen quad — the
+			// trace shader reads its bound volume from the descriptor set.
+			// Future work (bounded brickmap rasterization) will swap this
+			// for a bounding-box rasterized draw using item.aabb*.
+			for (const auto& item : ctx.scene->Get(RenderItemType::BrickmapVolume)) {
 				DrawFullscreenItem(ctx, item);
 			}
 		})
@@ -254,30 +283,23 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	logger->debug("BrickmapPaletteRenderer: Initialized via RegisterPasses");
 }
 
-void BrickmapPaletteRenderer::EmitItems(RenderScene& scene, const RenderContext& ctx) {
-	(void)ctx;
-	// One Fullscreen item per frame. voxelAsset references the brickmap volume
-	// so a scene-graph node could route this same item shape to alternative
-	// renderers (e.g. a future BrickmapVolume bounded-mesh pass).
-	RenderItem item{};
-	item.type        = RenderItemType::Fullscreen;
-	item.voxelAsset  = m_volume;
-	item.frameCount  = 1;
-	scene.Add(item);
-}
-
 void BrickmapPaletteRenderer::OnPostCompile(RenderGraph& graph) {
-	// Re-apply the loaded .vox to the freshly-allocated volume. Runs on every
-	// graph rebuild, including window-triggered swapchain resizes — without
-	// this, a window resize would leave the volume empty and Generate would
-	// be re-enabled by default, drawing the procedural sphere into the
-	// .vox-sized volume instead of the loaded model.
-	if (m_loaded_vox) {
+	// AssetRegistry::UploadPending has already pushed any .vox bytes into the
+	// volume image by the time we run. We just need to (a) tell the Generate
+	// compute pass to stand down if we're in file-loaded mode, and (b) push
+	// the .vox-supplied palette into the PaletteResource so the trace shader
+	// renders with file colors.
+	if (!m_assets) return;
+	const auto* vol = m_assets->GetVoxelVolume(m_volume_asset);
+	if (!vol) return;
+
+	if (vol->isProcedural) {
+		graph.SetPassEnabled("Brickmap Palette Generate", true);
+	} else {
 		graph.SetPassEnabled("Brickmap Palette Generate", false);
-		UploadVolumeData(m_loaded_vox->volume.data());
-		m_palette->Upload(m_loaded_vox->palette.data());
+		if (m_palette) m_palette->Upload(vol->palette.data());
 		spdlog::get("Render")->debug("BrickmapPaletteRenderer: Re-applied loaded .vox ({}x{}x{})",
-			m_loaded_vox->volumeSize.x, m_loaded_vox->volumeSize.y, m_loaded_vox->volumeSize.z);
+			vol->size.x, vol->size.y, vol->size.z);
 	}
 }
 
@@ -321,23 +343,42 @@ FrameStats BrickmapPaletteRenderer::GetFrameStats() const {
 }
 
 void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
+	(void)ctx;
 	if (!m_pending_reload) return;
 	m_pending_reload = false;
 	auto logger = spdlog::get("Render");
+	if (!m_assets) return;
 
 	if (m_vox_file_path.empty()) {
-		// Switch back to procedural mode
-		if (m_loaded_vox) {
+		// Switch back to procedural mode. Resize the asset back to the
+		// procedural default (128^3) and rebuild the graph so the new size
+		// takes effect.
+		const auto* vol = m_assets->GetVoxelVolume(m_volume_asset);
+		if (vol && !vol->isProcedural) {
 			logger->info("BrickmapPaletteRenderer: Restoring procedural mode");
-			m_loaded_vox.reset();
-			glm::uvec3 procSize(128, 128, 128);
-			if (m_volume_size != procSize) {
-				m_volume_size = procSize;
-				if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
-			} else {
-				m_graph->SetPassEnabled("Brickmap Palette Generate", true);
-				m_palette->RestoreDefault();
+			VoxModel empty{};  // discarded data; the procedural conversion below ignores it
+			(void)empty;
+			// We can't toggle isProcedural directly through ReplaceVoxelVolume
+			// (it always sets isProcedural=false). Instead, replace the asset
+			// slot with a fresh procedural one at the desired size. The old
+			// asset's image will be re-allocated as part of the next graph
+			// rebuild via DeclareGraphResources; the AssetID stays valid since
+			// it just indexes into m_volumes.
+			//
+			// In v1 this is simpler: just call ResizeProceduralVoxelVolume on
+			// the asset (it asserts isProcedural). Force isProcedural=true
+			// directly via the registry's mutable getter — small carve-out
+			// while we get more general "asset mode swap" later.
+			auto* mutVol = m_assets->GetVoxelVolume(m_volume_asset);
+			if (mutVol) {
+				mutVol->isProcedural = true;
+				mutVol->data.clear();
+				mutVol->needsUpload = false;
+				m_volume_size = glm::uvec3(128, 128, 128);
+				mutVol->size = m_volume_size;
+				if (m_palette) m_palette->RestoreDefault();
 			}
+			if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 		}
 		return;
 	}
@@ -347,47 +388,19 @@ void BrickmapPaletteRenderer::Reload(const RenderContext& ctx) {
 		logger->error("BrickmapPaletteRenderer: Failed to load .vox file");
 		return;
 	}
+	const glm::uvec3 newSize = model->volumeSize;
+	m_volume_size = newSize;
 
-	bool sizeChanged = (model->volumeSize != m_volume_size);
-	m_volume_size = model->volumeSize;
-	m_loaded_vox = std::move(*model);
+	// Hand the .vox bytes to the registry; UploadPending pushes them into the
+	// volume image during the next graph rebuild.
+	const bool sizeChanged = m_assets->ReplaceVoxelVolume(m_volume_asset,
+		std::move(*model), m_vox_file_path);
 
-	if (sizeChanged) {
-		// Volume size changed — need graph rebuild. OnPostCompile re-uploads
-		// from m_loaded_vox after the new graph is compiled.
-		logger->info("BrickmapPaletteRenderer: Volume resize to {}x{}x{}, rebuilding graph",
-			m_volume_size.x, m_volume_size.y, m_volume_size.z);
-		if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
-		return;
-	}
+	logger->info("BrickmapPaletteRenderer: Loaded .vox model (volume={}x{}x{}, sizeChanged={})",
+		newSize.x, newSize.y, newSize.z, sizeChanged);
 
-	// Same size — upload directly to the existing volume.
-	m_graph->SetPassEnabled("Brickmap Palette Generate", false);
-	UploadVolumeData(m_loaded_vox->volume.data());
-	m_palette->Upload(m_loaded_vox->palette.data());
-	m_graph->RecreatePipelines();
-
-	logger->info("BrickmapPaletteRenderer: Loaded .vox model (volume={}x{}x{})",
-		m_loaded_vox->volumeSize.x, m_loaded_vox->volumeSize.y, m_loaded_vox->volumeSize.z);
-}
-
-void BrickmapPaletteRenderer::UploadVolumeData(const uint8_t* data) {
-	glm::uvec3 vs = m_volume_size;
-	VkDeviceSize size = static_cast<VkDeviceSize>(vs.x) * vs.y * vs.z;
-
-	auto staging = VWrap::Buffer::CreateStaging(m_allocator, size);
-	void* mapped = staging->Map();
-	std::memcpy(mapped, data, size);
-	staging->Unmap();
-
-	auto volumeImage = m_graph->GetImage(m_volume);
-
-	auto cmd = VWrap::CommandBuffer::Create(m_graphics_pool);
-	cmd->BeginSingle();
-	cmd->CmdTransitionImageLayout(volumeImage, VK_FORMAT_R8_UINT,
-		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	cmd->CmdCopyBufferToImage(staging, volumeImage, vs.x, vs.y, vs.z);
-	cmd->CmdTransitionImageLayout(volumeImage, VK_FORMAT_R8_UINT,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-	cmd->EndAndSubmit();
+	// Always request a graph rebuild — the volume image needs re-allocation
+	// for size changes, and the post-compile hook does the palette + pass-enable
+	// swap that switches us into file-loaded mode.
+	if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
 }

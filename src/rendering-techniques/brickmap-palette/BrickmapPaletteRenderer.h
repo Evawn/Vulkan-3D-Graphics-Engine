@@ -2,6 +2,8 @@
 
 #include "RenderTechnique.h"
 #include "RenderGraph.h"
+#include "AssetRegistry.h"
+#include "Scene.h"
 #include "BindingTable.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
@@ -21,9 +23,15 @@ private:
 	std::shared_ptr<VWrap::CommandPool> m_graphics_pool;
 	std::shared_ptr<Camera> m_camera;
 
-	// Graph-managed 128^3 3D storage image (R8_UINT: material index per voxel)
-	ImageHandle m_volume;
-	// Graph-managed brickmap structure buffer (top grid + packed material bytes)
+	// Volume lives in the AssetRegistry — file-loaded .vox swaps in via
+	// AssetRegistry::ReplaceVoxelVolume; procedural mode swaps back via a
+	// fresh CreateProceduralVoxelVolume. We hold the AssetID, look up the
+	// live ImageHandle on each graph rebuild.
+	AssetID     m_volume_asset;
+	ImageHandle m_volume;            // resolved from m_volume_asset on each RegisterPasses
+	// Pass-local scratch buffer: the build compute pass packs the volume into
+	// a sparse brickmap structure each frame. Stays technique-owned because
+	// it's derived data, not an asset.
 	BufferHandle m_brickmap_buffer;
 	VkBuffer m_brickmap_vk_buffer = VK_NULL_HANDLE;
 
@@ -46,13 +54,19 @@ private:
 	// Dynamic per-axis volume sizing (procedural defaults to uvec3(128); .vox fits per-axis)
 	glm::uvec3 m_volume_size = glm::uvec3(128, 128, 128);
 
-	// .vox file import state. m_loaded_vox holds the active .vox model for as
-	// long as it's loaded — OnPostCompile re-applies it on every graph rebuild
-	// (e.g. after a window resize), so the volume always matches the file.
+	// File-import state. The actual .vox payload (volume bytes + palette) lives
+	// inside the AssetRegistry; we only hold the path + a pending-reload flag.
+	// "Currently file-loaded?" is queried via the registry: if the asset's
+	// VoxelVolumeAsset.isProcedural is false → file mode; true → procedural mode.
 	std::string m_vox_file_path;
 	bool m_pending_reload = false;
-	std::optional<VoxModel> m_loaded_vox;
-	RenderGraph* m_graph = nullptr;
+	RenderGraph*   m_graph    = nullptr;
+	AssetRegistry* m_assets   = nullptr;
+	Scene*         m_world    = nullptr;
+	// Scene node carrying the VoxelVolume component. Created once during the
+	// first RegisterPasses; the extractor emits one BrickmapVolume item per
+	// frame from this.
+	SceneNode*     m_node     = nullptr;
 
 	// Shared, non-owning pointer to renderer-owned lighting state. Captured from
 	// RenderContext during RegisterPasses; read during per-frame record to
@@ -61,8 +75,6 @@ private:
 	const SceneLighting* m_lighting = nullptr;
 
 	std::vector<TechniqueParameter> m_parameters;
-
-	void UploadVolumeData(const uint8_t* data);
 
 public:
 	std::string GetDisplayName() const override { return "Brickmap Palette Renderer"; }
@@ -74,17 +86,11 @@ public:
 		const RenderContext& ctx,
 		const TechniqueTargets& targets) override;
 
-	// Drops one Fullscreen item per frame so the trace pass has something to
-	// iterate. Same plumbing as MeshRasterizer — the item shape just doesn't
-	// carry geometry because post_fullscreen.vert.spv generates the quad from
-	// gl_VertexIndex. The future scene graph still emits items here (a "voxel
-	// volume" scene-graph node would emit FullscreenTrace + voxelAsset handle).
-	void EmitItems(RenderScene& scene, const RenderContext& ctx) override;
-
 	void Reload(const RenderContext& ctx) override;
 
-	// Post-Compile hook: applies any pending .vox upload now that graph resources
-	// are allocated. Descriptor wiring is handled automatically by BindingTable.
+	// Post-Compile hook: enables/disables the procedural Generate pass based on
+	// whether the underlying VoxelVolumeAsset is procedural or file-loaded.
+	// Asset uploads themselves are now done by AssetRegistry::UploadPending.
 	void OnPostCompile(RenderGraph& graph) override;
 
 	std::vector<std::string> GetShaderPaths() const override;
