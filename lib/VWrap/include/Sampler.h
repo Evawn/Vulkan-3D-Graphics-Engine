@@ -48,6 +48,15 @@ namespace VWrap {
 		static std::shared_ptr<Sampler> CreateNearestClamp(std::shared_ptr<Device> device);
 
 		/// <summary>
+		/// Linear filter + CLAMP_TO_EDGE + depth-comparison enabled with LESS.
+		/// For sampling depth attachments as `sampler2DShadow` from a fragment
+		/// shader — `texture()` returns 1.0 when ref &lt; storedDepth, 0.0 when
+		/// ref &gt;= storedDepth, with hardware bilinear PCF blending across the
+		/// 2×2 footprint. Used by the foliage shadow pass.
+		/// </summary>
+		static std::shared_ptr<Sampler> CreateShadowComparison(std::shared_ptr<Device> device);
+
+		/// <summary>
 		/// Convenience: the default Create(device) overload preserves the prior
 		/// behavior (linear + repeat + anisotropic) so existing call sites compile
 		/// unchanged.

@@ -9,7 +9,8 @@ layout(location = 0) in vec3 vNDC;
 layout(location = 0) out vec4 outColor;
 
 // `pc` is the name `sky.glsl` expects. Sky frag has no push constant, so we
-// alias the frame UBO to the same struct contract instead.
+// alias the frame UBO to the same struct contract instead. Layout must mirror
+// InstancedVoxelFrameUbo in InstancedVoxelTechnique.cpp exactly.
 layout(set = 0, binding = 0) uniform FrameUbo {
 	mat4  viewProj;          // unused here — the NDC-to-world inverse is what we need
 	mat4  ndcToWorld;
@@ -23,7 +24,9 @@ layout(set = 0, binding = 0) uniform FrameUbo {
 	int   shadowsEnabled;
 	float time;
 	int   frameCount;
-	int   _pad0; int _pad1; int _pad2;
+	float shadowBiasConstant;
+	float shadowBiasSlope;
+	float worldVoxelSize;
 } pc;
 
 #include "sky.glsl"

@@ -61,6 +61,27 @@ private:
 	BufferHandle m_instance_buffer;
 	uint32_t     m_instance_count = 0;
 
+	// Per-asset, per-frame occupancy bitmask. One bit per voxel, packed 32 along
+	// X (see instanced_voxel_generate.comp for layout). Sibling to the volume
+	// image — the volume holds palette material for the renderer; the bitmask
+	// holds occupancy for the substrate's shadow query (LIGHTING.md §3.2).
+	// Private to the technique for v1; graduates to AssetRegistry when
+	// multi-species lands.
+	BufferHandle m_bitmask_buffer;
+	uint32_t     m_bitmask_word_count = 0;
+
+	// World-grid occupancy substrate (LIGHTING.md §3). Holds a top-level brick
+	// grid spanning the cloud's footprint plus a CSR-style per-brick foliage
+	// instance overlap list. Built host-side once per `RebuildInstanceData`,
+	// uploaded as a single staging copy. Persistent so it survives viewport
+	// resize.
+	//
+	// Sized at an upper bound at allocation time (see Substrate.h —
+	// SubstrateUpperBoundWords). The actual populated extent is recorded in
+	// the buffer header; the trailing words are unread.
+	BufferHandle m_substrate_buffer;
+	uint32_t     m_substrate_word_capacity = 0;
+
 	// Scene node carrying the InstanceCloudComponent. Created once during
 	// the first RegisterPasses; the extractor emits one InstancedVoxelMesh
 	// item per frame from this node.
@@ -95,9 +116,36 @@ private:
 	int   m_max_iterations = 96;
 	bool  m_debug_color = false;
 	float m_animation_speed = 6.0f;   // frames per second
-	int   m_grid_dim = 64;            // 64×64 = 4096 instances
-	float m_grid_spacing = 0.2f;      // smaller blades, denser field — same ~12.8 unit footprint
+	int   m_grid_dim = 128;           // 128×128 = 16384 instances
+	// Spacing between adjacent blade origins, in *world voxels*. The asset is
+	// 16 voxels wide but the painted blade is ~1–2 voxels wide
+	// (instanced_voxel_generate.comp's tapered cross-section), so a pitch
+	// half the asset width packs blades 4× tighter without colliding paint —
+	// only the AABB bounding boxes overlap. Combined with grid_dim=128, this
+	// gives the same cloud footprint as the historical 64/16 config but at
+	// 4× density.
+	int   m_blade_pitch_voxels = 8;
 	bool  m_pending_grid_rebuild = false;
+
+	// Shadow tunables. The toggle is technique-local so the user finds it
+	// next to the other technique parameters (the global SceneLighting
+	// "Sun Shadows" still drives brickmap shadows; the trace shader uses
+	// the AND of both). Bias values are receiver-side in world units.
+	//
+	// Post-Milestone D: shadows resolve via the substrate's `traceShadowWorld`
+	// (substrate.glsl) rather than a depth-map sample. The bias parameters
+	// retain their meaning — receiver-side normal-direction offset to keep
+	// the shadow ray from re-hitting the receiver's own voxel.
+	bool  m_shadows_enabled       = true;
+	// Bias is now sub-voxel — the substrate's shadow ray starts from the actual
+	// fractional entry-face hit point (instanced_voxel.frag computes it from
+	// `h.entryT`), so we only need enough offset to escape numerical precision
+	// at the face boundary. Compare to the brickmap pillar, which uses a fixed
+	// 0.01 × voxelWorldSize ≈ 0.000125 with no slope term and no acne. Slope
+	// term retained as a small safety margin at grazing angles where the ray
+	// can clip neighbouring voxels of the same blade.
+	float m_shadow_bias_constant  = 0.001f;
+	float m_shadow_bias_slope     = 0.005f;
 
 	std::chrono::steady_clock::time_point m_start_time;
 
@@ -105,6 +153,12 @@ private:
 
 	// Builds the host-side per-instance data and uploads it to the graph buffer.
 	void RebuildInstanceData(RenderGraph& graph);
+
+	// Computes camera/sun/sky/time state and writes it into the per-frame UBO
+	// at the given index. Called from the FIRST pass to record each frame
+	// (the sky pre-pass) and idempotently again by the trace pass — keeping
+	// it idempotent decouples correctness from the graph's pass ordering.
+	void WritePerFrameUbo(uint32_t frameIndex);
 
 public:
 	std::string GetDisplayName() const override { return "Instanced Voxel"; }

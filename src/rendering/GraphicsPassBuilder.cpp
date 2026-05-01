@@ -225,7 +225,12 @@ void GraphicsPassBuilder::CreateRenderPass(
 
 void GraphicsPassBuilder::CreateFramebuffer() {
 	auto device = m_graph.GetDevice();
-	const auto& firstColorRes = m_graph.GetImageResource(m_colorAttachments[0].target);
+
+	// Depth-only passes (e.g. shadow map) have no color attachments — fall
+	// back to the depth target as the source of extent and the cache key.
+	const auto& extentRes = !m_colorAttachments.empty()
+		? m_graph.GetImageResource(m_colorAttachments[0].target)
+		: m_graph.GetImageResource(m_depthTarget);
 
 	std::vector<std::shared_ptr<VWrap::ImageView>> views;
 
@@ -245,8 +250,8 @@ void GraphicsPassBuilder::CreateFramebuffer() {
 		views.push_back(resolveRes.view);
 	}
 
-	VkExtent2D extent = { firstColorRes.desc.width, firstColorRes.desc.height };
+	VkExtent2D extent = { extentRes.desc.width, extentRes.desc.height };
 	auto fb = VWrap::Framebuffer::Create2D(device, m_renderPass, views, extent);
-	m_framebufferCache[firstColorRes.view->Get()] = fb;
+	m_framebufferCache[extentRes.view->Get()] = fb;
 	m_activeFramebuffer = fb;
 }

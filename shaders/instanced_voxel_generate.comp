@@ -9,14 +9,26 @@
 // Cross-section is a thin tapered leaf: wider in X (sway plane) than Y, so
 // the four right-angle yaw quantizations naturally alternate between
 // "face-on" and "edge-on" silhouettes when seen from the camera.
+//
+// Two outputs:
+//   binding 0 — the R8_UINT volume image consumed by the trace shader. One
+//               byte per voxel = palette index, frames stacked on Z.
+//   binding 1 — the per-frame occupancy bitmask consumed by the substrate
+//               (LIGHTING.md §3.2). One bit per voxel, packed 32-along-X.
+//               One thread per word, so no atomics and no buffer clear is
+//               needed — every word is written exactly once.
 
-layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(local_size_x = 1, local_size_y = 4, local_size_z = 4) in;
 
 layout(set = 0, binding = 0, r8ui) uniform writeonly uimage3D volume;
+layout(std430, set = 0, binding = 1) writeonly buffer BitmaskBuffer {
+	uint bits[];
+} bitmask;
 
 layout(push_constant) uniform PC {
 	int sizeX, sizeY, sizeZ;
 	int frameCount;
+	int numXWords;        // = (sizeX + 31) / 32 — bitmask row stride along X
 } pc;
 
 uint chooseMaterial(int x, int y, int z, int frame) {
@@ -66,15 +78,35 @@ uint chooseMaterial(int x, int y, int z, int frame) {
 }
 
 void main() {
-	int x = int(gl_GlobalInvocationID.x);
-	int y = int(gl_GlobalInvocationID.y);
-	int z = int(gl_GlobalInvocationID.z);
-	if (x >= pc.sizeX || y >= pc.sizeY) return;
-	if (z >= pc.sizeZ * pc.frameCount) return;
+	// One thread = one bitmask word along X = up to 32 voxels.
+	int xWord = int(gl_GlobalInvocationID.x);
+	int y     = int(gl_GlobalInvocationID.y);
+	int zf    = int(gl_GlobalInvocationID.z);   // frame * sizeZ + z
 
-	int frame = z / pc.sizeZ;
-	int zInFrame = z - frame * pc.sizeZ;
+	if (xWord >= pc.numXWords || y >= pc.sizeY || zf >= pc.sizeZ * pc.frameCount) return;
 
-	uint m = chooseMaterial(x, y, zInFrame, frame);
-	imageStore(volume, ivec3(x, y, z), uvec4(m));
+	int frame    = zf / pc.sizeZ;
+	int zInFrame = zf - frame * pc.sizeZ;
+
+	uint maskBits = 0u;
+	for (int b = 0; b < 32; ++b) {
+		int x = xWord * 32 + b;
+		if (x >= pc.sizeX) break;
+		uint m = chooseMaterial(x, y, zInFrame, frame);
+		// Volume image: full Z extent, one byte per voxel.
+		imageStore(volume, ivec3(x, y, zf), uvec4(m));
+		if (m != 0u) maskBits |= (1u << uint(b));
+	}
+
+	// Bitmask layout — frame is the slowest axis so each frame's mask is a
+	// contiguous slab the substrate can address with a single base offset:
+	//   bits[ frame * (numXWords * sizeY * sizeZ)
+	//       + zInFrame * (numXWords * sizeY)
+	//       + y        * numXWords
+	//       + xWord ]
+	int idx = frame    * (pc.numXWords * pc.sizeY * pc.sizeZ)
+	        + zInFrame * (pc.numXWords * pc.sizeY)
+	        + y        *  pc.numXWords
+	        + xWord;
+	bitmask.bits[idx] = maskBits;
 }

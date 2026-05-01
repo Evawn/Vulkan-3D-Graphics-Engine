@@ -79,6 +79,27 @@ namespace VWrap {
 		return Create(device, info);
 	}
 
+	std::shared_ptr<Sampler> Sampler::CreateShadowComparison(std::shared_ptr<Device> device) {
+		VkSamplerCreateInfo info{};
+		info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		info.magFilter = VK_FILTER_LINEAR;
+		info.minFilter = VK_FILTER_LINEAR;
+		info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		info.anisotropyEnable = VK_FALSE;
+		info.maxAnisotropy = 1.0f;
+		info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;  // unsampled = "fully lit" outside the shadow map
+		info.unnormalizedCoordinates = VK_FALSE;
+		info.compareEnable = VK_TRUE;
+		info.compareOp = VK_COMPARE_OP_LESS;                    // ref < storedDepth ? 1.0 : 0.0
+		info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		info.mipLodBias = 0.0f;
+		info.minLod = 0.0f;
+		info.maxLod = 0.0f;
+		return Create(device, info);
+	}
+
 	Sampler::~Sampler() {
 		if (m_sampler != VK_NULL_HANDLE)
 			vkDestroySampler(m_device->Get(), m_sampler, nullptr);

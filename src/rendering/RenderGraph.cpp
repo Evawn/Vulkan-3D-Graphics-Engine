@@ -1350,8 +1350,13 @@ void RenderGraph::RecordStream(std::shared_ptr<VWrap::CommandBuffer> cmd,
 
 		if (ref.type == PassType::Graphics) {
 			auto& pass = *m_graphicsPasses[ref.index];
-			const auto& firstColorRes = m_images[pass.m_colorAttachments[0].target.id];
-			VkExtent2D extent = { firstColorRes.desc.width, firstColorRes.desc.height };
+			// Depth-only passes (e.g. shadow maps) skip color attachments,
+			// so fall back to the depth target's dimensions for viewport,
+			// scissor, and the framebuffer extent.
+			const auto& extentSrc = !pass.m_colorAttachments.empty()
+				? m_images[pass.m_colorAttachments[0].target.id]
+				: m_images[pass.m_depthTarget.id];
+			VkExtent2D extent = { extentSrc.desc.width, extentSrc.desc.height };
 
 			std::vector<VkClearValue> clearValues;
 			for (const auto& ca : pass.m_colorAttachments) {

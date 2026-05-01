@@ -1,4 +1,5 @@
 #include "InstancedVoxelTechnique.h"
+#include "Substrate.h"
 #include "RenderItem.h"
 #include "RenderScene.h"
 #include "PipelineDefaults.h"
@@ -8,6 +9,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <cassert>
 #include <cstring>
 #include <random>
 
@@ -19,6 +21,17 @@ constexpr const char* kGenerateName  = "InstancedVoxel Generate";
 constexpr const char* kSkyPassName   = "InstancedVoxel Sky";
 constexpr const char* kTracePassName = "InstancedVoxel Trace";
 
+// World voxel size — the engine's canonical voxel pitch (VISION.md §1.1).
+// One day this graduates out to a Scene-level concept shared with the brickmap
+// pillar; today it lives here because the foliage technique is the only
+// consumer that has been quantized onto the world voxel grid. The substrate
+// (LIGHTING.md §3) keys off this value: every quantized instance position maps
+// to integer world-voxel coordinates via this scale.
+//
+// The chosen value preserves the pre-quantization visual: 16-voxel-wide blades
+// at 0.0125 m/voxel = 0.2 m wide, matching the previous m_grid_spacing default.
+constexpr float kWorldVoxelSize = 0.0125f;
+
 // CPU layout must match shaders/instanced_voxel.vert::InstanceData.
 // std430-compatible: 16-byte alignment for vec3+scalar pairs, vec4 for quat.
 struct GpuInstance {
@@ -26,7 +39,12 @@ struct GpuInstance {
 	glm::vec4 rotation;     // quaternion (xyz, w)
 	float     animOffset;
 	float     _pad0;        // reserved for future speciesIndex (bindless multi-species)
-	float     _pad1;
+	int32_t   yawIdx;       // 0..3 — Z-yaw enumeration. Same info the rotation
+	                        // quaternion encodes, but pre-decoded so substrate
+	                        // queries (and any future code that wants to apply a
+	                        // permutation rather than rotate) can dispatch on
+	                        // the integer directly. The vertex shader still
+	                        // consumes the quaternion.
 	float     _pad2;
 };
 static_assert(sizeof(GpuInstance) == 48, "GpuInstance must be 48 bytes (std430)");
@@ -39,25 +57,39 @@ struct VolumeMetaUbo {
 struct GeneratePC {
 	int32_t sizeX, sizeY, sizeZ;
 	int32_t frameCount;
+	int32_t numXWords;       // bitmask row stride along X: ceil(sizeX / 32)
 };
 
-// Per-frame UBO. Rewritten every frame; both the sky pre-pass and the
-// trace pass read it. std140 layout: vec3+scalar pairs share 16 B slots.
+// Number of 32-bit words per (frame, z, y) row of the bitmask.
+inline uint32_t BitmaskXWords(uint32_t sizeX) {
+	return (sizeX + 31u) / 32u;
+}
+
+// Total uint32 word count for an asset's bitmask: one word per
+// 32-voxel chunk along X, full sizeY × sizeZ × frameCount slabs.
+inline uint32_t BitmaskWordCount(glm::uvec3 size, uint32_t frameCount) {
+	return BitmaskXWords(size.x) * size.y * size.z * frameCount;
+}
+
+// Per-frame UBO. Rewritten every frame; the sky pre-pass and the trace pass
+// both read it. std140 layout: vec3+scalar pairs share 16 B slots; mat4
+// fields are naturally 16-aligned.
 struct InstancedVoxelFrameUbo {
-	glm::mat4 viewProj;        // 64
-	glm::mat4 ndcToWorld;      // 64 — sky pass uses this; trace pass ignores
-	glm::vec3 cameraPos;       int32_t maxIterations;   // 16
-	glm::vec3 skyColor;        int32_t debugColor;      // 16
-	glm::vec3 sunDirection;    float   sunCosHalfAngle; // 16
-	glm::vec3 sunColor;        float   sunIntensity;    // 16
+	glm::mat4 viewProj;            // 64
+	glm::mat4 ndcToWorld;          // 64 — sky pass uses this; trace pass ignores
+	glm::vec3 cameraPos;           int32_t maxIterations;   // 16
+	glm::vec3 skyColor;            int32_t debugColor;      // 16
+	glm::vec3 sunDirection;        float   sunCosHalfAngle; // 16
+	glm::vec3 sunColor;            float   sunIntensity;    // 16
 	float     ambientIntensity;
 	float     aoStrength;
 	int32_t   shadowsEnabled;
-	float     time;                                     // 16
+	float     time;                                         // 16
 	int32_t   frameCount;
-	int32_t   _pad0;
-	int32_t   _pad1;
-	int32_t   _pad2;                                    // 16
+	float     shadowBiasConstant;
+	float     shadowBiasSlope;
+	float     worldVoxelSize;      // engine voxel pitch; mirrored from kWorldVoxelSize
+	                               // so substrate.glsl can convert world ↔ voxel    // 16
 };
 static_assert(sizeof(InstancedVoxelFrameUbo) == 224,
 	"InstancedVoxelFrameUbo must stay std140-compatible");
@@ -106,22 +138,46 @@ void InstancedVoxelTechnique::RegisterPasses(
 	// First-time setup: register a procedural animated voxel asset and a
 	// scene node carrying an InstanceCloudComponent. Subsequent rebuilds
 	// re-resolve handles and re-create the instance buffer.
+	//
+	// Cloud node convention (locked in by Milestone A — LIGHTING.md §2):
+	// the cloud's *local* frame is the world voxel grid: instance positions
+	// are integer voxel offsets, and the cloud node's TRS is the only
+	// transform that scales voxels into world units. Doing it this way means
+	// the substrate (Milestone C) builds its index in cloud-local voxels and
+	// shaders do one floor-divide to walk it.
 	if (!m_volume_asset.valid()) {
 		m_volume_asset = m_assets->CreateProceduralAnimatedVoxelVolume(
 			kVolumeAssetName, m_volume_size, m_frame_count, VK_FORMAT_R8_UINT);
 		if (m_world && !m_node) {
 			m_node = m_world->GetRoot().AddChild(kSceneNodeName);
-			m_node->position = glm::vec3(0.0f, 0.0f, 0.0f);
 			Component c{};
 			c.type            = ComponentType::InstanceCloud;
 			c.asset           = m_volume_asset;
 			c.frameCount      = m_frame_count;
+			// Per-instance AABB is the asset's voxel extent — integers in
+			// cloud-local space. The cloud node's scale(kWorldVoxelSize)
+			// converts to world units.
 			c.instanceAabbMin = glm::vec3(0.0f);
 			c.instanceAabbMax = glm::vec3(static_cast<float>(m_volume_size.x),
 			                              static_cast<float>(m_volume_size.y),
 			                              static_cast<float>(m_volume_size.z));
 			m_node->AddComponent(c);
 		}
+	}
+
+	if (m_node) {
+		// Cloud-local to world: scale by the engine voxel pitch, then translate
+		// so the cloud's footprint center lands at world origin (matches the
+		// pre-quantization visual where the cloud was centered at (0,0,0)).
+		// SceneNode composes T·R·S; we set R=identity, S=kWorldVoxelSize, T to
+		// re-center.
+		const float footprintVoxels = static_cast<float>(m_grid_dim) *
+		                              static_cast<float>(m_blade_pitch_voxels);
+		const float halfFootprintWorld = 0.5f * footprintVoxels * kWorldVoxelSize;
+		m_node->position = glm::vec3(-halfFootprintWorld, -halfFootprintWorld, 0.0f);
+		m_node->rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+		m_node->scale    = glm::vec3(kWorldVoxelSize);
+		m_node->MarkSubtreeDirty();
 	}
 
 	// Resolve live handles from the registry (re-allocated on every rebuild).
@@ -136,6 +192,30 @@ void InstancedVoxelTechnique::RegisterPasses(
 	bd.usage    = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	bd.lifetime = Lifetime::Persistent;
 	m_instance_buffer = graph.CreateBuffer(kInstanceBufferName, bd);
+
+	// Per-asset occupancy bitmask. Written by the generate compute pass; read
+	// by the substrate's shadow query (Milestone C). Persistent — once written
+	// the bits don't change frame-to-frame (the v1 asset is animation-static
+	// once baked).
+	m_bitmask_word_count = BitmaskWordCount(m_volume_size, m_frame_count);
+	BufferDesc bm{};
+	bm.size     = sizeof(uint32_t) * m_bitmask_word_count;
+	bm.usage    = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	bm.lifetime = Lifetime::Persistent;
+	m_bitmask_buffer = graph.CreateBuffer("instanced_voxel_bitmask", bm);
+
+	// World-grid substrate. Allocated at upper-bound size (see
+	// SubstrateUpperBoundWords); the populated extent is recorded in the
+	// buffer header so the shader doesn't read the trailing slack.
+	m_substrate_word_capacity = InstancedVoxel::SubstrateUpperBoundWords(
+		m_instance_count, m_volume_size,
+		static_cast<uint32_t>(m_grid_dim),
+		static_cast<uint32_t>(m_blade_pitch_voxels));
+	BufferDesc sb{};
+	sb.size     = sizeof(uint32_t) * m_substrate_word_capacity;
+	sb.usage    = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	sb.lifetime = Lifetime::Persistent;
+	m_substrate_buffer = graph.CreateBuffer("instanced_voxel_substrate", sb);
 
 	// Refresh the InstanceCloudComponent on the scene node — buffer handle
 	// changes every rebuild because the graph bumps the gen counter.
@@ -175,7 +255,7 @@ void InstancedVoxelTechnique::RegisterPasses(
 			m_frame_ubo_mapped[i]);
 	}
 
-	// Palette + sampler.
+	// Palette + samplers.
 	if (!m_palette) {
 		m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
 		m_palette->Create();
@@ -185,13 +265,23 @@ void InstancedVoxelTechnique::RegisterPasses(
 	}
 
 	// ---- Compute pass: write the animated voxel asset frames once. ----
+	// Two outputs:
+	//   binding 0 — the R8_UINT volume image (palette indices, one byte/voxel)
+	//   binding 1 — the occupancy bitmask SSBO (one bit/voxel, packed 32-along-X)
+	// Each thread owns one bitmask word along X, so dispatch is sized in
+	// bitmask words (not voxels) on the X axis. local_size_x stays at 1
+	// because per-word work is internally serialized over up to 32 voxels.
 	m_compute_bindings = std::make_shared<BindingTable>(m_device, 1);
-	m_compute_bindings->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT)
-		.BindGraphStorageImage(0, m_volume);
+	m_compute_bindings
+		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  VK_SHADER_STAGE_COMPUTE_BIT)
+		 .AddBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		 .BindGraphStorageImage(0, m_volume)
+		 .BindGraphStorageBuffer(1, m_bitmask_buffer);
 	m_compute_bindings->Build();
 
 	graph.AddComputePass(kGenerateName)
-		.Write(m_volume, ResourceUsage::StorageWrite)
+		.Write(m_volume,         ResourceUsage::StorageWrite)
+		.Write(m_bitmask_buffer, ResourceUsage::StorageWrite)
 		.SetPipeline([this]() {
 			ComputePipelineDesc d;
 			d.compSpvPath = std::string(config::SHADER_DIR) + "/instanced_voxel_generate.comp.spv";
@@ -208,17 +298,18 @@ void InstancedVoxelTechnique::RegisterPasses(
 			pctx.cmd->CmdBindComputeDescriptorSets(pctx.computePipeline->GetLayout(),
 				{ m_compute_bindings->GetSet(0)->Get() });
 			GeneratePC pc{};
-			pc.sizeX = static_cast<int32_t>(m_volume_size.x);
-			pc.sizeY = static_cast<int32_t>(m_volume_size.y);
-			pc.sizeZ = static_cast<int32_t>(m_volume_size.z);
+			pc.sizeX      = static_cast<int32_t>(m_volume_size.x);
+			pc.sizeY      = static_cast<int32_t>(m_volume_size.y);
+			pc.sizeZ      = static_cast<int32_t>(m_volume_size.z);
 			pc.frameCount = static_cast<int32_t>(m_frame_count);
+			pc.numXWords  = static_cast<int32_t>(BitmaskXWords(m_volume_size.x));
 			vkCmdPushConstants(pctx.cmd->Get(), pctx.computePipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 			auto cdiv = [](uint32_t a, uint32_t b) { return (a + b - 1) / b; };
 			pctx.cmd->CmdDispatch(
-				cdiv(m_volume_size.x, 4),
-				cdiv(m_volume_size.y, 4),
-				cdiv(m_volume_size.z * m_frame_count, 4));
+				BitmaskXWords(m_volume_size.x),       // local_size_x = 1
+				cdiv(m_volume_size.y, 4),             // local_size_y = 4
+				cdiv(m_volume_size.z * m_frame_count, 4));   // local_size_z = 4
 		})
 		.SetBindings(m_compute_bindings);
 
@@ -231,9 +322,19 @@ void InstancedVoxelTechnique::RegisterPasses(
 	m_sky_bindings->Build();
 
 	// ---- Graphics pass: rasterize the cube per instance, DDA inside. ----
-	// Vertex stage now also reads the frame UBO (for viewProj). Instance SSBO
-	// is read in BOTH vertex (transform) and fragment (per-instance rotation
-	// inverse for the trace direction).
+	// Vertex stage reads the frame UBO (for viewProj). Instance SSBO is read
+	// in BOTH vertex (transform) and fragment (substrate's per-instance lookups).
+	//   0 — instances SSBO   (vert+frag)
+	//   1 — volume image     (frag, NEAREST)
+	//   2 — palette image    (frag, LINEAR)
+	//   3 — meta UBO         (frag)
+	//   4 — frame UBO        (vert+frag)
+	//   6 — substrate buffer (frag)
+	//   7 — bitmask buffer   (frag)
+	// Slot 5 was the shadow map, retired in Milestone D when the substrate
+	// took over the shadow query. Left vacant rather than renumbered to
+	// minimize churn; substrate.glsl doesn't care about absolute binding
+	// numbers (it uses the buffer names).
 	m_graphics_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
 	m_graphics_bindings
 		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -241,12 +342,16 @@ void InstancedVoxelTechnique::RegisterPasses(
 		 .AddBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+		 .AddBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
+		 .AddBinding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .BindGraphStorageBuffer(0, m_instance_buffer)
 		 .BindGraphSampledImage(1, m_volume, m_volume_sampler)
 		 .BindExternalSampledImage(2, m_palette->GetImageView(), m_palette->GetSampler(),
 		                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 		 .BindUniformBufferPerFrame(3, m_meta_buffers, sizeof(VolumeMetaUbo))
-		 .BindUniformBufferPerFrame(4, m_frame_ubo_buffers, sizeof(InstancedVoxelFrameUbo));
+		 .BindUniformBufferPerFrame(4, m_frame_ubo_buffers, sizeof(InstancedVoxelFrameUbo))
+		 .BindGraphStorageBuffer(6, m_substrate_buffer)
+		 .BindGraphStorageBuffer(7, m_bitmask_buffer);
 	m_graphics_bindings->Build();
 
 	// ---- Sky pre-pass (fullscreen). Runs FIRST among graphics passes so the
@@ -267,6 +372,12 @@ void InstancedVoxelTechnique::RegisterPasses(
 			return d;
 		})
 		.SetRecord([this](PassContext& pctx) {
+			// Sky is the first foliage pass to record this frame (the shadow
+			// pass is gone since Milestone D), so it owns the per-frame UBO
+			// write. WritePerFrameUbo is idempotent — the trace pass repeats
+			// the call to keep correctness independent of pass ordering.
+			WritePerFrameUbo(pctx.frameIndex);
+
 			auto vk_cmd = pctx.cmd->Get();
 			vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pctx.graphicsPipeline->Get());
 			VkDescriptorSet ds = m_sky_bindings->GetSet(pctx.frameIndex)->Get();
@@ -286,7 +397,9 @@ void InstancedVoxelTechnique::RegisterPasses(
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
 		.SetResolveTarget(targets.resolve)
 		.Read(m_volume, ResourceUsage::SampledRead)
-		.Read(m_instance_buffer, ResourceUsage::StorageRead)
+		.Read(m_instance_buffer,  ResourceUsage::StorageRead)
+		.Read(m_substrate_buffer, ResourceUsage::StorageRead)
+		.Read(m_bitmask_buffer,   ResourceUsage::StorageRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/instanced_voxel.vert.spv";
@@ -315,39 +428,10 @@ void InstancedVoxelTechnique::RegisterPasses(
 
 			if (!pctx.scene) return;
 
-			// ---- Update per-frame UBO (read by both this pass and the sky pre-pass).
-			InstancedVoxelFrameUbo ubo{};
-			glm::mat4 view = m_camera->GetViewMatrix();
-			glm::mat4 proj = m_camera->GetProjectionMatrix();
-			ubo.viewProj = proj * view;
-			ubo.ndcToWorld = glm::inverse(ubo.viewProj);
-			ubo.cameraPos = m_camera->GetPosition();
-			ubo.maxIterations = m_max_iterations;
-			ubo.skyColor = m_sky ? m_sky->color : glm::vec3(0.529f, 0.808f, 0.922f);
-			ubo.debugColor = m_debug_color ? 1 : 0;
-			if (m_lighting) {
-				ubo.sunDirection     = m_lighting->GetSunDirection();
-				ubo.sunCosHalfAngle  = m_lighting->GetSunCosHalfAngle();
-				ubo.sunColor         = glm::vec3(m_lighting->sunColor[0],
-				                                 m_lighting->sunColor[1],
-				                                 m_lighting->sunColor[2]);
-				ubo.sunIntensity     = m_lighting->sunIntensity;
-				ubo.ambientIntensity = m_lighting->ambientIntensity;
-				ubo.aoStrength       = m_lighting->aoStrength;
-				ubo.shadowsEnabled   = m_lighting->shadowsEnabled ? 1 : 0;
-			} else {
-				ubo.sunDirection = glm::vec3(0, 0, -1);
-				ubo.sunCosHalfAngle = 1.0f;
-				ubo.sunColor = glm::vec3(1.0f);
-				ubo.sunIntensity = 1.0f;
-				ubo.ambientIntensity = 0.5f;
-				ubo.aoStrength = 0.0f;
-				ubo.shadowsEnabled = 0;
-			}
-			ubo.frameCount = static_cast<int32_t>(m_frame_count);
-			auto now = std::chrono::steady_clock::now();
-			ubo.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
-			std::memcpy(m_frame_ubo_mapped[pctx.frameIndex], &ubo, sizeof(ubo));
+			// Idempotent re-write of the per-frame UBO. The sky pre-pass already
+			// wrote it earlier this frame (see WritePerFrameUbo); writing it
+			// again here keeps correctness independent of pass execution order.
+			WritePerFrameUbo(pctx.frameIndex);
 
 			// ---- Per-draw push constant: just the cube geometry.
 			InstancedVoxelDrawPC pc{};
@@ -390,43 +474,132 @@ void InstancedVoxelTechnique::RebuildInstanceData(RenderGraph& graph) {
 	instances.resize(m_instance_count);
 
 	std::mt19937 rng(0xC0FFEE);
-	std::uniform_real_distribution<float> jitter(-0.05f, 0.05f);
 	std::uniform_real_distribution<float> phase(0.0f, static_cast<float>(m_frame_count));
 	// 4-way Z-yaw quantization. Voxel volumes are axis-aligned grids, so any
 	// non-right-angle rotation forces the DDA to march diagonally through
 	// partial voxels — quantizing to {0°, 90°, 180°, 270°} keeps each blade's
-	// internal grid axis-aligned with the cloud frame (and, for the default
-	// identity cloudWorld, with the world). Increase to 24 if we ever want
-	// blades laid sideways (full cube symmetry group).
+	// internal grid axis-aligned with the cloud frame. Each yaw is a
+	// permutation+sign-flip on (x, y); the substrate's CPU AABB computation
+	// (Milestone C) relies on this to enumerate touched bricks with integer
+	// math.
 	std::uniform_int_distribution<int> yawIdxDist(0, 3);
 
-	const float origin = -0.5f * (m_grid_dim - 1) * m_grid_spacing;
 	const float kQuarterTurn = 1.57079632679f;  // π/2
+	const int spacing = m_blade_pitch_voxels;
 	for (int gy = 0; gy < m_grid_dim; ++gy) {
 		for (int gx = 0; gx < m_grid_dim; ++gx) {
 			GpuInstance gi{};
-			gi.position = glm::vec3(
-				origin + gx * m_grid_spacing + jitter(rng),
-				origin + gy * m_grid_spacing + jitter(rng),
-				0.0f);
-			// Visually: each blade is taller than wide. Scale shrinks the
-			// 16-wide cube to ~0.4 units; the per-axis aabb on the component
-			// already gives the cube a tall (32) dim, so the blade reads
-			// vertically.
-			gi.scale = m_grid_spacing / static_cast<float>(m_volume_size.x);
-			gi.scale *= 1.0f + jitter(rng) * 4.0f;
+			// Position is an integer voxel offset in cloud-local space. The
+			// cloud node's scale(kWorldVoxelSize) projects this to world. No
+			// sub-voxel jitter — variety comes from per-instance yaw and
+			// (post-multi-species) per-instance assets.
+			const int vx = gx * spacing;
+			const int vy = gy * spacing;
+			gi.position = glm::vec3(static_cast<float>(vx),
+			                        static_cast<float>(vy),
+			                        0.0f);
+			// Asset voxels = world voxels (VISION.md §1.1). The only correct
+			// per-instance scale is 1; tall/short blade variants ship as
+			// separate assets, not as a continuous scale knob.
+			gi.scale = 1.0f;
 
-			float yaw = static_cast<float>(yawIdxDist(rng)) * kQuarterTurn;
+			const int yawIdx = yawIdxDist(rng);
+			float yaw = static_cast<float>(yawIdx) * kQuarterTurn;
 			glm::quat q = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f));
 			gi.rotation = glm::vec4(q.x, q.y, q.z, q.w);
+			gi.yawIdx   = yawIdx;
 
 			gi.animOffset = phase(rng);
 			instances[gy * m_grid_dim + gx] = gi;
 		}
 	}
 
+#ifndef NDEBUG
+	// Invariant check: every instance's transform must be a permutation +
+	// integer translation in cloud-local voxel space (LIGHTING.md §2). The
+	// substrate's correctness depends on this — a non-integer offset or a
+	// non-quantized yaw would produce world voxels that don't agree with the
+	// per-brick instance lists.
+	for (const auto& gi : instances) {
+		const glm::vec3 fracPos = gi.position - glm::round(gi.position);
+		assert(glm::dot(fracPos, fracPos) < 1e-8f && "instance position must be integer cloud voxel");
+		assert(std::abs(gi.scale - 1.0f) < 1e-6f && "instance scale must be exactly 1");
+		// Quaternion must be a yaw multiple of 90° around +Z: (x, y) zero,
+		// (z, w) one of (0,±1), (±√2/2, √2/2). The polynomial check below
+		// equivalently: |x|+|y| ≈ 0 AND z² + w² ≈ 1.
+		const float zw2 = gi.rotation.z * gi.rotation.z + gi.rotation.w * gi.rotation.w;
+		assert(std::abs(gi.rotation.x) + std::abs(gi.rotation.y) < 1e-6f &&
+		       std::abs(zw2 - 1.0f) < 1e-6f && "instance rotation must be a Z-axis yaw");
+	}
+#endif
+
 	graph.UploadBufferData(m_instance_buffer, instances.data(),
 		instances.size() * sizeof(GpuInstance), m_graphics_pool);
+
+	// Build the world-grid substrate from the just-quantized instances. The
+	// substrate sees only what it needs (cloud-local voxel position + yawIdx),
+	// keeping its inputs decoupled from anything else GpuInstance might grow.
+	std::vector<InstancedVoxel::SubstrateInstanceInput> substrateInputs;
+	substrateInputs.reserve(instances.size());
+	for (const auto& gi : instances) {
+		InstancedVoxel::SubstrateInstanceInput in;
+		in.cloudVoxelPos = glm::ivec3(glm::round(gi.position));
+		in.yawIdx        = static_cast<uint8_t>(gi.yawIdx & 0x3);
+		substrateInputs.push_back(in);
+	}
+	auto build = InstancedVoxel::BuildFoliageSubstrate(
+		substrateInputs.data(),
+		static_cast<uint32_t>(substrateInputs.size()),
+		m_volume_size);
+	assert(build.data.size() <= m_substrate_word_capacity &&
+	       "substrate upper bound was too small — recheck SubstrateUpperBoundWords");
+	graph.UploadBufferData(m_substrate_buffer, build.data.data(),
+		build.data.size() * sizeof(uint32_t), m_graphics_pool);
+}
+
+void InstancedVoxelTechnique::WritePerFrameUbo(uint32_t frameIndex) {
+	if (frameIndex >= m_frame_ubo_mapped.size() || !m_frame_ubo_mapped[frameIndex]) return;
+
+	InstancedVoxelFrameUbo ubo{};
+	glm::mat4 view = m_camera->GetViewMatrix();
+	glm::mat4 proj = m_camera->GetProjectionMatrix();
+	ubo.viewProj   = proj * view;
+	ubo.ndcToWorld = glm::inverse(ubo.viewProj);
+	ubo.cameraPos  = m_camera->GetPosition();
+	ubo.maxIterations = m_max_iterations;
+	ubo.skyColor   = m_sky ? m_sky->color : glm::vec3(0.529f, 0.808f, 0.922f);
+	ubo.debugColor = m_debug_color ? 1 : 0;
+
+	if (m_lighting) {
+		ubo.sunDirection     = m_lighting->GetSunDirection();
+		ubo.sunCosHalfAngle  = m_lighting->GetSunCosHalfAngle();
+		ubo.sunColor         = glm::vec3(m_lighting->sunColor[0],
+		                                 m_lighting->sunColor[1],
+		                                 m_lighting->sunColor[2]);
+		ubo.sunIntensity     = m_lighting->sunIntensity;
+		ubo.ambientIntensity = m_lighting->ambientIntensity;
+		ubo.aoStrength       = m_lighting->aoStrength;
+		// Shader-side gate is the AND of the technique-local toggle and the
+		// global lighting toggle — either one off disables shadow sampling.
+		ubo.shadowsEnabled   = (m_shadows_enabled && m_lighting->shadowsEnabled) ? 1 : 0;
+	} else {
+		ubo.sunDirection     = glm::vec3(0, 0, -1);
+		ubo.sunCosHalfAngle  = 1.0f;
+		ubo.sunColor         = glm::vec3(1.0f);
+		ubo.sunIntensity     = 1.0f;
+		ubo.ambientIntensity = 0.5f;
+		ubo.aoStrength       = 0.0f;
+		ubo.shadowsEnabled   = m_shadows_enabled ? 1 : 0;
+	}
+
+	ubo.frameCount         = static_cast<int32_t>(m_frame_count);
+	ubo.shadowBiasConstant = m_shadow_bias_constant;
+	ubo.shadowBiasSlope    = m_shadow_bias_slope;
+	ubo.worldVoxelSize     = kWorldVoxelSize;
+	auto now = std::chrono::steady_clock::now();
+	ubo.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+
+	std::memcpy(m_frame_ubo_mapped[frameIndex], &ubo, sizeof(ubo));
 }
 
 void InstancedVoxelTechnique::Reload(const RenderContext& ctx) {
@@ -449,11 +622,19 @@ std::vector<std::string> InstancedVoxelTechnique::GetShaderPaths() const {
 
 std::vector<TechniqueParameter>& InstancedVoxelTechnique::GetParameters() {
 	if (m_parameters.empty()) {
-		m_parameters = {
-			{ "Animation Speed", TechniqueParameter::Float, &m_animation_speed, 0.0f, 30.0f },
-			{ "Max Iterations",  TechniqueParameter::Int,   &m_max_iterations, 1.0f, 256.0f },
-			{ "Debug Coloring",  TechniqueParameter::Bool,  &m_debug_color },
-		};
+		// Lead with the headline lighting toggle so it's the first thing under
+		// the technique's "Parameters" header, not buried in the global
+		// Lighting section. Technique-local field; AND'd with SceneLighting's
+		// global Sun Shadows toggle in the shader.
+		m_parameters.push_back({ "Shadows", TechniqueParameter::Header });
+		m_parameters.push_back({ "Enable Shadows",     TechniqueParameter::Bool,  &m_shadows_enabled });
+		m_parameters.push_back({ "Shadow Bias Const",  TechniqueParameter::Float, &m_shadow_bias_constant, 0.0f, 0.5f });
+		m_parameters.push_back({ "Shadow Bias Slope",  TechniqueParameter::Float, &m_shadow_bias_slope,    0.0f, 1.0f });
+
+		m_parameters.push_back({ "Trace", TechniqueParameter::Header });
+		m_parameters.push_back({ "Animation Speed", TechniqueParameter::Float, &m_animation_speed, 0.0f, 30.0f });
+		m_parameters.push_back({ "Max Iterations",  TechniqueParameter::Int,   &m_max_iterations, 1.0f, 256.0f });
+		m_parameters.push_back({ "Debug Coloring",  TechniqueParameter::Bool,  &m_debug_color });
 		TechniqueParameter gridDim;
 		gridDim.label = "Grid Side";
 		gridDim.type  = TechniqueParameter::Int;
@@ -470,6 +651,9 @@ std::vector<TechniqueParameter>& InstancedVoxelTechnique::GetParameters() {
 }
 
 FrameStats InstancedVoxelTechnique::GetFrameStats() const {
-	// Sky pre-pass (1 draw, 4 verts) + cube draw (1 draw × instanceCount).
-	return { 2, 4 + 36 * m_instance_count, 0 };
+	// Sky pre-pass (1 draw, 4 verts) + trace pass (1 draw × instanceCount).
+	// The shadow pass is gone since Milestone D — shadows are resolved via
+	// a substrate DDA inside the trace fragment shader, no extra rasterization.
+	const uint32_t cubeVerts = 36 * m_instance_count;
+	return { 2, 4 + cubeVerts, 0 };
 }

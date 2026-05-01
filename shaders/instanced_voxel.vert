@@ -9,8 +9,9 @@
 // push constant. The fragment shader DDAs *inside* this cube against the
 // shared voxel asset, animated by per-instance frameOffset.
 //
-// Frame state (camera, sun, sky, time) lives in the per-frame UBO at
-// binding 4 to keep the push constant under the 128-byte portability minimum.
+// Frame state (camera, sun, sky, time, lightViewProj) lives in the per-frame
+// UBO at binding 4 to keep the push constant under the 128-byte portability
+// minimum.
 
 layout(push_constant) uniform DrawPushConstantBlock {
 	mat4 cloudWorld;       // per-cloud world transform (from SceneNode hierarchy)
@@ -22,7 +23,9 @@ struct InstanceData {
 	vec3  position;       float scale;
 	vec4  rotation;       // quaternion (xyz, w)
 	float animOffset;     // seconds added to time before mod-by-frameCount
-	float _pad0; float _pad1; float _pad2;
+	float _pad0;          // reserved for future speciesIndex
+	int   yawIdx;         // 0..3 — Z-yaw enumeration (substrate query reads this)
+	float _pad2;
 };
 
 layout(set = 0, binding = 0) readonly buffer InstanceBuffer {
@@ -41,13 +44,17 @@ layout(set = 0, binding = 4) uniform FrameUbo {
 	int   shadowsEnabled;
 	float time;
 	int   frameCount;
-	int   _pad0; int _pad1; int _pad2;
+	float shadowBiasConstant;
+	float shadowBiasSlope;
+	float worldVoxelSize;
 } frame;
 
 layout(location = 0) out vec3 vLocalPos;        // position inside the per-instance AABB (for DDA entry)
 layout(location = 1) out vec3 vWorldPos;        // for ray-origin in fragment if needed
-layout(location = 2) out flat int  vFrameIdx;   // frame slab to sample
-layout(location = 3) out flat vec4 vInstRot;    // per-instance quaternion — frag inverts it
+layout(location = 2) out flat int   vFrameIdx;  // frame slab to sample
+layout(location = 3) out flat vec4  vInstRot;   // per-instance quaternion — frag inverts it
+layout(location = 4) out flat vec3  vInstPos;   // per-instance position (cloud-local)
+layout(location = 5) out flat float vInstScale; // per-instance uniform scale
 
 // 36-vertex unit cube (positions in [0,1]^3). Two triangles per face × 6 faces.
 // Order: -X, +X, -Y, +Y, -Z, +Z. Winding chosen so the front face is the
@@ -99,5 +106,7 @@ void main() {
 	int frame_i = int(floor(mod(t, float(fc))));
 	if (frame_i < 0) frame_i += fc;
 	vFrameIdx = frame_i;
-	vInstRot  = inst.rotation;
+	vInstRot   = inst.rotation;
+	vInstPos   = inst.position;
+	vInstScale = inst.scale;
 }

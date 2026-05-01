@@ -7,17 +7,40 @@
 // equivalent of the world-space view direction, sampling the voxel image at
 // `(x, y, z + frameIdx * size.z)` (frames as Z-slabs). On hit we read the
 // palette and run the existing lighting + corner-AO helpers.
+//
+// Direct lighting is computed by walking the world-grid occupancy substrate
+// (substrate.glsl / Substrate.h) from the world-space hit point toward the
+// sun. Voxel-perfect inter-instance occlusion: any blade casts on any other
+// blade through the same DDA query — no shadow-map resolution loss, no
+// cube-shaped silhouettes.
 
 layout(location = 0) in vec3 vLocalPos;
 layout(location = 1) in vec3 vWorldPos;
-layout(location = 2) flat in int  vFrameIdx;
-layout(location = 3) flat in vec4 vInstRot;     // per-instance quaternion
+layout(location = 2) flat in int   vFrameIdx;
+layout(location = 3) flat in vec4  vInstRot;     // per-instance quaternion
+layout(location = 4) flat in vec3  vInstPos;     // per-instance position (cloud-local voxels)
+layout(location = 5) flat in float vInstScale;   // per-instance uniform scale (post-A: always 1)
 
 layout(push_constant) uniform DrawPushConstantBlock {
 	mat4 cloudWorld;
 	vec3 aabbMin; float _pad0;
 	vec3 aabbMax; float _pad1;
 } pc;
+
+// Per-instance state for the substrate's secondary lookups (instances OTHER
+// than the one this fragment belongs to). The vertex stage already binds
+// this for transform; we re-declare it here so the frag can index it.
+struct InstanceData {
+	vec3  position;       float scale;
+	vec4  rotation;
+	float animOffset;
+	float _pad0;
+	int   yawIdx;
+	float _pad2;
+};
+layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {
+	InstanceData instances[];
+} ib;
 
 layout(set = 0, binding = 1) uniform usampler3D volume_sampler;
 layout(set = 0, binding = 2) uniform sampler2D  palette_sampler;
@@ -27,6 +50,8 @@ layout(set = 0, binding = 3) uniform VolumeMeta {
 } meta;
 
 // Per-frame state (camera/sun/sky/time/iteration). Shared with the sky pass.
+// Layout must mirror InstancedVoxelFrameUbo in InstancedVoxelTechnique.cpp
+// exactly — std140 padding rules pack vec3+scalar pairs into single 16 B slots.
 layout(set = 0, binding = 4) uniform FrameUbo {
 	mat4  viewProj;
 	mat4  ndcToWorld;
@@ -39,12 +64,24 @@ layout(set = 0, binding = 4) uniform FrameUbo {
 	int   shadowsEnabled;
 	float time;
 	int   frameCount;
-	int   _pad0; int _pad1; int _pad2;
+	float shadowBiasConstant;
+	float shadowBiasSlope;
+	float worldVoxelSize;
 } frame;
+
+// World-grid substrate. Walked by `traceShadowWorld` (substrate.glsl).
+layout(std430, set = 0, binding = 6) readonly buffer SubstrateBuffer {
+	uint data[];
+} substrate;
+
+// Per-asset, per-frame occupancy bitmask. Read by substrate's instance test.
+layout(std430, set = 0, binding = 7) readonly buffer BitmaskBuffer {
+	uint bits[];
+} bitmask;
 
 layout(location = 0) out vec4 outColor;
 
-// Conjugate of a unit quaternion is its inverse. cheaper than inverse().
+// Conjugate of a unit quaternion is its inverse. Cheaper than inverse().
 vec4 quatConjugate(vec4 q) { return vec4(-q.xyz, q.w); }
 vec3 quatRotate(vec4 q, vec3 v) {
 	vec3 t = 2.0 * cross(q.xyz, v);
@@ -66,113 +103,38 @@ bool isSolidAt(ivec3 voxelCoord) {
 	return sampleMaterial(voxelCoord) != 0u;
 }
 
-// Map instance-local AABB space ↔ voxel-grid space. The AABB spans aabbMin..aabbMax
-// (instance-local), and the voxel grid is meta.size cells, so a voxel of edge
-// length `voxel_local = (aabbMax - aabbMin) / meta.size` lives in local space.
-// Declared before voxel_ao.glsl include because that helper calls worldToVoxel.
-vec3  g_voxel_local;     // world-units-per-voxel (per axis)
-vec3  g_local_origin;    // pc.aabbMin
+// Map instance-local AABB space ↔ voxel-grid space.
+vec3  g_voxel_local;
+vec3  g_local_origin;
+int   uMaxIterations;     // pulled from frame UBO at main() entry — DDA helper reads this
 
 vec3 localToVoxel(vec3 p) { return (p - g_local_origin) / g_voxel_local; }
-// voxel_ao.glsl expects a `worldToVoxel(vec3)` — for our per-instance
-// technique, "world" is the AABB-local space that we're DDA'ing in.
 vec3 worldToVoxel(vec3 p) { return localToVoxel(p); }
 
 #include "voxel_ao.glsl"
+#include "instanced_voxel_dda.glsl"
+#include "substrate.glsl"
 
-struct Hit {
-	bool  hit;
-	float t;
-	ivec3 voxel;
-	bvec3 face;
-	ivec3 step_sign;
-	uint  matIdx;
-	int   total_iters;
-};
-
-Hit traceLocal(vec3 origin, vec3 direction) {
-	Hit h;
-	h.hit = false; h.t = 0.0; h.voxel = ivec3(0);
-	h.face = bvec3(false); h.step_sign = ivec3(0); h.matIdx = 0u; h.total_iters = 0;
-
-	// Origin already inside AABB (we entered at the cube fragment); start from
-	// vLocalPos slightly nudged forward to avoid floating-point edge cases.
-	vec3 invDir = 1.0 / direction;
-
-	vec3 p_voxel = localToVoxel(origin);
-	p_voxel = clamp(p_voxel, vec3(0.001), vec3(meta.size) - 0.001);
-	ivec3 voxel = clamp(ivec3(floor(p_voxel)), ivec3(0), meta.size - 1);
-
-	ivec3 step_sign = ivec3(
-		direction.x >= 0.0 ? 1 : -1,
-		direction.y >= 0.0 ? 1 : -1,
-		direction.z >= 0.0 ? 1 : -1
-	);
-	h.step_sign = step_sign;
-
-	vec3 tDelta = abs(g_voxel_local / direction);
-
-	// Per-axis t to reach the next voxel boundary along that axis.
-	vec3 vmin = g_local_origin + vec3(voxel    ) * g_voxel_local;
-	vec3 vmax = g_local_origin + vec3(voxel + 1) * g_voxel_local;
-	vec3 tMaxAxis = vec3(
-		direction.x >= 0.0 ? (vmax.x - origin.x) * invDir.x : (vmin.x - origin.x) * invDir.x,
-		direction.y >= 0.0 ? (vmax.y - origin.y) * invDir.y : (vmin.y - origin.y) * invDir.y,
-		direction.z >= 0.0 ? (vmax.z - origin.z) * invDir.z : (vmin.z - origin.z) * invDir.z
-	);
-
-	bvec3 last_face = bvec3(false);
-
-	for (int i = 0; i < frame.maxIterations; i++) {
-		if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, meta.size))) break;
-
-		uint matIdx = sampleMaterial(voxel);
-		if (matIdx != 0u) {
-			h.hit = true;
-			h.voxel = voxel;
-			h.face = last_face;
-			h.matIdx = matIdx;
-			h.total_iters = i;
-			return h;
-		}
-
-		last_face = bvec3(false);
-		if (tMaxAxis.x < tMaxAxis.y && tMaxAxis.x < tMaxAxis.z) {
-			tMaxAxis.x += tDelta.x;
-			voxel.x += step_sign.x;
-			last_face = bvec3(true, false, false);
-		} else if (tMaxAxis.y < tMaxAxis.z) {
-			tMaxAxis.y += tDelta.y;
-			voxel.y += step_sign.y;
-			last_face = bvec3(false, true, false);
-		} else {
-			tMaxAxis.z += tDelta.z;
-			voxel.z += step_sign.z;
-			last_face = bvec3(false, false, true);
-		}
-		h.total_iters = i + 1;
-	}
-	return h;
+// Convert an instance-local position into world space using the same chain the
+// vertex shader applied: `cloudWorld * (R_inst * (S_inst * p) + T_inst)`.
+vec3 instanceLocalToWorld(vec3 pLocal) {
+	vec3 inCloud = quatRotate(vInstRot, pLocal * vInstScale) + vInstPos;
+	return (pc.cloudWorld * vec4(inCloud, 1.0)).xyz;
 }
 
 void main() {
 	g_local_origin = pc.aabbMin;
 	g_voxel_local  = (pc.aabbMax - pc.aabbMin) / vec3(meta.size);
+	uMaxIterations = frame.maxIterations;
 
 	// World ray → instance-AABB-local ray.
-	//
-	// Forward chain in vertex stage was:  cloudWorld * (T_inst * R_inst * S_inst) * localPos
-	// So inverse for a *direction* (translations cancel) is:
-	//     localDir = R_inst^-1 * cloudWorld^-1 * worldDir
-	// cloudWorld is treated as rotation-only (uniform-scale assumption already
-	// documented in the technique header); R_inst is a unit quaternion so its
-	// inverse is the conjugate. Scale cancels under final normalize().
 	mat3 cloudWorldInv = transpose(mat3(pc.cloudWorld));
 	vec3 worldDir = normalize(vWorldPos - frame.cameraPos);
 	vec3 cloudDir = cloudWorldInv * worldDir;
 	vec3 localDir = normalize(quatRotate(quatConjugate(vInstRot), cloudDir));
 
-	Hit h = traceLocal(vLocalPos + localDir * 0.0001, localDir);
+	vec3 ddaOrigin = vLocalPos + localDir * 0.0001;
+	DdaHit h = traceLocal(ddaOrigin, localDir);
 
 	if (!h.hit) {
 		// Discard unhit cube interior — sky pre-pass shows through. Foliage is sparse.
@@ -182,28 +144,56 @@ void main() {
 	vec4 albedo = texelFetch(palette_sampler, ivec2(h.matIdx, 0), 0);
 	vec3 localNormal = -vec3(h.step_sign) * vec3(h.face);
 
+	// Continuous, per-fragment hit point on the voxel's entry face — NOT the
+	// voxel center. This is what gives shadow edges their diagonal projection
+	// (each fragment's shadow ray starts from a distinct point along the face,
+	// so the occluder silhouette projects across the receiver instead of
+	// snapping to the receiver-voxel boundary). Same approach the brickmap
+	// pillar uses with `h.t` in brickmap_palette_trace.frag.
+	vec3 hitInstanceLocal = ddaOrigin + localDir * h.entryT;
+
 	float ao = 1.0;
 	if (frame.aoStrength > 0.0) {
-		// We need a hitPos for cornerAO; use the voxel's center as a v1 stand-in.
-		vec3 hitLocal = g_local_origin + (vec3(h.voxel) + 0.5) * g_voxel_local;
-		float raw = cornerAO(h.voxel, h.face, h.step_sign, hitLocal);
+		float raw = cornerAO(h.voxel, h.face, h.step_sign, hitInstanceLocal);
 		ao = mix(1.0, raw, frame.aoStrength);
 	}
 
-	// Directional shading is computed in WORLD space so it tracks the scene
-	// graph correctly under cloud-level rotation/translation. Forward chain:
-	//   N_world = mat3(cloudWorld) · R_inst · N_local
-	// (right-angle R_inst is orthonormal; uniform per-instance scale would
-	// drop out under the final normalize). For non-uniform cloudWorld scale,
-	// this would need the proper inverse-transpose normal matrix passed in
-	// as a per-draw push-constant slot — not needed at v1 since SceneNode
-	// scale defaults to (1,1,1) for the InstanceCloud root.
+	// World-space hit position + normal for the substrate shadow trace.
 	vec3 cloudNormal = quatRotate(vInstRot, localNormal);
 	vec3 worldNormal = normalize(mat3(pc.cloudWorld) * cloudNormal);
 	float NdotL = max(0.0, dot(worldNormal, frame.sunDirection));
 
+	vec3 hitWorld = instanceLocalToWorld(hitInstanceLocal);
+
+	// Substrate shadow query. Bias along the surface normal in world units;
+	// slope-scaled term grows at grazing angles where projection foreshortening
+	// would otherwise stipple. Skip the receiver's own voxel so a blade
+	// doesn't self-occlude its own surface cell.
+	//
+	// The substrate is built in cloud-local voxel coords, so we pull the cloud's
+	// world translation out of the push-constant transform and pass it through
+	// — `traceShadowWorld` does the world→cloud-local fold internally. Cloud
+	// rotation is invariant=identity per LIGHTING.md §2 so column 3 of
+	// pc.cloudWorld is the unscaled translation vector.
+	float shadow = 1.0;
+	if (frame.shadowsEnabled != 0) {
+		float bias = frame.shadowBiasConstant
+		           + frame.shadowBiasSlope * (1.0 - clamp(NdotL, 0.0, 1.0));
+		vec3 originBiased     = hitWorld + worldNormal * bias;
+		vec3 cloudOriginWorld = pc.cloudWorld[3].xyz;
+		ivec3 receiverCloudVoxel = ivec3(floor(
+			(hitWorld - cloudOriginWorld) / frame.worldVoxelSize));
+		// Generous max distance: a few times the cloud diagonal. Past this the
+		// substrate DDA bails out as "lit" — a v1-acceptable failure mode for
+		// shadows that escape the cloud's extent.
+		const float kShadowMaxDist = 64.0;   // world units
+		shadow = traceShadowWorld(originBiased, frame.sunDirection,
+		                          kShadowMaxDist, frame.worldVoxelSize,
+		                          cloudOriginWorld, receiverCloudVoxel);
+	}
+
 	vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
-	vec3 direct  = frame.sunColor * frame.sunIntensity * NdotL;
+	vec3 direct  = frame.sunColor * frame.sunIntensity * NdotL * shadow;
 	vec3 lit = albedo.rgb * (ambient + direct);
 
 	if (frame.debugColor != 0) {
