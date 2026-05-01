@@ -36,6 +36,12 @@ struct TechniqueParameter {
 	// Text-only — read-only display string. The pointee's lifetime must outlast
 	// the parameter row (typically the inspectable owns it as a member).
 	std::string* textValue = nullptr;
+
+	// Float/Int-only — printf-style readout format ("%.4f", "%.2f deg", etc).
+	// Empty falls back to ImGui's default ("%.3f"). Used to dial in slider
+	// readout precision when the value range warrants more decimals than the
+	// default would show.
+	std::string format;
 };
 
 struct FrameStats {

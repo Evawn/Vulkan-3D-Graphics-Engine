@@ -92,7 +92,7 @@ struct InstancedVoxelFrameUbo {
 	                               // so substrate.glsl can convert world ↔ voxel    // 16
 };
 static_assert(sizeof(InstancedVoxelFrameUbo) == 224,
-	"InstancedVoxelFrameUbo must stay std140-compatible");
+	"InstancedVoxelFrameUbo layout drift — update all three shader UBO declarations to match");
 
 // Slim per-draw push constant: just the cube-rasterization geometry. Comfortably
 // under the 128-byte minimum guarantee of every conformant Vulkan implementation.
@@ -628,8 +628,29 @@ std::vector<TechniqueParameter>& InstancedVoxelTechnique::GetParameters() {
 		// global Sun Shadows toggle in the shader.
 		m_parameters.push_back({ "Shadows", TechniqueParameter::Header });
 		m_parameters.push_back({ "Enable Shadows",     TechniqueParameter::Bool,  &m_shadows_enabled });
-		m_parameters.push_back({ "Shadow Bias Const",  TechniqueParameter::Float, &m_shadow_bias_constant, 0.0f, 0.5f });
-		m_parameters.push_back({ "Shadow Bias Slope",  TechniqueParameter::Float, &m_shadow_bias_slope,    0.0f, 1.0f });
+		// Bias ranges sized to scene scale (kWorldVoxelSize=0.0125): const ceiling
+		// ≈ 1.6 voxels, slope ceiling ≈ 16 voxels at full grazing — well past the
+		// point shadows visibly detach, so the slider's high end signals "broken"
+		// rather than "headroom you'll actually use." Format strings widen the
+		// readout precision past ImGui's default %.3f for the constant slider,
+		// where landed values live in the 4th decimal.
+		TechniqueParameter biasConst;
+		biasConst.label  = "Shadow Bias Const";
+		biasConst.type   = TechniqueParameter::Float;
+		biasConst.data   = &m_shadow_bias_constant;
+		biasConst.min    = 0.0f;
+		biasConst.max    = 0.02f;
+		biasConst.format = "%.4f";
+		m_parameters.push_back(biasConst);
+
+		TechniqueParameter biasSlope;
+		biasSlope.label  = "Shadow Bias Slope";
+		biasSlope.type   = TechniqueParameter::Float;
+		biasSlope.data   = &m_shadow_bias_slope;
+		biasSlope.min    = 0.0f;
+		biasSlope.max    = 0.2f;
+		biasSlope.format = "%.4f";
+		m_parameters.push_back(biasSlope);
 
 		m_parameters.push_back({ "Trace", TechniqueParameter::Header });
 		m_parameters.push_back({ "Animation Speed", TechniqueParameter::Float, &m_animation_speed, 0.0f, 30.0f });

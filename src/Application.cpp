@@ -23,7 +23,7 @@ void Application::Init() {
 	VkExtent2D extent = m_vk.frameController->GetSwapchain()->GetExtent();
 
 	spdlog::get("App")->debug("Creating camera...");
-	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.1f, 10.0f);
+	m_camera = Camera::Create(45, ((float)extent.width / (float)extent.height), 0.001f, 10000.0f);
 
 	// Bring up the rendering system (owns Renderer + technique list + event queue + profiler)
 	RenderingSystemConfig rsc{};

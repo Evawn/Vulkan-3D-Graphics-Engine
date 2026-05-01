@@ -15,9 +15,11 @@ void InspectorPanel::SetRenderers(
 static void DrawTechniqueParameter(TechniqueParameter& param) {
 	bool changed = false;
 	switch (param.type) {
-	case TechniqueParameter::Float:
-		changed = ImGui::SliderFloat(param.label.c_str(), static_cast<float*>(param.data), param.min, param.max);
+	case TechniqueParameter::Float: {
+		const char* fmt = param.format.empty() ? "%.3f" : param.format.c_str();
+		changed = ImGui::SliderFloat(param.label.c_str(), static_cast<float*>(param.data), param.min, param.max, fmt);
 		break;
+	}
 	case TechniqueParameter::Int:
 		changed = ImGui::SliderInt(param.label.c_str(), static_cast<int*>(param.data), (int)param.min, (int)param.max);
 		break;
@@ -219,7 +221,7 @@ void InspectorPanel::Draw() {
 			m_camera->SetPosition(glm::vec3(0.0f, -3.0f, 0.0f));
 			m_camera->SetForward(glm::vec3(0.0f, 1.0f, 0.0f));
 			m_camera->SetFOV(45.0f);
-			m_camera->SetNearFar(0.1f, 100.0f);
+			m_camera->SetNearFar(0.001f, 10000.0f);
 		}
 	}
 

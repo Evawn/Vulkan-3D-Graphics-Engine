@@ -54,7 +54,7 @@ private:
 	AssetID     m_volume_asset;
 	ImageHandle m_volume;     // resolved each rebuild from the registry
 	glm::uvec3  m_volume_size = glm::uvec3(16, 32, 16);
-	uint32_t    m_frame_count = 8;
+	uint32_t    m_frame_count = 40;
 
 	// Per-instance SSBO. Owned by the registry as a Persistent buffer; we
 	// re-resolve the BufferHandle on each graph rebuild.
@@ -115,7 +115,7 @@ private:
 	// Tunables.
 	int   m_max_iterations = 96;
 	bool  m_debug_color = false;
-	float m_animation_speed = 6.0f;   // frames per second
+	float m_animation_speed = 20.0f;  // frames per second — 40 frames at 20 fps = 2 s loop
 	int   m_grid_dim = 128;           // 128×128 = 16384 instances
 	// Spacing between adjacent blade origins, in *world voxels*. The asset is
 	// 16 voxels wide but the painted blade is ~1–2 voxels wide
@@ -127,25 +127,20 @@ private:
 	int   m_blade_pitch_voxels = 8;
 	bool  m_pending_grid_rebuild = false;
 
-	// Shadow tunables. The toggle is technique-local so the user finds it
-	// next to the other technique parameters (the global SceneLighting
-	// "Sun Shadows" still drives brickmap shadows; the trace shader uses
-	// the AND of both). Bias values are receiver-side in world units.
+	// Shadow toggle is technique-local so the user finds it next to the other
+	// technique parameters (the global SceneLighting "Sun Shadows" still drives
+	// brickmap shadows; the trace shader uses the AND of both).
 	//
-	// Post-Milestone D: shadows resolve via the substrate's `traceShadowWorld`
-	// (substrate.glsl) rather than a depth-map sample. The bias parameters
-	// retain their meaning — receiver-side normal-direction offset to keep
-	// the shadow ray from re-hitting the receiver's own voxel.
+	// Bias is receiver-side, in *world units*, applied along the surface normal
+	// before the substrate shadow trace starts (instanced_voxel.frag). Default
+	// is 0 — the substrate's integer-voxel skip-self exemption (`skipCloudVoxel`
+	// in substrate.glsl::traceShadowWorld) categorically excludes the receiver's
+	// own cell from the occlusion loop, so there's no float-precision overlap
+	// that bias would need to cover. Sliders kept exposed in case a scene-scale
+	// or geometry change ever surfaces a residual case.
 	bool  m_shadows_enabled       = true;
-	// Bias is now sub-voxel — the substrate's shadow ray starts from the actual
-	// fractional entry-face hit point (instanced_voxel.frag computes it from
-	// `h.entryT`), so we only need enough offset to escape numerical precision
-	// at the face boundary. Compare to the brickmap pillar, which uses a fixed
-	// 0.01 × voxelWorldSize ≈ 0.000125 with no slope term and no acne. Slope
-	// term retained as a small safety margin at grazing angles where the ray
-	// can clip neighbouring voxels of the same blade.
-	float m_shadow_bias_constant  = 0.001f;
-	float m_shadow_bias_slope     = 0.005f;
+	float m_shadow_bias_constant  = 0.0f;
+	float m_shadow_bias_slope     = 0.0f;
 
 	std::chrono::steady_clock::time_point m_start_time;
 

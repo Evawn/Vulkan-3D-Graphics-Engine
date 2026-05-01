@@ -1,22 +1,29 @@
 #version 450
 
-// Procedural grass-blade animation: paints `frameCount` frames of a thin
-// vertical blade swaying with a wind-like motion. Z-slabs of a single 3D
-// image: frame `f` lives at z' = z + f * size.z. Runs once per graph
-// rebuild (the technique disables the pass on subsequent frames — animated
-// frames are static once written).
+// Procedural grass-tuft animation: each voxel asset packs a small cluster
+// of curved blades sprouting from a sod patch. Blade configs (sprout
+// position, lean direction, height, thickness, sway amplitude, sway
+// phase, color sub-range) are derived deterministically per blade index
+// via a hash function — kNumBlades is the only knob.
 //
-// Cross-section is a thin tapered leaf: wider in X (sway plane) than Y, so
-// the four right-angle yaw quantizations naturally alternate between
-// "face-on" and "edge-on" silhouettes when seen from the camera.
+// Z is up. Tuft center at (cx, cy) = (sizeX/2 - 0.5, sizeY/2 - 0.5). At
+// z = 0..1 a lobed sod patch anchors the cluster; from there ~7 blades
+// curve outward (resting droop quadratic in t — sag under gravity) and
+// pulse in the wind (cubic in t — tip swings, base stays planted). All
+// blades share a single wind axis (kWindDir); per-blade phase offsets
+// stagger when each blade hits max bend so the cluster ripples internally
+// rather than swaying as a rigid stick. Amplitudes are tuned for sub-
+// voxel-per-frame motion at the asset's frame count — you'll see
+// adjacent frames quantize to identical voxel rasters when the inter-
+// frame motion is below 1 voxel, which is *correct* for "subtle drift"
+// at high frame counts (the alternative is unphysical 1-voxel-per-frame
+// jumps that look frenetic).
 //
 // Two outputs:
-//   binding 0 — the R8_UINT volume image consumed by the trace shader. One
-//               byte per voxel = palette index, frames stacked on Z.
-//   binding 1 — the per-frame occupancy bitmask consumed by the substrate
-//               (LIGHTING.md §3.2). One bit per voxel, packed 32-along-X.
-//               One thread per word, so no atomics and no buffer clear is
-//               needed — every word is written exactly once.
+//   binding 0 — R8_UINT volume image (palette indices, frames stacked on Z).
+//   binding 1 — per-frame occupancy bitmask (one bit / voxel, packed
+//               32-along-X). One thread = one bitmask word along X = up
+//               to 32 voxels, so no atomics and no buffer clear needed.
 
 layout(local_size_x = 1, local_size_y = 4, local_size_z = 4) in;
 
@@ -31,50 +38,81 @@ layout(push_constant) uniform PC {
 	int numXWords;        // = (sizeX + 31) / 32 — bitmask row stride along X
 } pc;
 
-uint chooseMaterial(int x, int y, int z, int frame) {
-	float cx = float(pc.sizeX) * 0.5;
-	float cy = float(pc.sizeY) * 0.5;
+const int   kNumBlades   = 7;
+const float kTwoPi       = 6.28318530718;
 
-	float zNorm  = float(z) / float(max(pc.sizeZ - 1, 1));
-	float tSweep = float(frame) / float(max(pc.frameCount, 1));
+// Wind kinematics. Single shared direction so every blade in the cluster
+// pulses along the *same* axis — only phase and amplitude vary blade-to-
+// blade. This is what makes the cluster read as "wind blowing through"
+// instead of "every blade orbiting on its own ellipse." kWindDir is in
+// asset-local XY (Z is up); the slight Y bias keeps the wind from looking
+// perfectly axis-aligned. kWindGain caps tip displacement: with the per-
+// blade swayAmp range below, max excursion is roughly kWindGain * 1.3
+// voxels at full grazing of the cubic-in-t profile.
+const vec2  kWindDir  = vec2(0.97, 0.24);   // unit-ish; pre-normalized
+const float kWindGain = 1.2;
 
-	// Cubic bend so the tip swings far while the base barely moves — that's
-	// what real grass does (the stem near the ground is stiff, the tip is
-	// floppy). Pure linear bend looked too rigid.
-	float bend = zNorm * zNorm * zNorm;
+// Cheap deterministic hash — fract(sin·*) is biased but uniform enough
+// for sprinkling per-blade params. Salt distinguishes parameter slots so
+// the same blade index gives independent draws across fields.
+float hash11s(uint i, uint salt) {
+	return fract(sin(float(i) * 12.9898 + float(salt) * 78.233) * 43758.5453);
+}
 
-	// Tip traces an ellipse in (X,Y) instead of a straight side-to-side line.
-	// sin/cos at the same frequency are exactly π/2 out of phase so the tip
-	// returns to its starting point cleanly at frame == frameCount (no loop
-	// pop). The Y-axis amplitude is intentionally small — grass doesn't sway
-	// much fore-aft, but a hint of it sells the 3D illusion.
-	float angle = tSweep * 6.28318;
-	float swayX = sin(angle) * float(pc.sizeX) * 0.35 * bend;
-	float swayY = cos(angle) * float(pc.sizeY) * 0.10 * bend;
+struct Blade {
+	vec2  baseOffset;   // voxels from tuft center
+	vec2  leanDir;      // unit-ish 2D — direction of resting droop
+	float lean;         // resting droop magnitude in voxels at t=1
+	float height;       // top z in voxels (must stay < sizeZ)
+	float thickness;    // base capsule radius in voxels
+	float swayAmp;      // per-blade wind response scale
+	float swayPhase;    // 0..2π
+	int   colorBase;    // palette index at base (deeper green)
+	int   colorTip;     // palette index at tip (warmer/yellower)
+};
 
-	float dx = float(x) - (cx + swayX);
-	float dy = float(y) - (cy + swayY);
+Blade getBlade(int i) {
+	Blade b;
+	float a = hash11s(uint(i), 1u);
+	float c = hash11s(uint(i), 2u);
+	float d = hash11s(uint(i), 3u);
+	float e = hash11s(uint(i), 4u);
+	float f = hash11s(uint(i), 5u);
+	float g = hash11s(uint(i), 6u);
+	float h = hash11s(uint(i), 7u);
+	float k = hash11s(uint(i), 8u);
 
-	// Tapered cross-section: full width near the base, pointier at the tip.
-	// halfW is the sway-axis (leaf-flat) extent; halfD is the depth extent.
-	// Asymmetry between W and D means rotated blades read distinctly
-	// different from cardinal viewing angles — useful for visual variety
-	// even with a single shared asset.
-	float taper = 1.0 - 0.55 * zNorm;
-	float halfW = 1.0 * taper;     // 2 voxels wide at base, 1 at tip
-	float halfD = 0.5 * taper;     // 1 voxel deep at base, ~0 at tip
+	// Distribute sprout points around a jittered ring so blades emerge
+	// from distinct locations rather than a single column.
+	float ringAngle = kTwoPi * (float(i) / float(kNumBlades)) + a * 0.7;
+	float ringR     = 0.6 + 1.6 * c;          // 0.6 .. 2.2 voxels
+	b.baseOffset    = vec2(cos(ringAngle), sin(ringAngle)) * ringR;
 
-	if (abs(dx) <= halfW && abs(dy) <= halfD && z >= 0 && z < pc.sizeZ) {
-		// Color gradient along the blade: deep cool green at the base,
-		// warmer yellow-green at the tip (sun-bleached new growth). The
-		// default palette's HSV rainbow has indices 64..95 covering roughly
-		// hue 78°..124°, which is a richer green range than the old 70..80
-		// (hue 88°..102°).
-		float ramp = clamp(1.0 - zNorm, 0.0, 1.0);
-		uint base = 64u + uint(round(ramp * 31.0));    // 64=tip, 95=base
-		return base;
-	}
-	return 0u;
+	// Lean correlates with sprout direction (each blade tends to fall
+	// outward from the cluster) but with a per-blade angular kick so the
+	// cluster doesn't read as perfectly radial.
+	float leanAngle = ringAngle + (d - 0.5) * 1.4;
+	b.leanDir       = vec2(cos(leanAngle), sin(leanAngle));
+	b.lean          = mix(0.8, 2.2, e);
+
+	// Asset is sizeZ = 16 voxels tall — heights stay safely below.
+	b.height    = mix(10.0, 14.0, f);
+	// Range straddles 1.0 so some blades quantize to a 1-voxel center
+	// stem (r² < 1) while others land on a 5-voxel "+" cross section
+	// (r² ≥ 1). Visible thickness variety from a single asset.
+	b.thickness = mix(0.7, 1.3, g);
+
+	b.swayAmp   = mix(0.6, 1.3, h);
+	b.swayPhase = kTwoPi * k;                 // independent of ringAngle
+
+	// Each blade picks a 6-wide window inside the green band 64..95 so
+	// adjacent blades read as different shades while staying in the
+	// green hue range of the default HSV palette.
+	int win   = 6;
+	int start = 64 + int(round(c * float(31 - win)));
+	b.colorBase = start + win;                // deeper green at base
+	b.colorTip  = start;                      // warmer/yellower at tip
+	return b;
 }
 
 void main() {
@@ -88,14 +126,82 @@ void main() {
 	int frame    = zf / pc.sizeZ;
 	int zInFrame = zf - frame * pc.sizeZ;
 
+	// Hoist per-thread constants out of the inner X loop. Blade configs
+	// are pure functions of blade index — same across all 32 X voxels and
+	// across all frames — so we can pay the hash cost once per thread.
+	Blade blades[kNumBlades];
+	for (int i = 0; i < kNumBlades; ++i) blades[i] = getBlade(i);
+
+	float tSweep = float(frame) / float(max(pc.frameCount, 1));
+	float angle  = tSweep * kTwoPi;
+
+	vec2 tuftCenter = vec2(float(pc.sizeX) * 0.5 - 0.5,
+	                       float(pc.sizeY) * 0.5 - 0.5);
+
 	uint maskBits = 0u;
-	for (int b = 0; b < 32; ++b) {
-		int x = xWord * 32 + b;
+	for (int bit = 0; bit < 32; ++bit) {
+		int x = xWord * 32 + bit;
 		if (x >= pc.sizeX) break;
-		uint m = chooseMaterial(x, y, zInFrame, frame);
-		// Volume image: full Z extent, one byte per voxel.
-		imageStore(volume, ivec3(x, y, zf), uvec4(m));
-		if (m != 0u) maskBits |= (1u << uint(b));
+
+		uint mat = 0u;
+		vec2 p   = vec2(float(x), float(y)) - tuftCenter;
+
+		// ---- Sod patch at z = 0..1: lobed irregular footprint anchors
+		// the cluster. Wobbled boundary keeps the silhouette from looking
+		// like a stamped circle.
+		if (zInFrame <= 1) {
+			float ang     = atan(p.y, p.x);
+			float r       = length(p);
+			float wobble  = 0.4 * sin(ang * 3.0) + 0.25 * sin(ang * 5.0 + 1.7);
+			float groundR = 3.0 + wobble - float(zInFrame) * 0.6;
+			if (r <= groundR) {
+				// Default palette has no true brown; index 5 (orange) is
+				// the closest "earth tone" available without extending
+				// the palette. Reads as visually distinct from green so
+				// the sod anchors the tuft.
+				mat = 5u;
+			}
+		}
+
+		// ---- Blades: closest-wins capsule test against each blade's
+		// curved centerline. Where blades cross, the blade whose
+		// centerline is nearer to this voxel claims it — looks like one
+		// blade in front of another rather than fighting/dithering.
+		float bestDist2 = 1e9;
+		for (int i = 0; i < kNumBlades; ++i) {
+			Blade b = blades[i];
+			if (float(zInFrame) > b.height) continue;
+			float t = float(zInFrame) / max(b.height, 1.0);
+
+			// Resting droop: quadratic in t — passive sag under gravity,
+			// curvature concentrated near the tip.
+			vec2 restDroop = b.leanDir * (b.lean * t * t);
+
+			// Wind sway: cubic in t so the tip swings while the base
+			// stays planted. Pulse is 1D along the shared kWindDir —
+			// per-blade swayPhase staggers timing so the cluster ripples
+			// (some blades at max bend, others crossing rest) but every
+			// blade's instantaneous motion is along the same axis. Returns
+			// cleanly to start at frame == frameCount since sin is 2π-
+			// periodic over the full sweep.
+			float windPulse = sin(angle + b.swayPhase);
+			vec2  windOff   = kWindDir * (b.swayAmp * t * t * t * kWindGain * windPulse);
+
+			vec2 center = b.baseOffset + restDroop + windOff;
+			vec2 dxy    = p - center;
+			float r     = b.thickness * (1.0 - 0.5 * t);   // taper to half-width at tip
+			float r2    = r * r;
+			float d2    = dot(dxy, dxy);
+			if (d2 <= r2 && d2 < bestDist2) {
+				bestDist2 = d2;
+				int idx = int(round(mix(float(b.colorBase),
+				                        float(b.colorTip), t)));
+				mat = uint(idx);
+			}
+		}
+
+		imageStore(volume, ivec3(x, y, zf), uvec4(mat));
+		if (mat != 0u) maskBits |= (1u << uint(bit));
 	}
 
 	// Bitmask layout — frame is the slowest axis so each frame's mask is a

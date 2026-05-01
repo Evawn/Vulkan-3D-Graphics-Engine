@@ -177,6 +177,10 @@ void main() {
 	// pc.cloudWorld is the unscaled translation vector.
 	float shadow = 1.0;
 	if (frame.shadowsEnabled != 0) {
+		// Receiver-side normal offset (world units). Constant escapes numerical
+		// precision at the voxel face boundary; slope grows toward grazing
+		// angles where projection foreshortening would stipple. Both are
+		// inspector-tunable — see InstancedVoxelTechnique::GetParameters.
 		float bias = frame.shadowBiasConstant
 		           + frame.shadowBiasSlope * (1.0 - clamp(NdotL, 0.0, 1.0));
 		vec3 originBiased     = hitWorld + worldNormal * bias;
@@ -199,6 +203,23 @@ void main() {
 	if (frame.debugColor != 0) {
 		lit -= vec3(float(h.total_iters) / 250.0);
 	}
+
+	// Write hit-point depth so overlapping instance AABBs resolve by which
+	// *voxel* is closer, not which *cube face* is closer. The cube is just
+	// rasterization scaffolding; without this write the depth buffer would
+	// hold the AABB-face depth, and overlap ordering would be wrong (and
+	// flicker where AABB faces happen to be near-coplanar). Disables early-Z,
+	// but the shader already `discard`s, which has the same effect.
+	vec4 hitClip = frame.viewProj * vec4(hitWorld, 1.0);
+	// Per-instance sub-ULP tiebreaker for the case where two voxels from
+	// different instances land at coincident world positions. That's a content-
+	// level VISION.md §3.5 violation (one world voxel = one voxel), unenforced
+	// at instance-generation today; until upstream dedup lands, this turns
+	// real precision z-fight into a stable (invisible) per-instance ordering.
+	// vInstPos is per-instance unique and already flat-passed; coefficients are
+	// well below one-voxel depth-step at scene scale, well above D32 ULP.
+	float tiebreak = dot(vInstPos, vec3(1e-9, 3e-9, 7e-9));
+	gl_FragDepth = hitClip.z / hitClip.w + tiebreak;
 
 	outColor = vec4(lit, 1.0);
 }
