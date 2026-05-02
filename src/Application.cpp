@@ -41,10 +41,12 @@ void Application::Init() {
 	m_rendering.AddPostProcessEffect(std::make_unique<LensFlareEffect>());
 
 	spdlog::get("App")->debug("Initializing renderers...");
+	// First-registered technique becomes the active one at startup
+	// (RenderingSystem::m_activeIndex defaults to 0).
+	m_rendering.AddTechnique(std::make_unique<CombinedRenderer>());
 	m_rendering.AddTechnique(std::make_unique<BrickmapPaletteRenderer>());
 	m_rendering.AddTechnique(std::make_unique<AnimatedGeometryRenderer>());
 	m_rendering.AddTechnique(std::make_unique<InstancedVoxelTechnique>());
-	m_rendering.AddTechnique(std::make_unique<CombinedRenderer>());
 	m_rendering.AddTechnique(std::make_unique<MeshRasterizer>());
 
 	// Wire UI record + before/after rebuild hooks BEFORE first build runs, so
@@ -163,14 +165,30 @@ void Application::Cleanup() {
 
 void Application::DrawFrame() {
 
-	// Handle viewport resize from panel
+	// Handle viewport resize from panel.
+	//
+	// "Resized" now triggers on three things:
+	//   1. The panel's content region changed (drag, layout swap, dpi).
+	//   2. The user picked a new resolution mode in the status bar.
+	//   3. The user picked a new target resolution in the dropdown.
+	// All three route through ViewportPanel::m_was_resized; the editor's
+	// status-bar widget calls MarkResized() for #2 and #3.
+	//
+	// GetEffectiveRenderExtent collapses (mode, target, panel) into the single
+	// extent the renderer should produce. Camera aspect comes from a parallel
+	// helper so Center mode letterboxes without squishing the scene.
 	if (m_editor.ViewportWasResized()) {
-		VkExtent2D desired = m_editor.GetDesiredViewportExtent();
+		VkExtent2D desired = m_editor.GetEffectiveRenderExtent();
 		if (desired.width > 0 && desired.height > 0) {
 			m_rendering.HandleViewportResize(desired);
-			m_camera->SetAspect((float)desired.width / (float)desired.height);
+			m_camera->SetAspect(m_editor.GetEffectiveCameraAspect());
 		}
 	}
+	// Mirror the renderer's live offscreen extent back into the editor so the
+	// status-bar "Native" label and the viewport panel's Center-mode blit can
+	// read it. Cheap (one VkExtent2D copy/frame); avoids leaking the renderer
+	// pointer into the editor.
+	m_editor.SetLiveOffscreenExtent(m_rendering.GetOffscreenExtent());
 
 	// ACQUIRE FRAME ------------------------------------------------
 	m_vk.frameController->AcquireNext();

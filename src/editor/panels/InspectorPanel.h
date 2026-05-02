@@ -61,4 +61,9 @@ public:
 
 private:
 	SceneNode* m_selected_node = nullptr;
+
+	// Latched on first Draw() so the Renderer tab is the default-active tab on
+	// startup. Passing ImGuiTabItemFlags_SetSelected every frame would lock the
+	// tab and prevent the user from switching, so the flag fires exactly once.
+	bool m_default_tab_applied = false;
 };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vulkan/vulkan.h>
 
 // Named layout presets. Develop is the default 4-quadrant editor; Performance
 // hides everything except the viewport (and HUD); Profile maximizes
@@ -9,6 +10,26 @@ enum class LayoutPreset : uint8_t {
 	Develop,
 	Performance,
 	Profile
+};
+
+// How the rendered scene is mapped into the viewport panel.
+//   Native — render at the panel's pixel extent (no scaling, no margins).
+//   Center — render at a fixed target res; place 1:1 in panel, black margins
+//            when target < panel; down-fit (preserve aspect) when target > panel.
+//   Fit    — render at a fixed target res; stretch to fill panel (aspect ignored).
+enum class ResolutionMode : uint8_t {
+	Native,
+	Center,
+	Fit
+};
+
+struct ResolutionPolicy {
+	ResolutionMode mode   = ResolutionMode::Native;
+	VkExtent2D     target = { 1920, 1080 };   // honored only in Center / Fit
+	// Custom-resolution scratch — kept separate from `target` so the user can
+	// type without overwriting the live target until they press Apply.
+	int            customW = 1920;
+	int            customH = 1080;
 };
 
 struct UIState {
@@ -29,4 +50,9 @@ struct UIState {
 	bool hud_show_perf = true;
 	bool hud_show_axes = true;
 	bool hud_show_technique = true;
+
+	// Render-target sizing policy. Status-bar widget mutates this; Editor
+	// converts (mode, target, panel) -> the actual offscreen extent in
+	// GetEffectiveRenderExtent().
+	ResolutionPolicy resolution{};
 };

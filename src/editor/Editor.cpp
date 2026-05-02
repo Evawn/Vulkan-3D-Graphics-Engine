@@ -5,6 +5,7 @@
 #include "Scene.h"
 #include "RenderTechnique.h"
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cstdio>
 
 static void check_vk_result(VkResult err) {
@@ -58,7 +59,9 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 	m_active_renderer_index = activeRendererIndex;
 
 	// Viewport — HUD content is refreshed each frame from the perf panel and
-	// the active technique name before the viewport's Draw() runs.
+	// the active technique name before the viewport's Draw() runs. The render
+	// extent is also pushed in here so the Center-mode blit knows the texture's
+	// actual pixel size (panel size and texture size diverge in Center / Fit).
 	m_viewport.SetTextureID(m_scene_texture);
 	m_viewport.SetUIState(&m_ui);
 	m_gui->RegisterPanel("Viewport", [this]() {
@@ -66,6 +69,7 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 			? (*m_renderers)[*m_active_renderer_index]->GetDisplayName()
 			: std::string{};
 		m_viewport.SetHud(m_performance.GetFps(), m_performance.GetFrameMs(), tech);
+		m_viewport.SetRenderExtent(m_live_offscreen_extent);
 		m_viewport.Draw();
 	});
 
@@ -144,6 +148,27 @@ bool Editor::ViewportWasClicked() const {
 }
 VkExtent2D Editor::GetDesiredViewportExtent() const {
 	return m_viewport.GetDesiredExtent();
+}
+
+VkExtent2D Editor::GetEffectiveRenderExtent() const {
+	const VkExtent2D panel = m_viewport.GetDesiredExtent();
+	if (m_ui.resolution.mode == ResolutionMode::Native) return panel;
+	return m_ui.resolution.target;
+}
+
+float Editor::GetEffectiveCameraAspect() const {
+	// Native + Fit: the rendered image fills the panel (Native 1:1, Fit
+	// stretched), so the user-visible aspect is the panel's. Center: the
+	// renderer produces a target-resolution image and the panel letterboxes
+	// it; the *visible* aspect is the target's, so the camera matches that.
+	VkExtent2D ext;
+	if (m_ui.resolution.mode == ResolutionMode::Center) {
+		ext = m_ui.resolution.target;
+	} else {
+		ext = m_viewport.GetDesiredExtent();
+	}
+	if (ext.width == 0 || ext.height == 0) return 1.0f;
+	return static_cast<float>(ext.width) / static_cast<float>(ext.height);
 }
 
 void Editor::OnDpiChanged(float newScale) {
@@ -350,6 +375,13 @@ void Editor::DrawStatusBar() {
 		ImGui::TextUnformatted((*m_renderers)[*m_active_renderer_index]->GetDisplayName().c_str());
 	}
 
+	// Resolution mode toggle + target selector. Sits after the (variable-width)
+	// technique label and before the right-anchored badge cluster. Anchored to
+	// the right edge by computing its required width up-front so it can't
+	// collide with the badges on narrow windows.
+	ImGui::SameLine(0, 14);
+	DrawResolutionWidget();
+
 	// --- Right-anchored badges ---
 	// Anchor against the window's full width (NOT GetContentRegionAvail) so
 	// the cumulative width of the left-side widgets above doesn't decide where
@@ -382,4 +414,144 @@ void Editor::DrawStatusBar() {
 			ImGui::TextColored(UIStyle::kBudgetOver, "%s", buf);
 		}
 	}
+}
+
+// =============================================================================
+// Resolution widget
+//
+// Two adjacent controls inside one status-bar slot:
+//   1) Three-state segmented mode toggle: Native | Center | Fit
+//   2) Resolution control:
+//        - Native -> read-only label (live offscreen extent)
+//        - Center / Fit -> combo with 480p / 720p / 1080p / Custom…
+//      "Custom…" opens a popup with W/H InputInts and an Apply button.
+//
+// All status-bar widgets keep the row height pinned to the existing text
+// baseline by tightening FramePadding for the duration of this draw. The
+// segmented buttons are zero-spaced so they read as one control.
+// =============================================================================
+void Editor::DrawResolutionWidget() {
+	auto& policy = m_ui.resolution;
+
+	// Tighten frame padding so SmallButton / Combo height matches the status
+	// bar's existing text height. Bar height is set by the first item drawn
+	// (the FPS text); pushing FramePadding(.., 0) keeps everything coplanar.
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 1.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(0.0f, 0.0f));
+
+	const ImVec4 activeCol   = UIStyle::kAccent;
+	const ImVec4 inactiveCol = ImGui::GetStyleColorVec4(ImGuiCol_Button);
+
+	auto modeButton = [&](const char* label, ResolutionMode m) {
+		const bool active = (policy.mode == m);
+		ImGui::PushStyleColor(ImGuiCol_Button,        active ? activeCol : inactiveCol);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? activeCol : ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive,  active ? activeCol : ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+		if (ImGui::Button(label) && policy.mode != m) {
+			policy.mode = m;
+			// Mode change alters the effective render extent (Native vs target);
+			// fire the same resize edge a panel drag uses so the graph rebuilds
+			// at the new offscreen size.
+			m_viewport.MarkResized();
+		}
+		ImGui::PopStyleColor(3);
+	};
+
+	modeButton("Native", ResolutionMode::Native);
+	ImGui::SameLine(0, 1);  // 1px hairline between segments — reads as joined
+	modeButton("Center", ResolutionMode::Center);
+	ImGui::SameLine(0, 1);
+	modeButton("Fit", ResolutionMode::Fit);
+
+	// Restore item spacing for the gap before the resolution combo.
+	ImGui::PopStyleVar();   // ItemSpacing
+	ImGui::SameLine(0, 8);
+
+	// --- Right half: live extent (Native) or target combo (Center / Fit) ---
+	if (policy.mode == ResolutionMode::Native) {
+		// Read-only label of the live offscreen extent. Shown dim because it's
+		// not interactive — Native mode is "whatever the panel is."
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%u\xC3\x97%u",  // U+00D7 multiplication sign
+			m_live_offscreen_extent.width, m_live_offscreen_extent.height);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextColored(UIStyle::kTextDim, "%s", buf);
+	} else {
+		// Combo presenting the four common choices + a custom option. Selecting
+		// a preset writes policy.target and re-fires the resize edge.
+		struct Preset { const char* label; uint32_t w, h; };
+		static const Preset kPresets[] = {
+			{ "480p",  854, 480  },
+			{ "720p",  1280, 720 },
+			{ "1080p", 1920, 1080 },
+		};
+
+		// Combo label: "1920x1080" or the preset name when target matches.
+		char comboLabel[32];
+		const Preset* matched = nullptr;
+		for (const auto& p : kPresets) {
+			if (p.w == policy.target.width && p.h == policy.target.height) {
+				matched = &p; break;
+			}
+		}
+		if (matched) {
+			snprintf(comboLabel, sizeof(comboLabel), "%s", matched->label);
+		} else {
+			snprintf(comboLabel, sizeof(comboLabel), "%u\xC3\x97%u",
+				policy.target.width, policy.target.height);
+		}
+
+		ImGui::SetNextItemWidth(110.0f);
+		// Deferred-open flag: ImGui's popup stack doesn't like opening a new
+		// popup from inside an active one (the combo *is* a popup). Latch the
+		// intent inside BeginCombo, then OpenPopup after EndCombo so the combo
+		// closes cleanly first.
+		bool wantOpenCustom = false;
+		if (ImGui::BeginCombo("##resolution", comboLabel)) {
+			for (const auto& p : kPresets) {
+				const bool selected = (matched == &p);
+				if (ImGui::Selectable(p.label, selected)) {
+					if (policy.target.width != p.w || policy.target.height != p.h) {
+						policy.target = { p.w, p.h };
+						m_viewport.MarkResized();
+					}
+				}
+			}
+			if (ImGui::Selectable("Custom\xE2\x80\xA6", false)) {  // U+2026 …
+				policy.customW = static_cast<int>(policy.target.width);
+				policy.customH = static_cast<int>(policy.target.height);
+				wantOpenCustom = true;
+			}
+			ImGui::EndCombo();
+		}
+		if (wantOpenCustom) ImGui::OpenPopup("##resolution_custom");
+
+		// Custom-resolution popup. Clamp range matches the Vulkan minimum
+		// guaranteed maxImageDimension2D (4096); typical desktop GPUs allow
+		// 16384, but 4096 is the always-safe floor and most users will be far
+		// below it anyway. (Dynamic device-limit clamp is a future tweak.)
+		if (ImGui::BeginPopup("##resolution_custom")) {
+			ImGui::TextColored(UIStyle::kTextDim, "Custom resolution");
+			ImGui::Separator();
+			ImGui::SetNextItemWidth(80);
+			ImGui::InputInt("W", &policy.customW, 0, 0);
+			ImGui::SetNextItemWidth(80);
+			ImGui::InputInt("H", &policy.customH, 0, 0);
+			policy.customW = std::clamp(policy.customW, 16, 16384);
+			policy.customH = std::clamp(policy.customH, 16, 16384);
+			if (ImGui::Button("Apply")) {
+				policy.target = {
+					static_cast<uint32_t>(policy.customW),
+					static_cast<uint32_t>(policy.customH)
+				};
+				m_viewport.MarkResized();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
+	}
+
+	ImGui::PopStyleVar();   // FramePadding
 }

@@ -61,6 +61,20 @@ public:
 	bool ViewportWasClicked() const;
 	VkExtent2D GetDesiredViewportExtent() const;
 
+	// Resolution-policy-aware render extent. Native -> panel size; Center / Fit
+	// -> the chosen target. This is what Application feeds to
+	// RenderingSystem::HandleViewportResize, so the entire downstream pipeline
+	// (offscreen extent, every technique's DescribeTargets, the camera aspect)
+	// stays driven by a single value.
+	VkExtent2D GetEffectiveRenderExtent() const;
+	// Aspect the camera should use, given the current policy. Native / Fit ->
+	// panel aspect; Center -> target aspect (so letterboxing doesn't squish).
+	float      GetEffectiveCameraAspect() const;
+
+	// Editor mirrors the renderer's live offscreen extent so the status-bar
+	// "Native" label can show what the renderer is actually producing.
+	void SetLiveOffscreenExtent(VkExtent2D ext) { m_live_offscreen_extent = ext; }
+
 	// DPI
 	void OnDpiChanged(float newScale);
 
@@ -100,6 +114,12 @@ private:
 	std::vector<std::unique_ptr<RenderTechnique>>* m_renderers = nullptr;
 	size_t* m_active_renderer_index = nullptr;
 
+	// Snapshot of the renderer's offscreen extent — refreshed each frame from
+	// Application before the status bar draws. Decoupled from the panel size:
+	// in Native they match; in Center / Fit this is the policy target.
+	VkExtent2D m_live_offscreen_extent{0, 0};
+
 	void DrawMenuBar();
 	void DrawStatusBar();
+	void DrawResolutionWidget();
 };

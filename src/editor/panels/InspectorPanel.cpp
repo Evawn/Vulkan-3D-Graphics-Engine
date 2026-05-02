@@ -186,7 +186,15 @@ void InspectorPanel::Draw() {
 	}
 
 	// === Renderer tab — technique selection + parameters ===
-	if (ImGui::BeginTabItem("Renderer")) {
+	// First-frame latch: open this tab on startup. ImGuiTabItemFlags_SetSelected
+	// must NOT be passed every frame or it would re-select on every draw and
+	// the user could never switch tabs.
+	ImGuiTabItemFlags rendererTabFlags = ImGuiTabItemFlags_None;
+	if (!m_default_tab_applied) {
+		rendererTabFlags |= ImGuiTabItemFlags_SetSelected;
+		m_default_tab_applied = true;
+	}
+	if (ImGui::BeginTabItem("Renderer", nullptr, rendererTabFlags)) {
 		if (m_renderers && m_active_index) {
 			UIStyle::SectionHeader("Technique");
 			std::string currentName = (*m_renderers)[*m_active_index]->GetDisplayName();

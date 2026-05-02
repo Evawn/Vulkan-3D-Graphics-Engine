@@ -89,7 +89,7 @@ private:
 
 	// Per-axis instance count. Auto-fits to the island footprint when the
 	// terrain bake completes — `m_foliage_grid_dim` is a tunable cap.
-	int  m_foliage_grid_dim = 7;     // 7×7 = 49 instances ("dozens" per FEATURE.md scope)
+	int  m_foliage_grid_dim = 64;    // 64×64 = 4096 instances
 	int  m_foliage_pitch_voxels = 0; // computed from terrain size / grid dim
 
 	// ---- Shadow occupancy brickmap ----

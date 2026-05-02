@@ -22,7 +22,7 @@ private:
 
 	bool m_focused = false;
 	float m_sensitivity = 0.5f;
-	float m_speed = 1.0f;
+	float m_speed = 5.0f;
 
 	MoveState m_move_state;
 	Context m_context;

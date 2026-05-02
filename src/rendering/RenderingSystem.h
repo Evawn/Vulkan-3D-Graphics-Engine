@@ -90,6 +90,10 @@ public:
 	GPUProfiler::PerformanceMetrics GetLastMetrics() const                { return m_lastMetrics; }
 	std::shared_ptr<VWrap::ImageView> GetFinalSceneView() const           { return m_renderer.GetFinalSceneView(); }
 	Renderer&         GetRenderer()                                       { return m_renderer; }
+	// Live render-target size. Editor reads this so the status-bar "Native"
+	// readout shows what the renderer is currently producing, and so the
+	// viewport panel's Center-mode blit knows the texture's pixel extent.
+	VkExtent2D        GetOffscreenExtent() const                          { return m_offscreenExtent; }
 
 	// ---- Scene module access (techniques + Application populate the scene) ----
 	Scene&            GetScene()                                          { return m_world; }

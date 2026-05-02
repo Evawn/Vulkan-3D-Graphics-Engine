@@ -1,6 +1,7 @@
 #include "ViewportPanel.h"
 #include "../UIStyle.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 
@@ -25,8 +26,48 @@ void ViewportPanel::Draw() {
 	}
 
 	if (m_texture_id != VK_NULL_HANDLE && contentSize.x > 0 && contentSize.y > 0) {
-		ImGui::Image((ImTextureID)m_texture_id, contentSize);
-		if (ImGui::IsItemClicked()) m_clicked = true;
+		// Mode-driven blit. The render-target extent (m_render_extent) and the
+		// panel extent (contentSize) only diverge in Center / Fit modes — in
+		// Native they're equal by construction (Editor::GetEffectiveRenderExtent
+		// returns the panel size).
+		const ResolutionMode mode = m_ui ? m_ui->resolution.mode : ResolutionMode::Native;
+		const ImVec2 cursor = ImGui::GetCursorPos();
+		const float renderW = static_cast<float>(m_render_extent.width);
+		const float renderH = static_cast<float>(m_render_extent.height);
+		const bool haveRenderExtent = renderW > 0.0f && renderH > 0.0f;
+
+		if (mode == ResolutionMode::Center && haveRenderExtent) {
+			// Two sub-cases:
+			//   A. Render extent <= panel on both axes — sample 1:1, center
+			//      with bare panel background (already black) showing as
+			//      letterbox / pillarbox margins.
+			//   B. Render extent > panel on either axis — down-fit while
+			//      preserving aspect so the user sees the *whole* frame,
+			//      with margins on the dominant-axis pair. This matches a
+			//      preview-tool intuition; the alternative (crop to the
+			//      middle of the rendered image) was discussed and
+			//      rejected for v1.
+			ImVec2 drawSize;
+			if (renderW <= contentSize.x && renderH <= contentSize.y) {
+				drawSize = ImVec2(renderW, renderH);
+			} else {
+				const float scale = std::min(contentSize.x / renderW,
+				                             contentSize.y / renderH);
+				drawSize = ImVec2(renderW * scale, renderH * scale);
+			}
+			const ImVec2 offset((contentSize.x - drawSize.x) * 0.5f,
+			                    (contentSize.y - drawSize.y) * 0.5f);
+			ImGui::SetCursorPos(ImVec2(cursor.x + offset.x, cursor.y + offset.y));
+			ImGui::Image((ImTextureID)m_texture_id, drawSize);
+			if (ImGui::IsItemClicked()) m_clicked = true;
+		} else {
+			// Native and Fit both stretch the texture to fill the panel.
+			// They differ only in what the renderer fed *into* the texture:
+			// Native renders at panel size (1:1), Fit renders at target res
+			// and accepts the stretch as the user-visible cost of the mode.
+			ImGui::Image((ImTextureID)m_texture_id, contentSize);
+			if (ImGui::IsItemClicked()) m_clicked = true;
+		}
 	}
 
 	auto* dl = ImGui::GetWindowDrawList();

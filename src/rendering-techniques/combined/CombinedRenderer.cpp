@@ -960,7 +960,7 @@ std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 		gridDim.type  = TechniqueParameter::Int;
 		gridDim.data  = &m_foliage_grid_dim;
 		gridDim.min   = 1.0f;
-		gridDim.max   = 64.0f;
+		gridDim.max   = 128.0f;
 		gridDim.onChanged = [this]() {
 			m_pending_grid_rebuild = true;
 			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
