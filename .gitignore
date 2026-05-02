@@ -382,3 +382,6 @@ MigrationBackup/
 FodyWeavers.xsd
 imgui.ini
 .DS_Store
+
+# Recordings
+recordings/
