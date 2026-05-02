@@ -225,6 +225,11 @@ struct PassInfo {
 	PassType type;
 	bool enabled;
 
+	// Resolved queue affinity (post-demotion). For Graphics passes always
+	// Graphics; for Compute passes, AsyncCompute when scheduled on a separate
+	// compute queue, otherwise Graphics. Drives DAG node coloring.
+	QueueAffinity affinity = QueueAffinity::Graphics;
+
 	std::vector<ImageHandle> readImages;
 	std::vector<BufferHandle> readBuffers;
 	std::vector<ImageHandle> writeImages;

@@ -51,6 +51,12 @@ public:
 	// changes; nullptr hides the section.
 	void SetSelectedNode(SceneNode* node) { m_selected_node = node; }
 
+	// External invokers (menu bar / hotkeys) re-use the inspector-registered
+	// callbacks so the engine has one event channel for these actions.
+	void RequestReload() { if (m_reload_callback) m_reload_callback(); }
+	void RequestSwitchTechnique(size_t idx) { if (m_switch_callback) m_switch_callback(idx); }
+	void RequestScreenshot() { if (m_screenshot_callback) m_screenshot_callback(); }
+
 	void Draw();
 
 private:

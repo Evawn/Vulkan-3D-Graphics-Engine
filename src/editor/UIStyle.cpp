@@ -1,6 +1,7 @@
 #include "UIStyle.h"
 #include "config.h"
 #include <filesystem>
+#include <cstdio>
 #include <spdlog/spdlog.h>
 
 using namespace UIStyle;
@@ -9,44 +10,101 @@ namespace {
 	ImFont* s_font_header = nullptr;
 	ImFont* s_font_body   = nullptr;
 	ImFont* s_font_detail = nullptr;
+	ImFont* s_font_mono_body = nullptr;
+	ImFont* s_font_mono_detail = nullptr;
 }
 
 void UIStyle::LoadFonts(float dpi_scale) {
 	ImGuiIO& io = ImGui::GetIO();
 	io.Fonts->Clear();
 
-	std::string font_path = std::string(config::RESOURCE_DIR) + "/fonts/Inter-Regular.ttf";
-	bool font_exists = std::filesystem::exists(font_path);
+	const std::string sans_path = std::string(config::RESOURCE_DIR) + "/fonts/Inter-Regular.ttf";
+	const std::string mono_path = std::string(config::RESOURCE_DIR) + "/fonts/JetBrainsMono-Regular.ttf";
+	const bool sans_exists = std::filesystem::exists(sans_path);
+	const bool mono_exists = std::filesystem::exists(mono_path);
 
-	auto load = [&](float base_size) -> ImFont* {
+	auto load = [&](const std::string& path, bool exists, float base_size) -> ImFont* {
 		float scaled = base_size * dpi_scale;
-		if (font_exists) {
+		if (exists) {
 			ImFontConfig cfg;
 			cfg.OversampleH = 3;
 			cfg.OversampleV = 2;
 			cfg.PixelSnapH  = true;
-			return io.Fonts->AddFontFromFileTTF(font_path.c_str(), scaled, &cfg);
+			return io.Fonts->AddFontFromFileTTF(path.c_str(), scaled, &cfg);
 		}
 		return io.Fonts->AddFontDefault();
 	};
 
 	// Body first — becomes ImGui default font (Fonts[0])
-	s_font_body   = load(kFontSizeBody);
-	s_font_header = load(kFontSizeHeader);
-	s_font_detail = load(kFontSizeDetail);
+	s_font_body   = load(sans_path, sans_exists, kFontSizeBody);
+	s_font_header = load(sans_path, sans_exists, kFontSizeHeader);
+	s_font_detail = load(sans_path, sans_exists, kFontSizeDetail);
+
+	// Monospace falls back to the sans-serif body when the font isn't shipped —
+	// the layout still works, numerics just don't tabulate nicely.
+	if (mono_exists) {
+		s_font_mono_body   = load(mono_path, true, kFontSizeBody);
+		s_font_mono_detail = load(mono_path, true, kFontSizeDetail);
+	} else {
+		s_font_mono_body   = s_font_body;
+		s_font_mono_detail = s_font_detail;
+	}
 
 	io.FontGlobalScale = 1.0f / dpi_scale;
 
-	if (!font_exists)
-		spdlog::get("App")->warn("Font not found: {} - using defaults", font_path);
-	else
-		spdlog::get("App")->debug("Loaded fonts: body={}px header={}px detail={}px (dpi={})",
-			kFontSizeBody, kFontSizeHeader, kFontSizeDetail, dpi_scale);
+	if (!sans_exists)
+		spdlog::get("App")->warn("Font not found: {} - using defaults", sans_path);
+	if (!mono_exists)
+		spdlog::get("App")->info("Mono font not found ({}); numerics will use sans body.", mono_path);
 }
 
-ImFont* UIStyle::FontHeader() { return s_font_header; }
-ImFont* UIStyle::FontBody()   { return s_font_body; }
-ImFont* UIStyle::FontDetail() { return s_font_detail; }
+ImFont* UIStyle::FontHeader()     { return s_font_header; }
+ImFont* UIStyle::FontBody()       { return s_font_body; }
+ImFont* UIStyle::FontDetail()     { return s_font_detail; }
+ImFont* UIStyle::FontMonoBody()   { return s_font_mono_body; }
+ImFont* UIStyle::FontMonoDetail() { return s_font_mono_detail; }
+
+ImVec4 UIStyle::BudgetColor(float fraction, float warnAt, float overAt) {
+	if (fraction >= overAt) return kBudgetOver;
+	if (fraction >= warnAt) return kBudgetWarn;
+	return kBudgetGood;
+}
+
+void UIStyle::SectionHeader(const char* label) {
+	ImGui::PushFont(FontHeader());
+	ImGui::TextUnformatted(label);
+	ImGui::PopFont();
+	// Underline runs from the label's left edge to the right edge of the
+	// available content region. Using GetWindowSize would push past the panel
+	// when docked tightly; content-region accounts for both window padding
+	// and the dock node's clip width.
+	ImVec2 a = ImGui::GetItemRectMin();
+	ImVec2 b = ImGui::GetItemRectMax();
+	float y = b.y + 1.0f;
+	float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+	ImGui::GetWindowDrawList()->AddLine(
+		ImVec2(a.x, y), ImVec2(right, y), U32(Alpha(kAccent, 0.45f)), 1.0f);
+	ImGui::Dummy(ImVec2(0, 2));
+}
+
+void UIStyle::Numeric(const char* label, const char* value) {
+	ImGui::TextColored(kTextDim, "%s", label);
+	ImGui::SameLine(0, 4);
+	ImGui::PushFont(FontMonoBody());
+	ImGui::TextUnformatted(value);
+	ImGui::PopFont();
+}
+
+void UIStyle::FormatBytes(char* out, size_t outSize, uint64_t bytes) {
+	const double kKB = 1024.0;
+	const double kMB = 1024.0 * 1024.0;
+	const double kGB = 1024.0 * 1024.0 * 1024.0;
+	double v = static_cast<double>(bytes);
+	if (v >= kGB)      snprintf(out, outSize, "%.2f GB", v / kGB);
+	else if (v >= kMB) snprintf(out, outSize, "%.1f MB", v / kMB);
+	else if (v >= kKB) snprintf(out, outSize, "%.1f KB", v / kKB);
+	else               snprintf(out, outSize, "%llu B",  static_cast<unsigned long long>(bytes));
+}
 
 ImVec4 UIStyle::GetLogLevelColor(spdlog::level::level_enum level) {
 	switch (level) {

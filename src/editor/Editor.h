@@ -3,7 +3,8 @@
 #include "GUIRenderer.h"
 #include "UIState.h"
 #include "ViewportPanel.h"
-#include "MetricsPanel.h"
+#include "PerformancePanel.h"
+#include "MemoryPanel.h"
 #include "OutputPanel.h"
 #include "InspectorPanel.h"
 #include "HierarchyPanel.h"
@@ -74,7 +75,7 @@ public:
 	void SetSky(SkyDescription* sky)          { m_inspector.SetSky(sky); }
 	void SetPostProcess(PostProcessChain* chain) { m_inspector.SetPostProcess(chain); }
 
-	// Render Graph panel
+	// Render Graph panel + Performance panel both consume the snapshot/metrics.
 	void SetGraphSnapshot(const GraphSnapshot* snapshot);
 	void SetPerformanceMetrics(const GPUProfiler::PerformanceMetrics* metrics);
 
@@ -88,11 +89,17 @@ private:
 	VkDescriptorSet m_scene_texture = VK_NULL_HANDLE;
 
 	ViewportPanel m_viewport;
-	MetricsPanel m_metrics;
-	OutputPanel m_output;
+	PerformancePanel m_performance;
+	MemoryPanel m_memory;
+	OutputPanel m_console;
 	InspectorPanel m_inspector;
 	HierarchyPanel m_hierarchy;
 	RenderGraphPanel m_renderGraphPanel;
 
 	Scene* m_scene = nullptr;
+	std::vector<std::unique_ptr<RenderTechnique>>* m_renderers = nullptr;
+	size_t* m_active_renderer_index = nullptr;
+
+	void DrawMenuBar();
+	void DrawStatusBar();
 };

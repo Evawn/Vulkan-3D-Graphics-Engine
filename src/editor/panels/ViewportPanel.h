@@ -3,6 +3,7 @@
 #include "imgui.h"
 #include "../UIState.h"
 #include <vulkan/vulkan.h>
+#include <string>
 
 class ViewportPanel {
 private:
@@ -15,9 +16,19 @@ private:
 	bool m_clicked = false;
 	UIState* m_ui = nullptr;
 
+	// HUD content — set per-frame from Editor before Draw() runs.
+	float m_hud_fps = 0.0f;
+	float m_hud_ms  = 0.0f;
+	std::string m_hud_technique;
+
 public:
 	void SetTextureID(VkDescriptorSet texID) { m_texture_id = texID; }
 	void SetUIState(UIState* ui) { m_ui = ui; }
+	void SetHud(float fps, float ms, const std::string& technique) {
+		m_hud_fps = fps;
+		m_hud_ms = ms;
+		m_hud_technique = technique;
+	}
 	void Draw();
 
 	bool IsFocused() const { return m_focused; }

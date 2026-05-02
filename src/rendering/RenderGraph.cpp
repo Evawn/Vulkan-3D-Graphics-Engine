@@ -279,6 +279,8 @@ GraphSnapshot RenderGraph::BuildSnapshot() const {
 	for (size_t i = 0; i < m_executionOrder.size(); i++) {
 		const auto& ref = m_executionOrder[i];
 		PassInfo info;
+		info.affinity = (i < m_executionOrderStreams.size())
+			? m_executionOrderStreams[i] : QueueAffinity::Graphics;
 
 		if (ref.type == PassType::Graphics) {
 			const auto& pass = *m_graphicsPasses[ref.index];

@@ -28,7 +28,10 @@ private:
 	ImGuiID m_dock_right = 0;
 	ImGuiID m_dock_left_top = 0;
 	ImGuiID m_dock_left_bottom = 0;
+	ImGuiID m_dock_right_top = 0;
+	ImGuiID m_dock_right_bottom = 0;
 	bool m_last_viewport_only = false;
+	LayoutPreset m_last_preset = LayoutPreset::Develop;
 
 	struct Panel {
 		std::string name;
@@ -36,14 +39,22 @@ private:
 	};
 	std::vector<Panel> m_panels;
 
+	// Optional menu bar / status bar callbacks installed by Editor. Drawn outside
+	// the dockspace so they always sit at the very top / bottom of the viewport.
+	std::function<void()> m_menu_bar_fn;
+	std::function<void()> m_status_bar_fn;
+
 	void SetupDefaultLayout(ImGuiID dockspace_id);
-	void BuildLayout(ImGuiID dockspace_id, bool viewport_only, float right_px, float bottom_px);
+	void BuildLayout(ImGuiID dockspace_id, LayoutPreset preset, bool viewport_only,
+	                 float right_px, float bottom_px);
 
 public:
 	static std::shared_ptr<GUIRenderer> Create(std::shared_ptr<VWrap::Device> device);
 
 	void SetUIState(UIState* ui) { m_ui = ui; }
 	void RegisterPanel(const std::string& name, std::function<void()> drawFn);
+	void SetMenuBar(std::function<void()> fn)   { m_menu_bar_fn   = std::move(fn); }
+	void SetStatusBar(std::function<void()> fn) { m_status_bar_fn = std::move(fn); }
 	void CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer);
 
 	void BeginFrame();
