@@ -1,4 +1,5 @@
 #include "PrimitiveFactory.h"
+#include "DefaultPalette.h"
 
 #include <spdlog/spdlog.h>
 
@@ -77,16 +78,23 @@ namespace {
 	}
 
 	// Build the palette at runtime — derived (not user-configurable yet).
-	// Single-shade per material; later iterations can perturb per-voxel for
-	// dithered ground variation.
+	// Starts from the engine default (BuildDefaultPalette) so indices the
+	// terrain doesn't claim (5 = sod orange, 64..95 = HSV green band)
+	// remain populated for the foliage shader's lookups. See
+	// docs/COMBINED-FOLIAGE-BLACK-BUG.md for the failure mode that comes
+	// from leaving those entries zeroed.
 	std::array<uint8_t, 256 * 4> BuildIslandPalette() {
-		std::array<uint8_t, 256 * 4> pal{};
+		auto pal = BuildDefaultPalette();
 		auto put = [&](uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
 			pal[idx * 4 + 0] = r;
 			pal[idx * 4 + 1] = g;
 			pal[idx * 4 + 2] = b;
 			pal[idx * 4 + 3] = 255;
 		};
+		// Override the default's shape colors at terrain material slots.
+		// Indices 5..9 keep their default values so foliage / other
+		// callers that overlay onto a fresh terrain palette don't lose
+		// the rest of the engine's color set.
 		put(MAT_STONE,  90,  90,  95);
 		put(MAT_DIRT,   92,  64,  40);
 		put(MAT_GRASS,  60, 130,  50);

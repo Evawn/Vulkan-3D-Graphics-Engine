@@ -637,9 +637,11 @@ void CombinedRenderer::RegisterPasses(
 void CombinedRenderer::OnPostCompile(RenderGraph& graph) {
 	if (!m_assets) return;
 
-	// Apply the terrain bake's palette. The foliage shader uses indices 5,
-	// 64..95 — these survive any bake-driven palette since the bake fills the
-	// full 256 entries from the same default HSV layout.
+	// Apply the terrain bake's palette. PrimitiveFactory::BuildIslandPalette
+	// seeds from BuildDefaultPalette() before overlaying the four terrain
+	// materials (1..4), so foliage's expected indices (5 sod, 64..95 green
+	// band) stay populated. See docs/COMBINED-FOLIAGE-BLACK-BUG.md for the
+	// failure mode this avoids.
 	if (m_palette) m_palette->Upload(m_terrain_brickmap.palette.data());
 
 	if (m_terrain_pending_upload && m_graphics_pool && !m_terrain_brickmap.data.empty()) {
