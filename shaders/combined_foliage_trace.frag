@@ -3,14 +3,13 @@
 // CombinedRenderer — foliage trace pass.
 //
 // Forked from instanced_voxel.frag. Differences:
-//   1. Defines SUBSTRATE_TERRAIN before including substrate.glsl, so the
-//      shadow query also walks the terrain brickmap. Adds a TerrainBrickmap
-//      buffer binding (slot 8) and an `ivec3 terrainOriginVoxel` global
-//      (mirrored from the FrameUbo).
+//   1. Sun shadow ray uses the new `traceShadowWorld` (shadow_trace.glsl)
+//      that walks the *shadow occupancy brickmap* with two-level DDA.
+//      Both terrain occlusion and animated foliage occlusion are pre-baked
+//      into that brickmap (terrain at terrain-bake time; foliage by the
+//      shadow_foliage_write compute pass each frame).
 //   2. Coordinate convention assumes the foliage cloud is anchored at world
-//      origin (cloudOriginWorld = vec3(0)), so cloud-local voxel coords =
-//      world voxel coords — the substrate's `voxel` variable is directly
-//      consumable by the terrain check without translation.
+//      origin (cloudOriginWorld = vec3(0)).
 
 layout(location = 0) in vec3 vLocalPos;
 layout(location = 1) in vec3 vWorldPos;
@@ -45,8 +44,7 @@ layout(set = 0, binding = 3) uniform VolumeMeta {
 } meta;
 
 // Per-frame state — mirror of CombinedFrameUbo on the host. Same struct as
-// the terrain trace shader binds (so per-frame state is written once per
-// frame and consumed by both passes).
+// the terrain trace shader binds.
 layout(set = 0, binding = 4) uniform FrameUbo {
 	mat4  viewProj;
 	mat4  ndcToWorld;
@@ -60,34 +58,19 @@ layout(set = 0, binding = 4) uniform FrameUbo {
 	float time;
 	int   frameCount;
 	float worldVoxelSize;
-	float _ubo_pad0;
+	int   maxShadowBrickSteps;
 	float _ubo_pad1;
-	ivec3 terrainOriginVoxel;
-	int   _ubo_pad2;
 } frame;
 
-// Foliage substrate (slot 5 vacant — historically the shadow map sampler).
-layout(std430, set = 0, binding = 6) readonly buffer SubstrateBuffer {
+// Shadow occupancy brickmap (shadow_trace.glsl reads `shadowBM`).
+layout(std430, set = 0, binding = 5) readonly buffer ShadowBrickmapBuffer {
 	uint data[];
-} substrate;
-
-layout(std430, set = 0, binding = 7) readonly buffer BitmaskBuffer {
-	uint bits[];
-} bitmask;
-
-// NEW: terrain brickmap, consumed by the unified shadow query when
-// SUBSTRATE_TERRAIN is defined. Symbol name `terrain` is required by
-// terrain_brickmap.glsl.
-layout(std430, set = 0, binding = 8) readonly buffer TerrainBrickmapBuffer {
-	uint data[];
-} terrain;
+} shadowBM;
 
 layout(location = 0) out vec4 outColor;
 
-// terrainOriginVoxel is consumed by name from terrain_brickmap.glsl. Mirror
-// from the FrameUbo at the top of main() so substrate.glsl's shadow query
-// can find it.
-ivec3 terrainOriginVoxel;
+// shadow_trace.glsl reads this name. Set in main() from the FrameUbo.
+int frame_maxShadowBrickSteps;
 
 vec4 quatConjugate(vec4 q) { return vec4(-q.xyz, q.w); }
 vec3 quatRotate(vec4 q, vec3 v) {
@@ -119,9 +102,7 @@ vec3 worldToVoxel(vec3 p) { return localToVoxel(p); }
 
 #include "voxel_ao.glsl"
 #include "instanced_voxel_dda.glsl"
-
-#define SUBSTRATE_TERRAIN
-#include "substrate.glsl"
+#include "shadow_trace.glsl"
 
 vec3 instanceLocalToWorld(vec3 pLocal) {
 	vec3 inCloud = quatRotate(vInstRot, pLocal * vInstScale) + vInstPos;
@@ -129,7 +110,7 @@ vec3 instanceLocalToWorld(vec3 pLocal) {
 }
 
 void main() {
-	terrainOriginVoxel = frame.terrainOriginVoxel;
+	frame_maxShadowBrickSteps = frame.maxShadowBrickSteps;
 
 	g_local_origin = pc.aabbMin;
 	g_voxel_local  = (pc.aabbMax - pc.aabbMin) / vec3(meta.size);
@@ -171,16 +152,14 @@ void main() {
 		float bias = kShadowBiasConstant
 		           + kShadowBiasSlope * (1.0 - clamp(NdotL, 0.0, 1.0));
 		vec3 originBiased     = hitWorld + worldNormal * bias;
-		vec3 cloudOriginWorld = pc.cloudWorld[3].xyz;
-		ivec3 receiverCloudVoxel = ivec3(floor(
-			(hitWorld - cloudOriginWorld) / frame.worldVoxelSize));
-		// Generous max distance: a few times the cloud diagonal. Past this
-		// the substrate DDA bails out as "lit" — acceptable failure mode
-		// for shadows that escape the cloud's extent.
+		// Receiver's own WORLD voxel — exempt from the shadow query.
+		// Cloud is anchored at world origin in CombinedRenderer, so cloud-
+		// local voxel == world voxel.
+		ivec3 receiverWorldVoxel = ivec3(floor(hitWorld / frame.worldVoxelSize));
 		const float kShadowMaxDist = 64.0;
 		shadow = traceShadowWorld(originBiased, frame.sunDirection,
 		                          kShadowMaxDist, frame.worldVoxelSize,
-		                          cloudOriginWorld, receiverCloudVoxel);
+		                          receiverWorldVoxel);
 	}
 
 	vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
@@ -194,9 +173,7 @@ void main() {
 	outColor = vec4(lit, 1.0);
 
 	// Write the actual voxel-hit depth so foliage cubes z-test against terrain
-	// at the voxel surface, not at the bounding-box face. Without this, the
-	// rasterized cube's interpolated depth (front-face) would beat terrain
-	// even when the actual voxel hit lies behind it.
+	// at the voxel surface, not at the bounding-box face.
 	vec4 clipPos = frame.viewProj * vec4(hitWorld, 1.0);
 	gl_FragDepth = clipPos.z / clipPos.w;
 }

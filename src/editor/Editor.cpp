@@ -254,43 +254,80 @@ void Editor::DrawMenuBar() {
 }
 
 // =============================================================================
-// Status bar
+// Status bar — fixed-slot layout
+//
+// Each readout is anchored to an absolute window-X coordinate via SameLine(x)
+// so digit-width changes don't cascade. Values are EMA-smoothed before
+// display so the numbers don't tick on every frame; the underlying perf data
+// is unchanged and PerformancePanel still graphs the raw stream.
+//
+// Slot widths are tuned to the worst-case content (e.g. "999.99 ms" in mono
+// detail font), with a small breathing margin. If you add a new readout, give
+// it its own slot rather than stacking onto a neighbor — the cascade is
+// exactly what stable layout was supposed to prevent.
 // =============================================================================
 
 void Editor::DrawStatusBar() {
-	const float fps      = m_performance.GetFps();
-	const float frame_ms = m_performance.GetFrameMs();
-	const float gpu_ms   = m_performance.GetGpuMs();
-	const size_t errs    = m_console.GetErrorCount();
-	const size_t warns   = m_console.GetWarnCount();
+	// EMA-smooth the displayed frame/gpu values. ~150ms half-life at 60Hz so
+	// the readout follows actual change but doesn't flicker on per-frame noise.
+	// FPS arrives pre-smoothed at 2Hz from GPUProfiler, so it gets a much
+	// gentler EMA just to catch the half-second jumps.
+	static float disp_frame = 0.0f, disp_gpu = 0.0f, disp_fps = 0.0f;
+	const float a_ms  = 0.08f;
+	const float a_fps = 0.20f;
+	disp_frame = disp_frame * (1.0f - a_ms)  + m_performance.GetFrameMs() * a_ms;
+	disp_gpu   = disp_gpu   * (1.0f - a_ms)  + m_performance.GetGpuMs()   * a_ms;
+	disp_fps   = disp_fps   * (1.0f - a_fps) + m_performance.GetFps()     * a_fps;
+
+	const size_t errs  = m_console.GetErrorCount();
+	const size_t warns = m_console.GetWarnCount();
 
 	auto pushMono = []{ ImGui::PushFont(UIStyle::FontMonoDetail()); };
 	auto popMono  = []{ ImGui::PopFont(); };
 
+	// Vertical centering: align the first item's text-baseline to the window
+	// frame so all items sit at the same y.
+	ImGui::AlignTextToFramePadding();
+
+	// --- Slot positions (absolute X within the status bar window) ---
+	// Each slot reserves enough room for the worst-case rendering of its
+	// label + value pair. Tweak in one place; the rest of the layout stays
+	// pinned because subsequent SameLine() calls use absolute X.
+	const float slot_fps    = 4.0f;
+	const float slot_frame  = 78.0f;
+	const float slot_gpu    = 188.0f;
+	const float slot_vram   = 290.0f;
+	const float slot_allocs = 396.0f;
+	const float slot_tech   = 482.0f;
+
 	// FPS
+	ImGui::SetCursorPosX(slot_fps);
 	ImGui::TextColored(UIStyle::kTextDim, "fps");
 	ImGui::SameLine(0, 4);
 	pushMono();
-	ImGui::TextColored(UIStyle::BudgetColor(16.6f / std::max(0.001f, frame_ms), 0.5f, 0.9f),
-		"%5.0f", fps);
+	ImGui::TextColored(
+		UIStyle::BudgetColor(16.6f / std::max(0.001f, disp_frame), 0.5f, 0.9f),
+		"%4.0f", disp_fps);
 	popMono();
 
-	ImGui::SameLine(0, 12);
+	// frame ms
+	ImGui::SameLine(slot_frame);
 	ImGui::TextColored(UIStyle::kTextDim, "frame");
 	ImGui::SameLine(0, 4);
-	pushMono(); ImGui::Text("%5.2f", frame_ms); popMono();
-	ImGui::SameLine(0, 1);
+	pushMono(); ImGui::Text("%6.2f", disp_frame); popMono();
+	ImGui::SameLine(0, 2);
 	ImGui::TextColored(UIStyle::kTextDim, "ms");
 
-	ImGui::SameLine(0, 12);
+	// gpu ms
+	ImGui::SameLine(slot_gpu);
 	ImGui::TextColored(UIStyle::kTextDim, "gpu");
 	ImGui::SameLine(0, 4);
-	pushMono(); ImGui::Text("%5.2f", gpu_ms); popMono();
-	ImGui::SameLine(0, 1);
+	pushMono(); ImGui::Text("%6.2f", disp_gpu); popMono();
+	ImGui::SameLine(0, 2);
 	ImGui::TextColored(UIStyle::kTextDim, "ms");
 
-	// VRAM (graph-resource estimate from Memory panel)
-	ImGui::SameLine(0, 16);
+	// VRAM (graph-resource estimate)
+	ImGui::SameLine(slot_vram);
 	ImGui::TextColored(UIStyle::kTextDim, "vram");
 	ImGui::SameLine(0, 4);
 	char vram_buf[32];
@@ -298,32 +335,51 @@ void Editor::DrawStatusBar() {
 	pushMono(); ImGui::TextUnformatted(vram_buf); popMono();
 
 	// Allocations
-	ImGui::SameLine(0, 12);
+	ImGui::SameLine(slot_allocs);
 	ImGui::TextColored(UIStyle::kTextDim, "allocs");
 	ImGui::SameLine(0, 4);
-	pushMono(); ImGui::Text("%u", m_memory.GetAllocationCount()); popMono();
+	pushMono(); ImGui::Text("%5u", m_memory.GetAllocationCount()); popMono();
 
-	// Technique
-	ImGui::SameLine(0, 16);
+	// Technique — left-anchored at slot_tech, free-flowing right (variable text
+	// length, but the badges to its right are anchored to the *window's*
+	// right edge, so technique-name length doesn't shift them either).
+	ImGui::SameLine(slot_tech);
 	if (m_renderers && m_active_renderer_index && !m_renderers->empty()) {
 		ImGui::TextColored(UIStyle::kTextDim, "tech");
 		ImGui::SameLine(0, 4);
 		ImGui::TextUnformatted((*m_renderers)[*m_active_renderer_index]->GetDisplayName().c_str());
 	}
 
-	// Right side: error / warning badges
-	float w = ImGui::GetContentRegionAvail().x;
-	float reserve = (errs > 0 ? 80.0f : 0.0f) + (warns > 0 ? 80.0f : 0.0f) + 30.0f;
-	if (w > reserve) ImGui::SameLine(0, w - reserve);
-	if (errs > 0) {
-		ImGui::TextColored(UIStyle::kBudgetOver, "%zuE", errs);
-		ImGui::SameLine(0, 6);
-	}
-	if (warns > 0) {
-		ImGui::TextColored(UIStyle::kBudgetWarn, "%zuW", warns);
-		ImGui::SameLine(0, 6);
-	}
+	// --- Right-anchored badges ---
+	// Anchor against the window's full width (NOT GetContentRegionAvail) so
+	// the cumulative width of the left-side widgets above doesn't decide where
+	// the badges land. The badges always sit `pad` from the window's right.
+	const float pad = 8.0f;
+	const float win_w = ImGui::GetWindowSize().x;
+	float right_x = win_w - pad;
+
+	auto right_align = [&](const char* text) {
+		ImVec2 ts = ImGui::CalcTextSize(text);
+		right_x -= ts.x;
+		ImGui::SameLine(right_x);
+	};
+
 	if (errs == 0 && warns == 0) {
-		ImGui::TextColored(UIStyle::kBudgetGood, "OK");
+		const char* lbl = "OK";
+		right_align(lbl);
+		ImGui::TextColored(UIStyle::kBudgetGood, "%s", lbl);
+	} else {
+		// Render right-to-left: warnings first (rightmost), then errors.
+		if (warns > 0) {
+			char buf[24]; snprintf(buf, sizeof(buf), "%zuW", warns);
+			right_align(buf);
+			ImGui::TextColored(UIStyle::kBudgetWarn, "%s", buf);
+			right_x -= 8.0f; // gap
+		}
+		if (errs > 0) {
+			char buf[24]; snprintf(buf, sizeof(buf), "%zuE", errs);
+			right_align(buf);
+			ImGui::TextColored(UIStyle::kBudgetOver, "%s", buf);
+		}
 	}
 }

@@ -2,44 +2,40 @@
 
 // CombinedRenderer — terrain trace pass.
 //
-// Forked from brickmap_palette_trace.frag. Two material differences:
-//   1. Sun shadow ray uses the unified `traceShadowWorld` (substrate.glsl)
-//      with SUBSTRATE_TERRAIN defined, so shadows correctly OR foliage and
-//      terrain occluders. Replaces the inline secondary `trace(...)` walk
-//      that existed in the standalone shader.
+// Forked from brickmap_palette_trace.frag. Material differences:
+//   1. Sun shadow ray uses the new `traceShadowWorld` (shadow_trace.glsl)
+//      that walks the *shadow occupancy brickmap* with two-level DDA.
+//      Empty bricks cost one outer step (8 voxels of ray distance) instead
+//      of 8 individual voxel steps. See docs/SHADOW-BRICKS.md.
 //   2. Shading state (sun/sky/time/AO/etc.) lives in a shared FrameUbo
 //      instead of the per-draw push constant — both this shader and the
 //      foliage trace shader bind the same UBO, so per-frame writes happen
 //      once.
 //
-// Coordinate convention: terrain is centered at world origin, same as the
-// standalone shader. The substrate shadow query receives `terrainOriginVoxel`
-// = `-floor(volumeSize / 2)` so it can address terrain bricks via world-
-// voxel coords.
+// The shadow brickmap is a *separate* acceleration structure from the
+// terrain palette brickmap. The shadow query never reads the palette
+// brickmap; the terrain primary trace never reads the shadow brickmap.
 
 layout(location = 0) in vec3 texCoords;
 
 // Per-draw push constant — primary-trace geometry only. All shading state
-// lives in the FrameUbo; everything that varies per draw is here.
+// lives in the FrameUbo.
 layout(push_constant) uniform PushConstantBlock {
 	mat4  ndcToWorld;
-	ivec3 terrainOriginVoxel;   int _pad0;
 } pc;
 
 // --- Bindings ---
-// Layout matches CombinedRenderer's BindingTable. The descriptor numbering is
-// shared between this pass and the foliage trace pass for the substrate-side
-// resources (so future shader edits stay aligned).
+// 0 — Terrain palette brickmap (primary trace only)
+// 1 — Palette texture
+// 2 — Per-frame state UBO
+// 3 — Shadow occupancy brickmap (shadow_trace.glsl reads `shadowBM`)
 
-// 0: Terrain brickmap. Symbol name `terrain` is required by terrain_brickmap.glsl.
 layout(std430, set = 0, binding = 0) readonly buffer TerrainBrickmapBuffer {
 	uint data[];
 } terrain;
 
-// 1: Palette texture.
 layout(set = 0, binding = 1) uniform sampler2D palette_sampler;
 
-// 2: Per-frame state (mirrors CombinedFrameUbo on the host).
 layout(set = 0, binding = 2) uniform FrameUbo {
 	mat4  viewProj;
 	mat4  ndcToWorld;          // unused here (PC has it); shared layout with foliage shader
@@ -53,47 +49,18 @@ layout(set = 0, binding = 2) uniform FrameUbo {
 	float time;
 	int   frameCount;
 	float worldVoxelSize;
-	float _ubo_pad0;
+	int   maxShadowBrickSteps;
 	float _ubo_pad1;
-	ivec3 terrainOriginVoxel;  // mirror of pc.terrainOriginVoxel — substrate.glsl reads this name
-	int   _ubo_pad2;
 } frame;
 
-// Per-asset metadata for the foliage cloud (substrate.glsl reads `meta.size`,
-// `meta.frameCount`). Even though this is the terrain pass, we need foliage
-// metadata for the substrate's shadow query.
-layout(set = 0, binding = 3) uniform VolumeMeta {
-	ivec3 size;
-	int   frameCount;
-} meta;
-
-// Foliage substrate query inputs (substrate.glsl).
-struct InstanceData {
-	vec3  position;       float scale;
-	vec4  rotation;
-	float animOffset;
-	float _pad0;
-	int   yawIdx;
-	float _pad2;
-};
-layout(std430, set = 0, binding = 4) readonly buffer InstanceBuffer {
-	InstanceData instances[];
-} ib;
-
-layout(std430, set = 0, binding = 5) readonly buffer SubstrateBuffer {
+layout(std430, set = 0, binding = 3) readonly buffer ShadowBrickmapBuffer {
 	uint data[];
-} substrate;
-
-layout(std430, set = 0, binding = 6) readonly buffer BitmaskBuffer {
-	uint bits[];
-} bitmask;
+} shadowBM;
 
 layout(location = 0) out vec4 outColor;
 
-// terrainOriginVoxel is consumed by name from terrain_brickmap.glsl. Read out
-// of the FrameUbo (mirrored from the push constant for substrate.glsl's
-// shadow query, which only sees the FrameUbo).
-ivec3 terrainOriginVoxel;
+// shadow_trace.glsl reads this name. Set in main() from the FrameUbo.
+int frame_maxShadowBrickSteps;
 
 // Cached from header — set once in main()
 uvec3 g_volume_size;
@@ -149,19 +116,8 @@ bool isSolidAt(ivec3 voxelCoord) {
 	return brickVoxelMaterial(brick_index, local) != 0u;
 }
 
-// Note: shading helpers (sky.glsl / lighting.glsl) are NOT included here
-// because they hard-code `pc.skyColor`/`pc.sunColor` etc, and this shader
-// holds those fields in the FrameUbo instead. Sky pixels are handled by the
-// upstream sky pre-pass (we discard on miss); shadeLit-equivalent math is
-// inlined at the bottom of main().
-
 #include "voxel_ao.glsl"
-
-// Substrate shadow query — must come AFTER terrain.data is declared, since
-// substrate.glsl includes terrain_brickmap.glsl which references `terrain`
-// when SUBSTRATE_TERRAIN is set.
-#define SUBSTRATE_TERRAIN
-#include "substrate.glsl"
+#include "shadow_trace.glsl"
 
 struct Hit {
 	bool  hit;
@@ -330,9 +286,7 @@ Hit trace(vec3 rayOrigin, vec3 direction) {
 }
 
 void main() {
-	// Mirror the push-constant terrain origin into the named global the
-	// terrain_brickmap.glsl helper (and substrate.glsl's terrain check) read.
-	terrainOriginVoxel = pc.terrainOriginVoxel;
+	frame_maxShadowBrickSteps = frame.maxShadowBrickSteps;
 
 	// Header — terrain brickmap layout. See src/rendering/voxel/Brickmap.h.
 	g_volume_size = uvec3(terrain.data[0], terrain.data[1], terrain.data[2]);
@@ -369,8 +323,8 @@ void main() {
 	float NdotL = max(0.0, dot(normal, frame.sunDirection));
 	float shadow = 1.0;
 	if (frame.shadowsEnabled != 0 && NdotL > 0.0) {
-		// Receiver's own world voxel — exempt from the substrate's terrain
-		// occlusion test so we don't self-shadow at the hit voxel face.
+		// Receiver's own world voxel — exempt from the shadow brickmap test
+		// so the hit face doesn't self-shadow.
 		ivec3 hitWorldVoxel = ivec3(floor(hitPos / g_voxel_world_size));
 
 		// Sub-voxel normal-direction offset to escape numerical precision.
@@ -383,13 +337,9 @@ void main() {
 		vec3 originBiased = hitPos + normal * bias;
 
 		const float kShadowMaxDist = 64.0;
-		// CombinedRenderer pins the foliage cloud at world origin (cloud
-		// translation = vec3(0)), so cloud-local voxel coords equal world
-		// voxel coords. That's why we can pass `vec3(0)` as the cloud
-		// origin and `hitWorldVoxel` directly as the skip voxel.
 		shadow = traceShadowWorld(originBiased, frame.sunDirection,
 		                          kShadowMaxDist, frame.worldVoxelSize,
-		                          vec3(0.0), hitWorldVoxel);
+		                          hitWorldVoxel);
 	}
 
 	// Inlined equivalent of lighting.glsl::shadeLit, using FrameUbo fields.

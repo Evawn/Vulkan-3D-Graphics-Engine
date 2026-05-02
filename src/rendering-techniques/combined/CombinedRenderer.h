@@ -6,6 +6,7 @@
 #include "Scene.h"
 #include "BindingTable.h"
 #include "Brickmap.h"
+#include "ShadowBrickmap.h"
 #include "PaletteResource.h"
 #include "PrimitiveFactory.h"
 #include "SceneLighting.h"
@@ -91,9 +92,21 @@ private:
 	int  m_foliage_grid_dim = 7;     // 7×7 = 49 instances ("dozens" per FEATURE.md scope)
 	int  m_foliage_pitch_voxels = 0; // computed from terrain size / grid dim
 
-	// ---- Substrate (foliage layer; static layer is the terrain buffer above) ----
-	BufferHandle m_substrate_buffer;
-	uint32_t     m_substrate_word_capacity = 0;
+	// ---- Shadow occupancy brickmap ----
+	// One acceleration structure for ALL shadow queries (terrain + foliage).
+	// Static pool baked from terrain at terrain bake time; dynamic pool
+	// rewritten each frame by shadow_foliage_write.comp from the foliage
+	// instances' current animation frame. See docs/SHADOW-BRICKS.md.
+	BufferHandle m_shadow_buffer;
+	uint32_t     m_shadow_word_capacity      = 0;
+	BufferHandle m_instance_bricks_buffer;
+	uint32_t     m_instance_brick_capacity   = 0;
+	uint64_t     m_shadow_dynamic_pool_offset_bytes = 0;
+	uint64_t     m_shadow_dynamic_pool_size_bytes   = 0;
+	std::vector<uint32_t>                    m_pending_shadow_data;
+	std::vector<ShadowBrickmap::InstanceBrick> m_pending_instance_bricks;
+	bool         m_shadow_pending_upload     = false;
+	uint32_t     m_pending_instance_brick_count = 0;
 
 	// ---- Per-frame UBOs (camera/sun/sky/time + foliage meta) ----
 	std::vector<std::shared_ptr<VWrap::Buffer>> m_frame_ubo_buffers;
@@ -106,10 +119,17 @@ private:
 	std::shared_ptr<VWrap::Sampler>  m_volume_sampler;
 
 	// ---- Bindings ----
-	std::shared_ptr<BindingTable> m_compute_bindings;
+	std::shared_ptr<BindingTable> m_compute_bindings;          // foliage volume + asset bitmask gen
+	std::shared_ptr<BindingTable> m_shadow_write_bindings;     // per-frame shadow dynamic-pool fill
 	std::shared_ptr<BindingTable> m_sky_bindings;
 	std::shared_ptr<BindingTable> m_terrain_bindings;
 	std::shared_ptr<BindingTable> m_foliage_bindings;
+
+	// Non-owning reference to the render graph; needed inside record
+	// callbacks that have to resolve graph-managed buffers to VkBuffer
+	// (e.g. shadow_foliage_write's vkCmdFillBuffer needs the actual handle).
+	// Set by RegisterPasses; the graph outlives this technique.
+	RenderGraph* m_graph = nullptr;
 
 	// ---- Tunables ----
 	IslandTerrainConfig m_terrain_cfg{};
@@ -119,7 +139,8 @@ private:
 	int  m_terrain_seed       = 1337;
 	bool m_pending_bake       = true;   // bake on first frame
 
-	int  m_max_iterations  = 256;
+	int  m_max_iterations  = 256;          // primary trace outer cap
+	int  m_max_shadow_brick_steps = 256;   // shadow trace outer cap (brick steps)
 	bool m_debug_color     = false;
 	float m_animation_speed = 0.5f;
 	bool m_shadows_enabled = true;
@@ -137,9 +158,14 @@ private:
 	void BakeIslandNow();
 
 	// Walk every (gx, gy) in the auto-fit foliage grid, find the topmost
-	// solid voxel of that terrain column, and emit one instance there. Builds
-	// the substrate from the resulting instance set.
+	// solid voxel of that terrain column, and emit one instance there.
+	// Triggers a shadow brickmap topology rebuild via RebuildShadowBrickmap.
 	void RebuildFoliagePlacement();
+
+	// Rebuild the shadow brickmap from the current terrain + foliage instance
+	// set. Called when either input changes — terrain bake, instance edit.
+	// Stashes the pending buffer bytes; OnPostCompile uploads them.
+	void RebuildShadowBrickmap();
 
 	void WriteFrameUbo(uint32_t frameIndex);
 

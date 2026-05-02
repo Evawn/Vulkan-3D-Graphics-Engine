@@ -172,17 +172,19 @@ void GUIRenderer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer) 
 		}
 	}
 
-	// Status bar (full-viewport, outside the dockspace).
+	// Status bar (full-viewport, outside the dockspace). Rendered directly into
+	// a side bar (no menu-bar wrapper) so DrawStatusBar can use SetCursorPosX
+	// to lock each readout to a fixed column — keeps per-frame digit changes
+	// from cascading layout shifts to the right.
 	if (m_status_bar_fn) {
 		const float h = ImGui::GetFrameHeight();
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 2));
 		if (ImGui::BeginViewportSideBar("##statusbar", ImGui::GetMainViewport(),
-		                                ImGuiDir_Down, h, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_MenuBar)) {
-			if (ImGui::BeginMenuBar()) {
-				m_status_bar_fn();
-				ImGui::EndMenuBar();
-			}
+		                                ImGuiDir_Down, h, ImGuiWindowFlags_NoDecoration)) {
+			m_status_bar_fn();
 		}
 		ImGui::End();
+		ImGui::PopStyleVar();
 	}
 
 	ImGui::EndFrame();

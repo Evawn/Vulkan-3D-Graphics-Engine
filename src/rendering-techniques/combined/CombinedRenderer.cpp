@@ -1,5 +1,5 @@
 #include "CombinedRenderer.h"
-#include "Substrate.h"
+#include "BrickGrid.h"
 #include "PipelineDefaults.h"
 #include "config.h"
 
@@ -14,15 +14,17 @@
 
 namespace {
 
-constexpr const char* kTerrainBufferName    = "combined_terrain_brickmap";
-constexpr const char* kFoliageAssetName     = "combined_foliage_volume";
-constexpr const char* kFoliageBitmaskName   = "combined_foliage_bitmask";
-constexpr const char* kFoliageInstancesName = "combined_foliage_instances";
-constexpr const char* kSubstrateBufferName  = "combined_substrate";
-constexpr const char* kComputePassName      = "Combined Foliage Generate";
-constexpr const char* kSkyPassName          = "Combined Sky";
-constexpr const char* kTerrainPassName      = "Combined Terrain Trace";
-constexpr const char* kFoliagePassName      = "Combined Foliage Trace";
+constexpr const char* kTerrainBufferName       = "combined_terrain_brickmap";
+constexpr const char* kFoliageAssetName        = "combined_foliage_volume";
+constexpr const char* kFoliageBitmaskName      = "combined_foliage_bitmask";   // asset-space (per-frame) bitmask
+constexpr const char* kFoliageInstancesName    = "combined_foliage_instances";
+constexpr const char* kShadowBrickmapName      = "combined_shadow_brickmap";
+constexpr const char* kInstanceBricksName      = "combined_instance_bricks";
+constexpr const char* kFoliageGenPassName      = "Combined Foliage Generate";
+constexpr const char* kShadowWritePassName     = "Combined Shadow Foliage Write";
+constexpr const char* kSkyPassName             = "Combined Sky";
+constexpr const char* kTerrainPassName         = "Combined Terrain Trace";
+constexpr const char* kFoliagePassName         = "Combined Foliage Trace";
 
 // One inch per voxel. Mirrors the value in InstancedVoxelTechnique — both
 // techniques pin to the same world voxel grid (LIGHTING.md §1.1, §2). The
@@ -48,26 +50,24 @@ struct VolumeMetaUbo {
 
 // Per-frame state shared by every graphics pass in this technique. std140
 // layout: vec3+scalar pairs share 16 B; mat4 fields are 16-aligned. Trailing
-// pad keeps the struct a clean 16 B multiple — easier to reason about and
-// removes any ambiguity about std140 round-up rules.
+// pad keeps the struct a clean 16 B multiple.
 struct CombinedFrameUbo {
 	glm::mat4 viewProj;            // 64
 	glm::mat4 ndcToWorld;          // 64
-	glm::vec3 cameraPos;           int32_t maxIterations;   // 16
-	glm::vec3 skyColor;            int32_t debugColor;      // 16
-	glm::vec3 sunDirection;        float   sunCosHalfAngle; // 16
-	glm::vec3 sunColor;            float   sunIntensity;    // 16
+	glm::vec3 cameraPos;           int32_t maxIterations;        // 16  (primary trace cap)
+	glm::vec3 skyColor;            int32_t debugColor;            // 16
+	glm::vec3 sunDirection;        float   sunCosHalfAngle;       // 16
+	glm::vec3 sunColor;            float   sunIntensity;          // 16
 	float     ambientIntensity;
 	float     aoStrength;
 	int32_t   shadowsEnabled;
-	float     time;                                          // 16
+	float     time;                                                // 16
 	int32_t   frameCount;
 	float     worldVoxelSize;
-	float     _pad0;
-	float     _pad1;                                         // 16
-	glm::ivec3 terrainOriginVoxel; int32_t  _pad2;           // 16
+	int32_t   maxShadowBrickSteps;                                 // shadow trace outer cap
+	float     _ubo_pad1;                                           // 16
 };
-static_assert(sizeof(CombinedFrameUbo) == 240,
+static_assert(sizeof(CombinedFrameUbo) == 224,
 	"CombinedFrameUbo layout drift — update both combined_*_trace.frag UBO blocks to match");
 
 // Compute pass push constant — reuses instanced_voxel_generate.comp.
@@ -77,13 +77,27 @@ struct GeneratePC {
 	int32_t numXWords;
 };
 
-// Terrain trace pass push constant — primary-trace geometry only. Shading
-// state lives in the FrameUbo.
-struct TerrainTracePC {
-	glm::mat4  ndcToWorld;            // 64
-	glm::ivec3 terrainOriginVoxel; int32_t _pad0;   // 16
+// Push constant for shadow_foliage_write.comp. Mirrors that shader's `PC`
+// block layout exactly (32 bytes).
+struct ShadowWritePC {
+	int32_t assetSizeX, assetSizeY, assetSizeZ;
+	int32_t frameCount;
+	float   time;
+	int32_t numXWords;
+	int32_t _pad0;
+	int32_t _pad1;
 };
-static_assert(sizeof(TerrainTracePC) == 80,
+static_assert(sizeof(ShadowWritePC) == 32,
+	"ShadowWritePC layout drift — update shadow_foliage_write.comp PC block");
+
+// Terrain trace pass push constant — primary-trace geometry only. Shading
+// state lives in the FrameUbo. The new shadow brickmap subsumes the old
+// per-draw `terrainOriginVoxel` plumbing — shadow lookups read the brickmap
+// header directly.
+struct TerrainTracePC {
+	glm::mat4 ndcToWorld;            // 64
+};
+static_assert(sizeof(TerrainTracePC) == 64,
 	"TerrainTracePC must stay <= 128 B (portable PC limit)");
 
 // Foliage trace pass push constant — same shape as InstancedVoxelTechnique's.
@@ -169,6 +183,7 @@ void CombinedRenderer::RegisterPasses(
 	m_world         = ctx.world;
 	m_lighting      = ctx.lighting;
 	m_sky           = ctx.sky;
+	m_graph         = &graph;
 	if (m_start_time.time_since_epoch().count() == 0) {
 		m_start_time = std::chrono::steady_clock::now();
 	}
@@ -214,25 +229,40 @@ void CombinedRenderer::RegisterPasses(
 	bm.lifetime = Lifetime::Persistent;
 	m_foliage_bitmask_buffer = graph.CreateBuffer(kFoliageBitmaskName, bm);
 
-	// Substrate buffer — sized to fit the just-built foliage substrate. The
-	// upstream Substrate::UpperBoundWords helper assumes the foliage grid is
-	// densely packed (gridDim × pitch footprint), which holds for the
-	// standalone foliage technique but NOT for surface-placed instances that
-	// can spread across the entire island. Surface-placed instances produce a
-	// substrate top-grid spanning the full island footprint regardless of
-	// instance count, so we just size the buffer to the actual build's words
-	// (with a generous headroom for the next bake's variance). RebuildFoliage-
-	// Placement was called above, so m_pending_substrate_data is current.
-	const size_t actualWords  = m_pending_substrate_data.size();
-	const size_t headroomMult = 2;            // re-bake with different params can swing the size
-	const size_t minWords     = 1024;
-	m_substrate_word_capacity = static_cast<uint32_t>(
-		std::max(minWords, actualWords * headroomMult));
-	BufferDesc sb{};
-	sb.size     = sizeof(uint32_t) * m_substrate_word_capacity;
-	sb.usage    = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	sb.lifetime = Lifetime::Persistent;
-	m_substrate_buffer = graph.CreateBuffer(kSubstrateBufferName, sb);
+	// Shadow occupancy brickmap — sized to fit the just-built shadow brickmap.
+	// Surface-placed foliage spreads across the full island footprint, so the
+	// top-level grid is large; the brick pool is bounded by the union of
+	// terrain bricks + foliage instance bricks. We size to the actual build's
+	// word count with a 2× headroom for re-bake variance.
+	const size_t actualShadowWords = m_pending_shadow_data.size();
+	const size_t shadowHeadroom    = 2;
+	const size_t minShadowWords    = 1024;
+	m_shadow_word_capacity = static_cast<uint32_t>(
+		std::max(minShadowWords, actualShadowWords * shadowHeadroom));
+	BufferDesc sbm{};
+	sbm.size     = sizeof(uint32_t) * m_shadow_word_capacity;
+	// The shadow_foliage_write compute writes (atomicOr) into this buffer
+	// each frame; vkCmdFillBuffer (transfer) clears the dynamic pool first.
+	sbm.usage    = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+	             | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	sbm.lifetime = Lifetime::Persistent;
+	m_shadow_buffer = graph.CreateBuffer(kShadowBrickmapName, sbm);
+
+	// Instance-bricks SSBO — one entry per (instance, world-brick) pair.
+	// Drives the shadow_foliage_write compute's dispatch shape.
+	const uint32_t instanceBrickUpper = std::max<uint32_t>(
+		ShadowBrickmap::UpperBoundInstanceBricks(
+			std::max(1u, m_foliage_instance_count), m_foliage_size),
+		1u);
+	m_instance_brick_capacity = std::max<uint32_t>(
+		instanceBrickUpper,
+		static_cast<uint32_t>(m_pending_instance_bricks.size()));
+	BufferDesc ibb{};
+	ibb.size     = sizeof(ShadowBrickmap::InstanceBrick) *
+	               std::max<uint32_t>(m_instance_brick_capacity, 1u);
+	ibb.usage    = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	ibb.lifetime = Lifetime::Persistent;
+	m_instance_bricks_buffer = graph.CreateBuffer(kInstanceBricksName, ibb);
 
 	// ---- UBOs (per frame in flight) ----
 	m_meta_ubo_buffers.assign(ctx.maxFramesInFlight, nullptr);
@@ -277,7 +307,7 @@ void CombinedRenderer::RegisterPasses(
 		 .BindGraphStorageBuffer(1, m_foliage_bitmask_buffer);
 	m_compute_bindings->Build();
 
-	graph.AddComputePass(kComputePassName)
+	graph.AddComputePass(kFoliageGenPassName)
 		.Write(m_foliage_volume,         ResourceUsage::StorageWrite)
 		.Write(m_foliage_bitmask_buffer, ResourceUsage::StorageWrite)
 		.SetPipeline([this]() {
@@ -310,6 +340,110 @@ void CombinedRenderer::RegisterPasses(
 				cdiv(m_foliage_size.z * m_foliage_frame_count, 4));
 		})
 		.SetBindings(m_compute_bindings);
+
+	// ---- Shadow foliage write compute pass ----
+	//
+	// Each frame: clear the shadow brickmap's dynamic pool, then dispatch
+	// one workgroup per (instance, world-brick) entry. Each workgroup is
+	// 8x8x8 = 512 threads (one per voxel inside the brick); threads atomicOr
+	// foliage occupancy bits into the dynamic pool from the asset bitmask
+	// the previous compute pass just wrote. See docs/SHADOW-BRICKS.md §5.2.
+	m_shadow_write_bindings = std::make_shared<BindingTable>(m_device, 1);
+	m_shadow_write_bindings
+		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		 .AddBinding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		 .AddBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		 .AddBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT)
+		 .BindGraphStorageBuffer(0, m_shadow_buffer)
+		 .BindGraphStorageBuffer(1, m_instance_bricks_buffer)
+		 .BindGraphStorageBuffer(2, m_foliage_instance_buffer)
+		 .BindGraphStorageBuffer(3, m_foliage_bitmask_buffer);
+	m_shadow_write_bindings->Build();
+
+	graph.AddComputePass(kShadowWritePassName)
+		// Read the asset bitmask the foliage-generate pass just produced.
+		.Read(m_foliage_bitmask_buffer,  ResourceUsage::StorageRead)
+		.Read(m_foliage_instance_buffer, ResourceUsage::StorageRead)
+		.Read(m_instance_bricks_buffer,  ResourceUsage::StorageRead)
+		// Write the shadow brickmap's dynamic pool. Declared as
+		// StorageWrite even though the dynamic pool is also TRANSFER_WRITE
+		// inside the body — the graph's pre-pass barrier transitions to
+		// STORAGE_WRITE; an internal barrier inside SetRecord handles the
+		// fill→dispatch handoff.
+		.Write(m_shadow_buffer,          ResourceUsage::StorageWrite)
+		.SetPipeline([this]() {
+			ComputePipelineDesc d;
+			d.compSpvPath = std::string(config::SHADER_DIR) + "/shadow_foliage_write.comp.spv";
+			d.descriptorSetLayout = m_shadow_write_bindings->GetLayout();
+			VkPushConstantRange r{};
+			r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			r.offset     = 0;
+			r.size       = sizeof(ShadowWritePC);
+			d.pushConstantRanges = { r };
+			return d;
+		})
+		.SetRecord([this](PassContext& pctx) {
+			// Nothing to write — no foliage placed, or topology hasn't
+			// emitted any instance-brick entries. The graph zero-allocates
+			// the buffer, so leaving the dynamic pool untouched is safe.
+			if (m_pending_instance_brick_count == 0 ||
+			    m_foliage_instance_count == 0 ||
+			    m_shadow_dynamic_pool_size_bytes == 0) {
+				return;
+			}
+
+			auto vk_cmd = pctx.cmd->Get();
+			VkBuffer shadowBuf = m_graph->GetVkBuffer(m_shadow_buffer);
+
+			// 1. Clear the dynamic pool. vkCmdFillBuffer writes the 32-bit
+			// pattern (0u) — std430 layout means one bit-pool word per
+			// uint32, so 0 == "no bits set" exactly.
+			vkCmdFillBuffer(vk_cmd, shadowBuf,
+				m_shadow_dynamic_pool_offset_bytes,
+				m_shadow_dynamic_pool_size_bytes,
+				0u);
+
+			// 2. Barrier: fill (TRANSFER_WRITE) → dispatch (SHADER access).
+			// The graph's pre-pass barrier already transitioned the buffer
+			// to STORAGE_WRITE; this one fences the in-pass fill against
+			// the in-pass dispatch.
+			VkBufferMemoryBarrier bar{};
+			bar.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+			bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			bar.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+			bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bar.buffer = shadowBuf;
+			bar.offset = m_shadow_dynamic_pool_offset_bytes;
+			bar.size   = m_shadow_dynamic_pool_size_bytes;
+			vkCmdPipelineBarrier(vk_cmd,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0,
+				0, nullptr,
+				1, &bar,
+				0, nullptr);
+
+			// 3. Dispatch — one workgroup per (instance, brick) entry,
+			// 8×8×8 threads per workgroup (one per voxel in the brick).
+			pctx.cmd->CmdBindComputePipeline(pctx.computePipeline);
+			pctx.cmd->CmdBindComputeDescriptorSets(pctx.computePipeline->GetLayout(),
+				{ m_shadow_write_bindings->GetSet(0)->Get() });
+
+			ShadowWritePC pc{};
+			pc.assetSizeX = static_cast<int32_t>(m_foliage_size.x);
+			pc.assetSizeY = static_cast<int32_t>(m_foliage_size.y);
+			pc.assetSizeZ = static_cast<int32_t>(m_foliage_size.z);
+			pc.frameCount = static_cast<int32_t>(m_foliage_frame_count);
+			const auto now = std::chrono::steady_clock::now();
+			pc.time       = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+			pc.numXWords  = static_cast<int32_t>(BitmaskXWords(m_foliage_size.x));
+			vkCmdPushConstants(vk_cmd, pctx.computePipeline->GetLayout(),
+				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+			pctx.cmd->CmdDispatch(m_pending_instance_brick_count, 1, 1);
+		})
+		.SetBindings(m_shadow_write_bindings);
 
 	// ---- Sky pre-pass ----
 	m_sky_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
@@ -345,30 +479,21 @@ void CombinedRenderer::RegisterPasses(
 
 	// ---- Terrain trace pass ----
 	// Bindings (mirrors combined_terrain_trace.frag):
-	//   0 — terrain brickmap (SSBO)
-	//   1 — palette (combined image sampler)
+	//   0 — terrain palette brickmap (SSBO, primary trace only)
+	//   1 — palette texture
 	//   2 — frame UBO
-	//   3 — foliage meta UBO  (substrate.glsl reads meta.size/frameCount)
-	//   4 — foliage instance SSBO  (substrate.glsl reads ib.instances)
-	//   5 — substrate SSBO
-	//   6 — foliage bitmask SSBO
+	//   3 — shadow occupancy brickmap (SSBO, shadow trace only)
 	m_terrain_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
 	m_terrain_bindings
 		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
+		 .AddBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .BindGraphStorageBuffer(0, m_terrain_buffer)
 		 .BindExternalSampledImage(1, m_palette->GetImageView(), m_palette->GetSampler(),
 		                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 		 .BindUniformBufferPerFrame(2, m_frame_ubo_buffers, sizeof(CombinedFrameUbo))
-		 .BindUniformBufferPerFrame(3, m_meta_ubo_buffers, sizeof(VolumeMetaUbo))
-		 .BindGraphStorageBuffer(4, m_foliage_instance_buffer)
-		 .BindGraphStorageBuffer(5, m_substrate_buffer)
-		 .BindGraphStorageBuffer(6, m_foliage_bitmask_buffer);
+		 .BindGraphStorageBuffer(3, m_shadow_buffer);
 	m_terrain_bindings->Build();
 
 	auto& terrainPass = graph.AddGraphicsPass(kTerrainPassName);
@@ -376,10 +501,8 @@ void CombinedRenderer::RegisterPasses(
 		.SetColorAttachment(targets.color, LoadOp::Load, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::Store)
 		.SetResolveTarget(targets.resolve)
-		.Read(m_terrain_buffer,          ResourceUsage::StorageRead)
-		.Read(m_foliage_instance_buffer, ResourceUsage::StorageRead)
-		.Read(m_substrate_buffer,        ResourceUsage::StorageRead)
-		.Read(m_foliage_bitmask_buffer,  ResourceUsage::StorageRead)
+		.Read(m_terrain_buffer,  ResourceUsage::StorageRead)
+		.Read(m_shadow_buffer,   ResourceUsage::StorageRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/brickmap_palette_trace.vert.spv";
@@ -408,8 +531,7 @@ void CombinedRenderer::RegisterPasses(
 				pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
 			TerrainTracePC pc{};
-			pc.ndcToWorld         = m_camera->GetNDCtoWorldMatrix();
-			pc.terrainOriginVoxel = m_terrain_brickmap.originVoxel;
+			pc.ndcToWorld = m_camera->GetNDCtoWorldMatrix();
 			vkCmdPushConstants(vk_cmd, pctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
@@ -419,14 +541,12 @@ void CombinedRenderer::RegisterPasses(
 
 	// ---- Foliage trace pass ----
 	// Bindings (mirrors combined_foliage_trace.frag):
-	//   0 — foliage instance SSBO
+	//   0 — foliage instance SSBO  (vertex shader; primary trace)
 	//   1 — foliage volume sampler3D
 	//   2 — palette
-	//   3 — meta UBO
+	//   3 — foliage meta UBO
 	//   4 — frame UBO
-	//   6 — substrate SSBO       (slot 5 vacant — historical layout)
-	//   7 — foliage bitmask SSBO
-	//   8 — terrain brickmap SSBO  (NEW: substrate.glsl's terrain check)
+	//   5 — shadow occupancy brickmap (SSBO, shadow trace only)
 	m_foliage_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
 	m_foliage_bindings
 		->AddBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -434,18 +554,14 @@ void CombinedRenderer::RegisterPasses(
 		 .AddBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .AddBinding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
-		 .AddBinding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
+		 .AddBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .BindGraphStorageBuffer(0, m_foliage_instance_buffer)
 		 .BindGraphSampledImage(1, m_foliage_volume, m_volume_sampler)
 		 .BindExternalSampledImage(2, m_palette->GetImageView(), m_palette->GetSampler(),
 		                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 		 .BindUniformBufferPerFrame(3, m_meta_ubo_buffers, sizeof(VolumeMetaUbo))
 		 .BindUniformBufferPerFrame(4, m_frame_ubo_buffers, sizeof(CombinedFrameUbo))
-		 .BindGraphStorageBuffer(6, m_substrate_buffer)
-		 .BindGraphStorageBuffer(7, m_foliage_bitmask_buffer)
-		 .BindGraphStorageBuffer(8, m_terrain_buffer);
+		 .BindGraphStorageBuffer(5, m_shadow_buffer);
 	m_foliage_bindings->Build();
 
 	auto& foliagePass = graph.AddGraphicsPass(kFoliagePassName);
@@ -453,11 +569,9 @@ void CombinedRenderer::RegisterPasses(
 		.SetColorAttachment(targets.color, LoadOp::Load, StoreOp::Store, 0, 0, 0, 1)
 		.SetDepthAttachment(targets.depth, LoadOp::Load, StoreOp::Store)
 		.SetResolveTarget(targets.resolve)
-		.Read(m_foliage_volume,         ResourceUsage::SampledRead)
-		.Read(m_foliage_instance_buffer,ResourceUsage::StorageRead)
-		.Read(m_substrate_buffer,       ResourceUsage::StorageRead)
-		.Read(m_foliage_bitmask_buffer, ResourceUsage::StorageRead)
-		.Read(m_terrain_buffer,         ResourceUsage::StorageRead)
+		.Read(m_foliage_volume,          ResourceUsage::SampledRead)
+		.Read(m_foliage_instance_buffer, ResourceUsage::StorageRead)
+		.Read(m_shadow_buffer,           ResourceUsage::StorageRead)
 		.SetPipeline([this]() {
 			GraphicsPipelineDesc d{};
 			d.vertSpvPath = std::string(config::SHADER_DIR) + "/instanced_voxel.vert.spv";
@@ -504,18 +618,20 @@ void CombinedRenderer::RegisterPasses(
 		.SetBindings(m_foliage_bindings);
 
 	// Every graph rebuild re-allocates the persistent buffers with
-	// uninitialized content, so we must re-stage the terrain + foliage uploads
-	// every time. The pending-data vectors are still valid from the most
-	// recent BakeIslandNow / RebuildFoliagePlacement call.
+	// uninitialized content, so we must re-stage the terrain + foliage +
+	// shadow brickmap uploads every time.
 	m_terrain_pending_upload = !m_terrain_brickmap.data.empty();
-	m_foliage_pending_upload = !m_pending_substrate_data.empty();
+	m_foliage_pending_upload = !m_pending_instance_bytes.empty();
+	m_shadow_pending_upload  = !m_pending_shadow_data.empty();
 
-	logger->info("CombinedRenderer: registered with terrain {}x{}x{} (anchor {},{},{}), foliage instances={}, substrate {} words ({} KB)",
+	logger->info("CombinedRenderer: registered terrain {}x{}x{} (anchor {},{},{}), foliage={} instances, "
+	             "shadow brickmap {} words ({:.2f} MB), {} instance-bricks",
 		m_terrain_brickmap.volumeSize.x, m_terrain_brickmap.volumeSize.y, m_terrain_brickmap.volumeSize.z,
 		m_terrain_brickmap.originVoxel.x, m_terrain_brickmap.originVoxel.y, m_terrain_brickmap.originVoxel.z,
 		m_foliage_instance_count,
-		m_pending_substrate_data.size(),
-		(m_pending_substrate_data.size() * sizeof(uint32_t)) / 1024);
+		m_pending_shadow_data.size(),
+		(m_pending_shadow_data.size() * sizeof(uint32_t)) / (1024.0 * 1024.0),
+		m_pending_instance_bricks.size());
 }
 
 void CombinedRenderer::OnPostCompile(RenderGraph& graph) {
@@ -545,13 +661,29 @@ void CombinedRenderer::OnPostCompile(RenderGraph& graph) {
 			                       m_pending_instance_bytes.size(),
 			                       m_graphics_pool);
 		}
-		if (!m_pending_substrate_data.empty()) {
-			graph.UploadBufferData(m_substrate_buffer,
-			                       m_pending_substrate_data.data(),
-			                       m_pending_substrate_data.size() * sizeof(uint32_t),
+		m_foliage_pending_upload = false;
+	}
+
+	if (m_shadow_pending_upload && m_graphics_pool && !m_pending_shadow_data.empty()) {
+		graph.UploadBufferData(m_shadow_buffer,
+		                       m_pending_shadow_data.data(),
+		                       m_pending_shadow_data.size() * sizeof(uint32_t),
+		                       m_graphics_pool);
+
+		if (!m_pending_instance_bricks.empty()) {
+			graph.UploadBufferData(m_instance_bricks_buffer,
+			                       m_pending_instance_bricks.data(),
+			                       m_pending_instance_bricks.size() *
+			                           sizeof(ShadowBrickmap::InstanceBrick),
 			                       m_graphics_pool);
 		}
-		m_foliage_pending_upload = false;
+		m_pending_instance_brick_count = static_cast<uint32_t>(m_pending_instance_bricks.size());
+		m_shadow_pending_upload = false;
+
+		spdlog::get("Render")->info(
+			"CombinedRenderer: uploaded shadow brickmap ({:.2f} MB), {} instance-bricks",
+			m_pending_shadow_data.size() * sizeof(uint32_t) / (1024.0 * 1024.0),
+			m_pending_instance_bricks.size());
 	}
 }
 
@@ -687,37 +819,73 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 		logger->warn("CombinedRenderer: foliage placement produced 0 instances "
 		             "(no terrain columns above seaLevel + margin). Check terrain config.");
 		m_pending_instance_bytes.clear();
-		m_pending_substrate_data.clear();
-		m_foliage_pending_upload = true;  // still upload empties so prior state doesn't linger
+		m_foliage_pending_upload = true;
+		RebuildShadowBrickmap();         // terrain-only shadow brickmap
 		return;
 	}
 
-	// Build the substrate from the placed instances.
-	std::vector<Substrate::InstanceInput> substrateInputs;
-	substrateInputs.reserve(instances.size());
-	for (const auto& gi : instances) {
-		Substrate::InstanceInput in;
-		in.cloudVoxelPos = glm::ivec3(glm::round(gi.position));
-		in.yawIdx        = static_cast<uint8_t>(gi.yawIdx & 0x3);
-		substrateInputs.push_back(in);
-	}
-	auto build = Substrate::BuildFoliage(
-		substrateInputs.data(),
-		static_cast<uint32_t>(substrateInputs.size()),
-		m_foliage_size);
-
-	// Stash bytes for OnPostCompile to upload. We hold raw bytes (not the
-	// typed GpuInstance vector) so the header doesn't have to surface the
-	// std430 layout — instances live entirely inside the .cpp.
+	// Stash GpuInstance bytes for OnPostCompile to upload. Holding raw bytes
+	// (not the typed vector) keeps the header from having to surface the
+	// std430 layout.
 	m_pending_instance_bytes.resize(instances.size() * sizeof(GpuInstance));
 	std::memcpy(m_pending_instance_bytes.data(),
 	            instances.data(),
 	            m_pending_instance_bytes.size());
-	m_pending_substrate_data = std::move(build.data);
 	m_foliage_pending_upload = true;
 
-	logger->info("CombinedRenderer: placed {} foliage instances (grid {}×{} pitch {} voxels), substrate {} words",
-		m_foliage_instance_count, gridDim, gridDim, pitch, m_pending_substrate_data.size());
+	// Rebuild the shadow brickmap. Topology = terrain bricks ∪ instance
+	// max-AABB bricks; static pool = terrain bits; dynamic pool starts
+	// zero (shadow_foliage_write fills it per frame).
+	RebuildShadowBrickmap();
+
+	logger->info("CombinedRenderer: placed {} foliage instances (grid {}×{} pitch {} voxels)",
+		m_foliage_instance_count, gridDim, gridDim, pitch);
+}
+
+void CombinedRenderer::RebuildShadowBrickmap() {
+	auto logger = spdlog::get("Render");
+
+	// Pull instance inputs out of m_pending_instance_bytes if the foliage
+	// placement just ran; otherwise produce a terrain-only brickmap.
+	std::vector<ShadowBrickmap::InstanceInput> sbInputs;
+	const uint32_t instCount = m_foliage_instance_count;
+	if (instCount > 0 && !m_pending_instance_bytes.empty()) {
+		const GpuInstance* gpuInst =
+			reinterpret_cast<const GpuInstance*>(m_pending_instance_bytes.data());
+		sbInputs.reserve(instCount);
+		for (uint32_t i = 0; i < instCount; ++i) {
+			ShadowBrickmap::InstanceInput in{};
+			in.worldVoxelPos = glm::ivec3(glm::round(gpuInst[i].position));
+			in.yawIdx        = static_cast<uint8_t>(gpuInst[i].yawIdx & 0x3);
+			sbInputs.push_back(in);
+		}
+	}
+
+	auto build = ShadowBrickmap::BuildShadowBrickmap(
+		m_terrain_brickmap,
+		sbInputs.data(),
+		static_cast<uint32_t>(sbInputs.size()),
+		m_foliage_size);
+
+	m_pending_shadow_data     = std::move(build.data);
+	m_pending_instance_bricks = std::move(build.instanceBricks);
+	m_shadow_pending_upload   = true;
+
+	const uint64_t dynamicPoolWordOffset = build.dynamicPoolBase;
+	const uint64_t dynamicPoolWordCount  =
+		uint64_t(build.header.brickCount) * BrickGrid::kBitmaskWordsPerBrick;
+	m_shadow_dynamic_pool_offset_bytes = dynamicPoolWordOffset * sizeof(uint32_t);
+	m_shadow_dynamic_pool_size_bytes   = dynamicPoolWordCount  * sizeof(uint32_t);
+
+	if (logger) {
+		logger->info(
+			"CombinedRenderer: built shadow brickmap — gridDim {}×{}×{} ({} bricks), "
+			"static {} words / dynamic {} words, instance-bricks {}",
+			build.header.gridDim.x, build.header.gridDim.y, build.header.gridDim.z,
+			build.header.brickCount,
+			dynamicPoolWordCount, dynamicPoolWordCount,
+			m_pending_instance_bricks.size());
+	}
 }
 
 void CombinedRenderer::WriteFrameUbo(uint32_t frameIndex) {
@@ -753,9 +921,9 @@ void CombinedRenderer::WriteFrameUbo(uint32_t frameIndex) {
 		ubo.shadowsEnabled   = m_shadows_enabled ? 1 : 0;
 	}
 
-	ubo.frameCount         = static_cast<int32_t>(m_foliage_frame_count);
-	ubo.worldVoxelSize     = kWorldVoxelSize;
-	ubo.terrainOriginVoxel = m_terrain_brickmap.originVoxel;
+	ubo.frameCount          = static_cast<int32_t>(m_foliage_frame_count);
+	ubo.worldVoxelSize      = kWorldVoxelSize;
+	ubo.maxShadowBrickSteps = m_max_shadow_brick_steps;
 	const auto now = std::chrono::steady_clock::now();
 	ubo.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
 
@@ -765,6 +933,7 @@ void CombinedRenderer::WriteFrameUbo(uint32_t frameIndex) {
 std::vector<std::string> CombinedRenderer::GetShaderPaths() const {
 	return {
 		std::string(config::SHADER_DIR) + "/instanced_voxel_generate.comp.spv",
+		std::string(config::SHADER_DIR) + "/shadow_foliage_write.comp.spv",
 		std::string(config::SHADER_DIR) + "/instanced_voxel.vert.spv",
 		std::string(config::SHADER_DIR) + "/combined_foliage_trace.frag.spv",
 		std::string(config::SHADER_DIR) + "/brickmap_palette_trace.vert.spv",
@@ -777,10 +946,11 @@ std::vector<std::string> CombinedRenderer::GetShaderPaths() const {
 std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 	if (m_parameters.empty()) {
 		m_parameters.push_back({ "Trace", TechniqueParameter::Header });
-		m_parameters.push_back({ "Animation Speed", TechniqueParameter::Float, &m_animation_speed, 0.0f, 30.0f });
-		m_parameters.push_back({ "Max Iterations",  TechniqueParameter::Int,   &m_max_iterations, 1.0f, 1024.0f });
-		m_parameters.push_back({ "Debug Coloring",  TechniqueParameter::Bool,  &m_debug_color });
-		m_parameters.push_back({ "Enable Shadows",  TechniqueParameter::Bool,  &m_shadows_enabled });
+		m_parameters.push_back({ "Animation Speed",        TechniqueParameter::Float, &m_animation_speed,        0.0f,    30.0f });
+		m_parameters.push_back({ "Max Primary Iterations", TechniqueParameter::Int,   &m_max_iterations,         1.0f,  1024.0f });
+		m_parameters.push_back({ "Max Shadow Brick Steps", TechniqueParameter::Int,   &m_max_shadow_brick_steps, 1.0f,  1024.0f });
+		m_parameters.push_back({ "Debug Coloring",         TechniqueParameter::Bool,  &m_debug_color });
+		m_parameters.push_back({ "Enable Shadows",         TechniqueParameter::Bool,  &m_shadows_enabled });
 
 		m_parameters.push_back({ "Foliage", TechniqueParameter::Header });
 		TechniqueParameter gridDim;
@@ -821,7 +991,8 @@ std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 }
 
 FrameStats CombinedRenderer::GetFrameStats() const {
-	// Sky (1 draw) + terrain (1 fullscreen) + foliage (1 instanced cube).
+	// Graphics draws: sky (1) + terrain (1 fullscreen) + foliage (1 instanced
+	// cube). Compute dispatches happen too but aren't counted in FrameStats.
 	const uint32_t cubeVerts = 36 * m_foliage_instance_count;
 	return { 3, 4 + 4 + cubeVerts, 0 };
 }

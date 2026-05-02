@@ -1,0 +1,143 @@
+#version 450
+
+// Per-frame foliage shadow occupancy write.
+//
+// Dispatch shape: one workgroup per (instance, world-brick) pair the
+// instance's maximal AABB touches. Each workgroup is 8×8×8 = 512 threads —
+// one thread per voxel inside the brick. Each thread:
+//   1. Resolves its world voxel = brickWorldVoxel + localThreadOffset.
+//   2. Maps to an instance-local asset cell (subtract instance position;
+//      apply inverse yaw).
+//   3. If the asset cell is in [0, assetSize) AND the asset bitmask bit is
+//      set for this instance's current animation frame, atomicOrs the
+//      shadow brickmap dynamic-pool bit for (brickId, lx,ly,lz).
+//
+// The dynamic pool is pre-cleared via vkCmdFillBuffer in the host before
+// this dispatch runs, so writes are unconditioned OR-into-zero where bits
+// are set, and untouched (=0) where bits are not set. atomicOr handles
+// brick-overlap between instances — multiple instances may write the same
+// world voxel (rare under the v1 placement, but allowed and correct under
+// any ordering since OR is idempotent).
+//
+// See docs/SHADOW-BRICKS.md §5.2 for the full data flow.
+
+#include "brick_grid.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+// Matches CPU `GpuInstance` in CombinedRenderer.cpp.
+struct InstanceData {
+	vec3  position;       float scale;
+	vec4  rotation;
+	float animOffset;
+	float _pad0;
+	int   yawIdx;
+	float _pad2;
+};
+
+// Matches ShadowBrickmap::InstanceBrick (32-byte std430 layout).
+struct InstanceBrickEntry {
+	uint  instanceIdx;
+	uint  brickId;
+	uint  _pad0;
+	uint  _pad1;
+	ivec3 brickWorldVoxel;
+	int   _pad2;
+};
+
+// 0 — Shadow brickmap (static + dynamic pool). Writes go into dynamic.
+layout(std430, set = 0, binding = 0) buffer ShadowBrickmapBuffer {
+	uint data[];
+} shadowBM;
+
+// 1 — instanceBricks SSBO produced by the host at topology rebuild.
+layout(std430, set = 0, binding = 1) readonly buffer InstanceBrickBuffer {
+	InstanceBrickEntry entries[];
+} ibrick;
+
+// 2 — Foliage instance buffer (same SSBO the trace shaders read).
+layout(std430, set = 0, binding = 2) readonly buffer InstanceBuffer {
+	InstanceData instances[];
+} ibuf;
+
+// 3 — Per-frame asset bitmask. Same SSBO instanced_voxel_generate.comp
+// writes; one bit per (frame, voxel). Layout:
+//   bits[ frame * (numXWords * size.y * size.z)
+//       + z     * (numXWords * size.y)
+//       + y     *  numXWords
+//       + xWord ]
+layout(std430, set = 0, binding = 3) readonly buffer AssetBitmaskBuffer {
+	uint bits[];
+} assetBM;
+
+// Push constant — small per-dispatch state.
+layout(push_constant) uniform PC {
+	ivec3 assetSize;       int frameCount;
+	float time;            int numXWords;
+	int   _pad0;           int _pad1;
+} pc;
+
+// Inverse of the asset→cloud yaw mapping used in
+// Substrate.cpp::InstanceAabb. Yaw ∈ {0°, 90°, 180°, 270°}; integer-exact.
+ivec3 inverseYawCell(int yawIdx, ivec3 cloudCell) {
+	switch (yawIdx & 0x3) {
+		case 0:  return cloudCell;
+		case 1:  return ivec3( cloudCell.y,    -cloudCell.x - 1, cloudCell.z);
+		case 2:  return ivec3(-cloudCell.x - 1, -cloudCell.y - 1, cloudCell.z);
+		default: return ivec3(-cloudCell.y - 1,  cloudCell.x,     cloudCell.z);
+	}
+}
+
+int instanceFrame(float animOffset) {
+	int fc = max(pc.frameCount, 1);
+	int f  = int(floor(mod(pc.time + animOffset, float(fc))));
+	if (f < 0) f += fc;
+	return f;
+}
+
+bool assetBitTest(int frameIdx, ivec3 assetCell) {
+	if (any(lessThan(assetCell, ivec3(0))) ||
+	    any(greaterThanEqual(assetCell, pc.assetSize))) return false;
+	int xWord = assetCell.x >> 5;
+	int xBit  = assetCell.x & 31;
+	int idx = frameIdx     * (pc.numXWords * pc.assetSize.y * pc.assetSize.z)
+	        + assetCell.z  * (pc.numXWords * pc.assetSize.y)
+	        + assetCell.y  *  pc.numXWords
+	        + xWord;
+	uint word = assetBM.bits[idx];
+	return ((word >> uint(xBit)) & 1u) != 0u;
+}
+
+void main() {
+	uint entryIdx = gl_WorkGroupID.x;
+	InstanceBrickEntry ent = ibrick.entries[entryIdx];
+
+	InstanceData inst = ibuf.instances[ent.instanceIdx];
+	int frameIdx      = instanceFrame(inst.animOffset);
+
+	// Local thread → world voxel.
+	ivec3 local      = ivec3(gl_LocalInvocationID);
+	ivec3 worldVoxel = ent.brickWorldVoxel + local;
+
+	// Cloud is anchored at world origin in CombinedRenderer, so cloud-local
+	// voxel == world voxel. Instance-local = cloud-local - instPosition.
+	ivec3 instPos    = ivec3(round(inst.position));
+	ivec3 cloudCell  = worldVoxel - instPos;
+	ivec3 assetCell  = inverseYawCell(inst.yawIdx, cloudCell);
+
+	if (!assetBitTest(frameIdx, assetCell)) return;
+
+	// OR the bit into the dynamic pool. Total brick count lives in
+	// shadowBM.data[7]; the dynamic pool starts after the top grid + the
+	// static pool.
+	uint topCells       = uint(shadowBM.data[0]) * uint(shadowBM.data[1]) * uint(shadowBM.data[2]);
+	uint brickCount     = shadowBM.data[7];
+	uint dynamicPoolBase = kBrickHeaderWords + topCells + brickCount * kBitmaskWordsPerBrick;
+
+	uint bitLinear = brickVoxelLinear(local);
+	uint wordIdx   = bitLinear >> 5;
+	uint bitMask   = 1u << (bitLinear & 31u);
+
+	atomicOr(shadowBM.data[dynamicPoolBase + ent.brickId * kBitmaskWordsPerBrick + wordIdx],
+	         bitMask);
+}
