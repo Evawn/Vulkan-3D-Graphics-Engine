@@ -324,20 +324,12 @@ void main() {
 	float shadow = 1.0;
 	if (frame.shadowsEnabled != 0 && NdotL > 0.0) {
 		// Receiver's own world voxel — exempt from the shadow brickmap test
-		// so the hit face doesn't self-shadow.
+		// so the hit face doesn't self-shadow. The integer-grid skip is the
+		// only self-occlusion guard needed; no bias on hitPos.
 		ivec3 hitWorldVoxel = ivec3(floor(hitPos / g_voxel_world_size));
 
-		// Sub-voxel normal-direction offset to escape numerical precision.
-		// Slope term grows at grazing angles where projection foreshortening
-		// would otherwise stipple. Same constants the foliage shader uses.
-		const float kShadowBiasConstant = 0.002;
-		const float kShadowBiasSlope    = 0.05;
-		float bias = kShadowBiasConstant
-		           + kShadowBiasSlope * (1.0 - clamp(NdotL, 0.0, 1.0));
-		vec3 originBiased = hitPos + normal * bias;
-
 		const float kShadowMaxDist = 64.0;
-		shadow = traceShadowWorld(originBiased, frame.sunDirection,
+		shadow = traceShadowWorld(hitPos, frame.sunDirection,
 		                          kShadowMaxDist, frame.worldVoxelSize,
 		                          hitWorldVoxel);
 	}

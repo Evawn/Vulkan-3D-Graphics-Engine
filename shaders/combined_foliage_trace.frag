@@ -147,17 +147,13 @@ void main() {
 
 	float shadow = 1.0;
 	if (frame.shadowsEnabled != 0) {
-		const float kShadowBiasConstant = 0.002;
-		const float kShadowBiasSlope    = 0.05;
-		float bias = kShadowBiasConstant
-		           + kShadowBiasSlope * (1.0 - clamp(NdotL, 0.0, 1.0));
-		vec3 originBiased     = hitWorld + worldNormal * bias;
 		// Receiver's own WORLD voxel — exempt from the shadow query.
 		// Cloud is anchored at world origin in CombinedRenderer, so cloud-
-		// local voxel == world voxel.
+		// local voxel == world voxel. Integer-grid skip is the only self-
+		// occlusion guard needed; no bias on hitWorld.
 		ivec3 receiverWorldVoxel = ivec3(floor(hitWorld / frame.worldVoxelSize));
 		const float kShadowMaxDist = 64.0;
-		shadow = traceShadowWorld(originBiased, frame.sunDirection,
+		shadow = traceShadowWorld(hitWorld, frame.sunDirection,
 		                          kShadowMaxDist, frame.worldVoxelSize,
 		                          receiverWorldVoxel);
 	}
