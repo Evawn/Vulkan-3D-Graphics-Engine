@@ -146,7 +146,10 @@ private:
 	bool m_shadows_enabled = true;
 	bool m_pending_grid_rebuild = false;
 
-	std::chrono::steady_clock::time_point m_start_time;
+	// Origin for animation time, in seconds, sampled from the technique's
+	// logical-time source on first use. < 0 means "uninitialized". Negative
+	// sentinel matches CombinedRenderer's existing first-use-init pattern.
+	double m_start_time_seconds = -1.0;
 	std::vector<TechniqueParameter>       m_parameters;
 
 	// ---- Helpers ----

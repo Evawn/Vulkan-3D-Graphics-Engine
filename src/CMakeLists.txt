@@ -3,7 +3,7 @@ file(GLOB_RECURSE APP_MM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.mm")
 
 add_executable(VulkanEngine ${APP_SOURCES} ${APP_MM_SOURCES})
 
-target_link_libraries(VulkanEngine PRIVATE VWrap ImGui glfw glm::glm spdlog::spdlog)
+target_link_libraries(VulkanEngine PRIVATE VWrap ImGui glfw glm::glm spdlog::spdlog PkgConfig::FFMPEG)
 if(APPLE)
     target_link_libraries(VulkanEngine PRIVATE "-framework Cocoa" "-framework UniformTypeIdentifiers")
 endif()
@@ -22,6 +22,7 @@ target_include_directories(VulkanEngine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/combined"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor/panels"
+    "${CMAKE_CURRENT_SOURCE_DIR}/capture"
     "${CMAKE_SOURCE_DIR}/dep"
     "${CMAKE_SOURCE_DIR}/lib/VWrap/include"
 )

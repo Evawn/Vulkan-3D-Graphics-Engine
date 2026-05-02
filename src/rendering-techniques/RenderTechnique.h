@@ -4,6 +4,7 @@
 #include <vector>
 #include <functional>
 #include <memory>
+#include <chrono>
 #include <vulkan/vulkan.h>
 #include "Device.h"
 #include "Allocator.h"
@@ -113,8 +114,29 @@ public:
 	void SetEventSink(std::function<void(AppEvent)> sink) { m_eventSink = std::move(sink); }
 	virtual void Reload(const RenderContext& ctx) { (void)ctx; }
 
+	// ---- Logical time source ----
+	// Set by RenderingSystem from CaptureSystem::GetLogicalTimeSeconds. When a
+	// FixedStep-paced recording is active this advances by 1/fps per captured
+	// frame; otherwise it's wall-clock time since process start. Techniques
+	// driving animation should call GetTimeSeconds() rather than reading
+	// std::chrono::steady_clock::now() directly so FixedStep recordings produce
+	// smooth-motion video regardless of how slow the engine renders. When no
+	// provider is set, GetTimeSeconds() falls back to wall-clock so tests /
+	// stand-alone uses keep working.
+	void   SetTimeProvider(std::function<double()> provider) { m_timeProvider = std::move(provider); }
+	double GetTimeSeconds() const {
+		if (m_timeProvider) return m_timeProvider();
+		const auto wall = std::chrono::steady_clock::now() - m_fallbackEpoch;
+		return std::chrono::duration<double>(wall).count();
+	}
+
 protected:
 	// Push events back to the application — request reload, request rebuild,
 	// request pipeline recreate, etc. Set once by Application after construction.
 	std::function<void(AppEvent)> m_eventSink;
+
+	// Logical-time hook + per-instance fallback origin (only used when no
+	// provider is wired — keeps the no-config path useful).
+	std::function<double()> m_timeProvider;
+	std::chrono::steady_clock::time_point m_fallbackEpoch = std::chrono::steady_clock::now();
 };

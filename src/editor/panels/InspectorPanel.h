@@ -12,6 +12,7 @@
 
 class PostProcessChain;
 class SceneNode;
+namespace Capture { class CaptureSystem; }
 
 class InspectorPanel {
 private:
@@ -26,9 +27,15 @@ private:
 	float* m_sensitivity = nullptr;
 	float* m_speed = nullptr;
 
-	// Screenshot
-	std::function<void()> m_screenshot_callback;
-	std::string m_last_screenshot_path;
+	// Capture (screenshots + MP4 recording). Live status comes from the
+	// CaptureSystem pointer; the toggle callback fans out to the rendering
+	// event queue so the actual ToggleRecording runs at the start of the
+	// next frame's drain (consistent with screenshot dispatch).
+	std::function<void()>   m_screenshot_callback;
+	std::function<void()>   m_toggle_recording_callback;
+	std::string             m_last_screenshot_path;
+	std::string             m_last_recording_path;
+	Capture::CaptureSystem* m_capture = nullptr;
 
 	// Lighting + sky + post-processing (Scene-owned; panel just edits them)
 	SceneLighting*    m_lighting = nullptr;
@@ -42,7 +49,10 @@ public:
 	void SetCamera(std::shared_ptr<Camera> camera) { m_camera = camera; }
 	void SetAppControls(float* sensitivity, float* speed) { m_sensitivity = sensitivity; m_speed = speed; }
 	void SetScreenshotCallback(std::function<void()> cb) { m_screenshot_callback = std::move(cb); }
+	void SetToggleRecordingCallback(std::function<void()> cb) { m_toggle_recording_callback = std::move(cb); }
 	void SetLastScreenshotPath(const std::string& path) { m_last_screenshot_path = path; }
+	void SetLastRecordingPath (const std::string& path) { m_last_recording_path  = path; }
+	void SetCaptureSystem(Capture::CaptureSystem* capture) { m_capture = capture; }
 	void SetLighting(SceneLighting* lighting) { m_lighting = lighting; }
 	void SetSky(SkyDescription* sky)          { m_sky = sky; }
 	void SetPostProcess(PostProcessChain* chain) { m_post_process = chain; }
@@ -56,6 +66,7 @@ public:
 	void RequestReload() { if (m_reload_callback) m_reload_callback(); }
 	void RequestSwitchTechnique(size_t idx) { if (m_switch_callback) m_switch_callback(idx); }
 	void RequestScreenshot() { if (m_screenshot_callback) m_screenshot_callback(); }
+	void RequestToggleRecording() { if (m_toggle_recording_callback) m_toggle_recording_callback(); }
 
 	void Draw();
 

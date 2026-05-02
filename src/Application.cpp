@@ -62,6 +62,9 @@ void Application::Init() {
 	m_rendering.SetOnScreenshotSaved([this](const std::string& path) {
 		m_editor.SetLastScreenshotPath(path);
 	});
+	m_rendering.SetOnRecordingSaved([this](const std::string& path) {
+		m_editor.SetLastRecordingPath(path);
+	});
 
 	m_rendering.BuildInitialGraph();
 
@@ -81,6 +84,16 @@ void Application::Init() {
 	});
 	m_camera_controller->SetFocusChangedCallback([this](bool focused) {
 		m_editor.GetState()->camera_focused = focused;
+	});
+	// Capture hotkeys ride the same input controller because it's already the
+	// engine's main input context (F5 reload, F11 fullscreen, F viewport-only).
+	// P toggles recording, F12 takes a screenshot — both fan out through the
+	// rendering event queue to keep ordering with menu-driven invocations.
+	m_camera_controller->SetToggleRecordingCallback([this] {
+		m_rendering.RequestToggleRecording();
+	});
+	m_camera_controller->SetTakeScreenshotCallback([this] {
+		m_rendering.RequestScreenshot();
 	});
 
 	// Inspector asset-name resolution for SceneNode component rows. Set before
@@ -102,6 +115,10 @@ void Application::Init() {
 	m_editor.SetReloadCallback    ([this] { m_rendering.RequestReload(); });
 	m_editor.SetSwitchCallback    ([this](size_t idx) { m_rendering.RequestSwitchTechnique(idx); });
 	m_editor.SetScreenshotCallback([this] { m_rendering.RequestScreenshot(); });
+	m_editor.SetToggleRecordingCallback([this] { m_rendering.RequestToggleRecording(); });
+
+	// Editor reads capture state directly (live status for the indicator + UI footer).
+	m_editor.SetCaptureSystem(&m_rendering.GetCapture());
 
 	m_state = AppState::Running;
 }

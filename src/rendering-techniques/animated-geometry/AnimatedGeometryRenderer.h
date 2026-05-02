@@ -55,7 +55,7 @@ private:
 	int m_max_iterations = 250;
 	bool m_debug_color = false;
 	float m_time_scale = 1.0f;
-	std::chrono::steady_clock::time_point m_start_time;
+	double m_start_time_seconds = -1.0;
 
 	glm::uvec3 m_volume_size = glm::uvec3(128, 128, 128);
 

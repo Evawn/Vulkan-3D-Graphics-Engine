@@ -51,7 +51,7 @@ private:
 	int m_max_iterations = 250;
 	bool m_debug_color = false;
 	float m_time_scale = 1.0f;
-	std::chrono::steady_clock::time_point m_start_time;
+	double m_start_time_seconds = -1.0;
 
 	// Volume source — picks which content-producer fills the voxel asset.
 	// The Source dropdown drives a rebuild of m_parameters so only the relevant

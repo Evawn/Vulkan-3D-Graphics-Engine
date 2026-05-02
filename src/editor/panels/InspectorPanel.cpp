@@ -3,6 +3,9 @@
 #include "FileDialog.h"
 #include "post-process/PostProcessChain.h"
 #include "Scene.h"
+#include "CaptureSystem.h"
+
+#include <cstdio>
 
 void InspectorPanel::SetRenderers(
 	std::vector<std::unique_ptr<RenderTechnique>>* renderers,
@@ -230,13 +233,98 @@ void InspectorPanel::Draw() {
 			}
 		}
 
-		UIStyle::SectionHeader("Capture");
-		if (ImGui::Button("Screenshot (F12)")) {
+		ImGui::EndTabItem();
+	}
+
+	// === Capture tab — screenshots + MP4 recording ===
+	// Owns its own state (callbacks, last paths) and reads live recording
+	// status from the CaptureSystem pointer set by Application. Recording
+	// settings (pacing, back-pressure, duration cap, fps, bitrate) edit the
+	// CaptureSystem's options directly via reference — no per-knob plumbing.
+	if (ImGui::BeginTabItem("Capture")) {
+		// --- Screenshot ---
+		UIStyle::SectionHeader("Screenshot");
+		if (ImGui::Button("Take Screenshot (F12)")) {
 			if (m_screenshot_callback) m_screenshot_callback();
 		}
 		if (!m_last_screenshot_path.empty()) {
 			ImGui::TextColored(UIStyle::kTextDim, "%s", m_last_screenshot_path.c_str());
 		}
+
+		// --- Recording ---
+		UIStyle::SectionHeader("Recording");
+
+		const bool recording = m_capture && m_capture->IsRecording();
+		Capture::RecordingStatus status = m_capture ? m_capture->GetStatus()
+		                                            : Capture::RecordingStatus{};
+
+		// Toggle button — flips label and color based on state. We re-route
+		// through the rendering event queue (callback set by Application) so
+		// the actual ToggleRecording runs on the same drain pass as other
+		// AppEvents — keeps lifecycle ordering consistent across the engine.
+		const char* btnLabel = recording ? "Stop Recording (P)" : "Start Recording (P)";
+		ImVec4 btnColor = recording ? UIStyle::kBudgetOver : UIStyle::kAccent;
+		ImGui::PushStyleColor(ImGuiCol_Button, btnColor);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, UIStyle::Lighten(btnColor, 1.15f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive,  UIStyle::Darken(btnColor, 0.85f));
+		if (ImGui::Button(btnLabel, ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+			if (m_toggle_recording_callback) m_toggle_recording_callback();
+		}
+		ImGui::PopStyleColor(3);
+
+		// Live readout when recording. Cap is read off the live options so
+		// changing it mid-recording reflects immediately in the timer label
+		// (the actual cap enforcement is on the CaptureSystem side).
+		if (recording && m_capture) {
+			const int cap = m_capture->GetOptions().maxDurationSeconds;
+			char tbuf[64];
+			std::snprintf(tbuf, sizeof(tbuf), "%02d:%02d / %02d:%02d",
+				static_cast<int>(status.elapsedSeconds) / 60,
+				static_cast<int>(status.elapsedSeconds) % 60,
+				cap / 60, cap % 60);
+			ImGui::TextColored(UIStyle::kAccent, "REC  %s", tbuf);
+
+			char fbuf[96];
+			std::snprintf(fbuf, sizeof(fbuf), "%u captured  %u dropped",
+				status.framesCaptured, status.framesDropped);
+			ImGui::TextColored(UIStyle::kTextDim, "%s", fbuf);
+		}
+		if (!m_last_recording_path.empty()) {
+			ImGui::TextColored(UIStyle::kTextDim, "Last: %s", m_last_recording_path.c_str());
+		}
+
+		// --- Settings ---
+		// Disabled while recording so we don't churn encoder state mid-take.
+		// (Pacing / fps / bitrate would need a re-Open of the encoder.)
+		UIStyle::SectionHeader("Settings");
+		if (m_capture) {
+			auto& opts = m_capture->GetOptions();
+			const bool live = recording;
+			if (live) ImGui::BeginDisabled();
+
+			// Pacing radios
+			ImGui::TextColored(UIStyle::kTextDim, "Pacing");
+			int pacing = static_cast<int>(opts.pacing);
+			ImGui::RadioButton("Real-time##pacing",  &pacing, static_cast<int>(Capture::Pacing::RealTime));
+			ImGui::SameLine();
+			ImGui::RadioButton("Fixed-step##pacing", &pacing, static_cast<int>(Capture::Pacing::FixedStep));
+			opts.pacing = static_cast<Capture::Pacing>(pacing);
+
+			// Back-pressure radios — independent of pacing for A/B testing.
+			ImGui::TextColored(UIStyle::kTextDim, "Back-pressure");
+			int bp = static_cast<int>(opts.backPressure);
+			ImGui::RadioButton("Drop##bp",  &bp, static_cast<int>(Capture::BackPressure::Drop));
+			ImGui::SameLine();
+			ImGui::RadioButton("Block##bp", &bp, static_cast<int>(Capture::BackPressure::Block));
+			opts.backPressure = static_cast<Capture::BackPressure>(bp);
+
+			ImGui::SliderInt("Max Duration (s)", &opts.maxDurationSeconds, 5, 60);
+			ImGui::SliderInt("Target FPS",       &opts.targetFps,           24, 120);
+			ImGui::SliderInt("Bitrate (kbps)",   &opts.bitrateKbps,        500, 40000);
+
+			if (live) ImGui::EndDisabled();
+		}
+
 		ImGui::EndTabItem();
 	}
 

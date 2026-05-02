@@ -5,6 +5,8 @@
 #include <vulkan/vulkan.h>
 #include <string>
 
+namespace Capture { class CaptureSystem; }
+
 class ViewportPanel {
 private:
 	VkDescriptorSet m_texture_id = VK_NULL_HANDLE;
@@ -27,6 +29,11 @@ private:
 	float m_hud_ms  = 0.0f;
 	std::string m_hud_technique;
 
+	// Optional capture-system pointer. When non-null and recording is active,
+	// the viewport draws a red outline (replaces the green focus outline,
+	// since recording-state matters more than focus-state to the user).
+	Capture::CaptureSystem* m_capture = nullptr;
+
 public:
 	void SetTextureID(VkDescriptorSet texID) { m_texture_id = texID; }
 	void SetUIState(UIState* ui) { m_ui = ui; }
@@ -36,6 +43,7 @@ public:
 		m_hud_ms = ms;
 		m_hud_technique = technique;
 	}
+	void SetCaptureSystem(Capture::CaptureSystem* capture) { m_capture = capture; }
 	void Draw();
 
 	bool IsFocused() const { return m_focused; }

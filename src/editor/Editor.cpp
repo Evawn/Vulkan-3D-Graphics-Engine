@@ -139,6 +139,11 @@ void Editor::UpdateViewportTexture() {
 void Editor::SetReloadCallback(std::function<void()> cb)     { m_inspector.SetReloadCallback(std::move(cb)); }
 void Editor::SetSwitchCallback(std::function<void(size_t)> cb) { m_inspector.SetSwitchCallback(std::move(cb)); }
 void Editor::SetScreenshotCallback(std::function<void()> cb) { m_inspector.SetScreenshotCallback(std::move(cb)); }
+void Editor::SetToggleRecordingCallback(std::function<void()> cb) { m_inspector.SetToggleRecordingCallback(std::move(cb)); }
+void Editor::SetCaptureSystem(Capture::CaptureSystem* capture) {
+	m_inspector.SetCaptureSystem(capture);
+	m_viewport.SetCaptureSystem(capture);
+}
 
 bool Editor::ViewportWasResized() const {
 	return const_cast<ViewportPanel&>(m_viewport).WasResized();
@@ -184,6 +189,10 @@ void Editor::UpdateMetrics(float fps, float gpuMs, float frameMs) {
 
 void Editor::SetLastScreenshotPath(const std::string& path) {
 	m_inspector.SetLastScreenshotPath(path);
+}
+
+void Editor::SetLastRecordingPath(const std::string& path) {
+	m_inspector.SetLastRecordingPath(path);
 }
 
 void Editor::SetGraphSnapshot(const GraphSnapshot* snapshot) {

@@ -16,7 +16,9 @@ std::shared_ptr<CameraController> CameraController::Create(std::shared_ptr<Camer
 			{{GLFW_KEY_LEFT_SHIFT, KeyState::DOWN}, (int)Action::MOVE_DOWN},
 			{{GLFW_KEY_F5, KeyState::PRESSED}, (int)Action::RELOAD_SHADERS},
 			{{GLFW_KEY_F, KeyState::PRESSED}, (int)Action::TOGGLE_VIEWPORT_ONLY},
-			{{GLFW_KEY_F11, KeyState::PRESSED}, (int)Action::TOGGLE_OS_FULLSCREEN}
+			{{GLFW_KEY_F11, KeyState::PRESSED}, (int)Action::TOGGLE_OS_FULLSCREEN},
+			{{GLFW_KEY_P,   KeyState::PRESSED}, (int)Action::TOGGLE_RECORDING},
+			{{GLFW_KEY_F12, KeyState::PRESSED}, (int)Action::TAKE_SCREENSHOT}
 		}
 	};
 	Input::AddContext(ret->m_context);
@@ -83,8 +85,18 @@ void CameraController::ParseInput(const InputQuery& query) {
 		case Action::TOGGLE_OS_FULLSCREEN:
 			if (m_toggle_fullscreen) m_toggle_fullscreen();
 			break;
+		case Action::TOGGLE_RECORDING:
+			if (m_toggle_recording) m_toggle_recording();
+			break;
+		case Action::TAKE_SCREENSHOT:
+			if (m_take_screenshot) m_take_screenshot();
+			break;
 		default:
-			return;
+			// Silently ignore actions from other input contexts. Previously this
+			// `return`'d and dropped every subsequent action in the query — which
+			// broke any second context (capture, debug, etc.) sharing the input
+			// system with this one.
+			break;
 		}
 	}
 }

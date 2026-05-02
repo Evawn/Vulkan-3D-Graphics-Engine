@@ -12,6 +12,17 @@ if(NOT Vulkan_GLSLC_EXECUTABLE)
     message(FATAL_ERROR "glslc not found. Install the full Vulkan SDK (not just headers).")
 endif()
 
+# --- FFmpeg (MP4 video recording in src/capture) ---
+# Located via pkg-config so we pick up Homebrew's libs on macOS without hardcoding paths.
+# Required: libavcodec / libavformat / libavutil / libswscale.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavcodec
+    libavformat
+    libavutil
+    libswscale
+)
+
 # --- Fetch dependencies ---
 include(FetchContent)
 

@@ -59,7 +59,7 @@ void BrickmapPaletteRenderer::RegisterPasses(
 	m_camera = ctx.camera;
 	m_lighting = ctx.lighting;
 	m_sky      = ctx.sky;
-	m_start_time = std::chrono::steady_clock::now();
+	m_start_time_seconds = GetTimeSeconds();
 
 	m_graph  = &graph;
 	m_assets = ctx.assets;
@@ -182,8 +182,8 @@ void BrickmapPaletteRenderer::RegisterPasses(
 				{ m_compute_bindings->GetSet(0)->Get() });
 			BrickmapPaletteGeneratePC pc{};
 			pc.shape = m_shape;
-			auto now = std::chrono::steady_clock::now();
-			pc.time = std::chrono::duration<float>(now - m_start_time).count() * m_time_scale;
+			const double now = GetTimeSeconds();
+			pc.time = static_cast<float>(now - m_start_time_seconds) * m_time_scale;
 			pc.volume_size_x = static_cast<int>(vs.x);
 			pc.volume_size_y = static_cast<int>(vs.y);
 			pc.volume_size_z = static_cast<int>(vs.z);

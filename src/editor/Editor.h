@@ -16,6 +16,8 @@
 #include "CameraController.h"
 #include "RenderTechnique.h"
 
+namespace Capture { class CaptureSystem; }
+
 #include <memory>
 #include <functional>
 #include <vector>
@@ -55,6 +57,11 @@ public:
 	void SetReloadCallback(std::function<void()> cb);
 	void SetSwitchCallback(std::function<void(size_t)> cb);
 	void SetScreenshotCallback(std::function<void()> cb);
+	void SetToggleRecordingCallback(std::function<void()> cb);
+
+	// Capture status feed (UI polls live state — recording active, frame count,
+	// elapsed). Pointer is non-owning; lifetime is RenderingSystem's.
+	void SetCaptureSystem(Capture::CaptureSystem* capture);
 
 	// Queries
 	bool ViewportWasResized() const;
@@ -81,8 +88,9 @@ public:
 	// Metrics
 	void UpdateMetrics(float fps, float gpuMs, float frameMs);
 
-	// Screenshot path forwarding
+	// Capture path forwarding (footers in the Capture tab)
 	void SetLastScreenshotPath(const std::string& path);
+	void SetLastRecordingPath(const std::string& path);
 
 	// Inspector wiring for lighting + sky + post-process (called once after construction)
 	void SetLighting(SceneLighting* lighting) { m_inspector.SetLighting(lighting); }

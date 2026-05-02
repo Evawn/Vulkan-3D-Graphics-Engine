@@ -1,6 +1,5 @@
 #include "RenderingSystem.h"
 #include "ShaderCompiler.h"
-#include "ScreenshotCapture.h"
 #include <spdlog/spdlog.h>
 
 void RenderingSystem::Init(const RenderingSystemConfig& cfg) {
@@ -24,6 +23,21 @@ void RenderingSystem::Init(const RenderingSystemConfig& cfg) {
 	m_renderer = Renderer(rc);
 
 	m_profiler = GPUProfiler::Create(cfg.vk->device, cfg.maxFramesInFlight);
+
+	// Capture subsystem (screenshots + MP4 recording). Owns its own worker
+	// thread; integrates per-frame via OnRenderRecord at the end of DrawFrame.
+	Capture::CaptureSystemConfig ccfg{};
+	ccfg.device              = cfg.vk->device;
+	ccfg.allocator           = cfg.vk->allocator;
+	ccfg.graphicsCommandPool = cfg.vk->graphicsCommandPool;
+	ccfg.maxFramesInFlight   = cfg.maxFramesInFlight;
+	m_capture.Init(ccfg);
+	m_capture.SetOnScreenshotSaved([this](std::string p) {
+		if (m_onScreenshotSaved) m_onScreenshotSaved(p);
+	});
+	m_capture.SetOnRecordingSaved([this](std::string p) {
+		if (m_onRecordingSaved) m_onRecordingSaved(p);
+	});
 }
 
 void RenderingSystem::Shutdown() {
@@ -33,12 +47,19 @@ void RenderingSystem::Shutdown() {
 	if (m_cfg.vk && m_cfg.vk->device) {
 		vkDeviceWaitIdle(m_cfg.vk->device->Get());
 	}
+	// Capture goes down before Vulkan resources — its worker thread polls device
+	// objects and we need it joined before we destroy the device.
+	m_capture.Shutdown();
 	m_techniques.clear();
 	m_profiler.reset();
 }
 
 void RenderingSystem::AddTechnique(std::unique_ptr<RenderTechnique> tech) {
 	tech->SetEventSink([this](AppEvent e) { PushEvent(e); });
+	// Logical-time hook: techniques call this for animation; in FixedStep
+	// recordings it advances by 1/fps per captured frame, in everything else
+	// it's wall-clock-since-process-start (matches the pre-Capture behavior).
+	tech->SetTimeProvider([this] { return m_capture.GetLogicalTimeSeconds(); });
 	m_techniques.push_back(std::move(tech));
 }
 
@@ -113,6 +134,7 @@ void RenderingSystem::RebuildGraph() {
 void RenderingSystem::RequestReload()                  { PushEvent({AppEventType::HotReloadShaders}); }
 void RenderingSystem::RequestSwitchTechnique(size_t i) { PushEvent({AppEventType::SwitchRenderer, i}); }
 void RenderingSystem::RequestScreenshot()              { PushEvent({AppEventType::CaptureScreenshot}); }
+void RenderingSystem::RequestToggleRecording()         { PushEvent({AppEventType::ToggleRecording}); }
 
 void RenderingSystem::HandleSwapchainResize() {
 	// Swapchain rebuild — graph needs full rebuild so the UI pass picks up new
@@ -139,6 +161,8 @@ static bool EventNeedsDeviceIdle(AppEventType type) {
 		case AppEventType::RecreatePipelines:
 			return true;
 		case AppEventType::CaptureScreenshot:
+		case AppEventType::ToggleRecording:
+			// Capture lifecycle is fully async — no device-idle needed.
 			return false;
 	}
 	return false;
@@ -174,7 +198,11 @@ void RenderingSystem::DispatchEvent(const AppEvent& event) {
 			SwitchRenderer(event.index);
 			break;
 		case AppEventType::CaptureScreenshot:
-			CaptureScreenshot();
+			// Async — flag is consumed in DrawFrame's OnRenderRecord call.
+			m_capture.RequestScreenshot();
+			break;
+		case AppEventType::ToggleRecording:
+			m_capture.ToggleRecording();
 			break;
 		case AppEventType::ReloadTechnique:
 			m_techniques[m_activeIndex]->Reload(BuildRenderContext());
@@ -219,20 +247,6 @@ void RenderingSystem::SwitchRenderer(size_t index) {
 	logger->info("Switched to: {}", m_techniques[index]->GetDisplayName());
 }
 
-void RenderingSystem::CaptureScreenshot() {
-	auto& graph = m_renderer.GetGraph();
-	auto finalScene = m_renderer.GetFinalScene();
-	auto resolveImage = graph.GetImage(finalScene);
-	auto resolveDesc  = graph.GetImageDesc(finalScene);
-	VkFormat format   = graph.GetImageFormat(finalScene);
-	VkExtent2D extent = { resolveDesc.width, resolveDesc.height };
-
-	auto path = ScreenshotCapture::Capture(
-		m_cfg.vk->device, m_cfg.vk->allocator, m_cfg.vk->graphicsCommandPool,
-		resolveImage, format, extent);
-	if (!path.empty() && m_onScreenshotSaved) m_onScreenshotSaved(path);
-}
-
 void RenderingSystem::DrawFrame(std::shared_ptr<VWrap::CommandBuffer> cmd, uint32_t frameIndex) {
 	// Per-frame scene rebuild. Clear the materialized item list once and let
 	// the extractor walk the world tree to refill it. Techniques are pure
@@ -246,6 +260,22 @@ void RenderingSystem::DrawFrame(std::shared_ptr<VWrap::CommandBuffer> cmd, uint3
 	m_profiler->CmdBegin(cmd, frameIndex);
 	m_renderer.Execute(cmd, frameIndex, m_profiler.get());
 	m_profiler->CmdEnd(cmd, frameIndex);
+
+	// Capture hook: rides the same command buffer the graph just finished
+	// recording into. Layout of the final scene image at this point is
+	// SHADER_READ_ONLY_OPTIMAL (Renderer::Execute leaves it ready for the
+	// ImGui sampling pass that runs on the swapchain). OnRenderRecord
+	// transitions to TRANSFER_SRC, copies, transitions back; no-ops if no
+	// capture is queued.
+	auto& graph       = m_renderer.GetGraph();
+	auto  finalScene  = m_renderer.GetFinalScene();
+	auto  finalImage  = graph.GetImage(finalScene);
+	auto  finalDesc   = graph.GetImageDesc(finalScene);
+	VkFormat finalFmt = graph.GetImageFormat(finalScene);
+	VkExtent2D finalExt = { finalDesc.width, finalDesc.height };
+	m_capture.OnRenderRecord(cmd, frameIndex, finalImage,
+	                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	                         finalFmt, finalExt);
 }
 
 void RenderingSystem::UpdateSwapchainView(std::shared_ptr<VWrap::ImageView> view) {

@@ -184,8 +184,8 @@ void CombinedRenderer::RegisterPasses(
 	m_lighting      = ctx.lighting;
 	m_sky           = ctx.sky;
 	m_graph         = &graph;
-	if (m_start_time.time_since_epoch().count() == 0) {
-		m_start_time = std::chrono::steady_clock::now();
+	if (m_start_time_seconds < 0.0) {
+		m_start_time_seconds = GetTimeSeconds();
 	}
 
 	// First-time-ever bake. Sets m_terrain_brickmap, m_terrain_pending_upload,
@@ -435,8 +435,8 @@ void CombinedRenderer::RegisterPasses(
 			pc.assetSizeY = static_cast<int32_t>(m_foliage_size.y);
 			pc.assetSizeZ = static_cast<int32_t>(m_foliage_size.z);
 			pc.frameCount = static_cast<int32_t>(m_foliage_frame_count);
-			const auto now = std::chrono::steady_clock::now();
-			pc.time       = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+			const double now = GetTimeSeconds();
+			pc.time       = static_cast<float>(now - m_start_time_seconds) * m_animation_speed;
 			pc.numXWords  = static_cast<int32_t>(BitmaskXWords(m_foliage_size.x));
 			vkCmdPushConstants(vk_cmd, pctx.computePipeline->GetLayout(),
 				VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -926,8 +926,8 @@ void CombinedRenderer::WriteFrameUbo(uint32_t frameIndex) {
 	ubo.frameCount          = static_cast<int32_t>(m_foliage_frame_count);
 	ubo.worldVoxelSize      = kWorldVoxelSize;
 	ubo.maxShadowBrickSteps = m_max_shadow_brick_steps;
-	const auto now = std::chrono::steady_clock::now();
-	ubo.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+	const double now = GetTimeSeconds();
+	ubo.time = static_cast<float>(now - m_start_time_seconds) * m_animation_speed;
 
 	std::memcpy(m_frame_ubo_mapped[frameIndex], &ubo, sizeof(ubo));
 }

@@ -132,8 +132,8 @@ void InstancedVoxelTechnique::RegisterPasses(
 	m_world         = ctx.world;
 	m_lighting      = ctx.lighting;
 	m_sky           = ctx.sky;
-	if (m_start_time.time_since_epoch().count() == 0) {
-		m_start_time = std::chrono::steady_clock::now();
+	if (m_start_time_seconds < 0.0) {
+		m_start_time_seconds = GetTimeSeconds();
 	}
 
 	// First-time setup: register a procedural animated voxel asset and a
@@ -597,8 +597,8 @@ void InstancedVoxelTechnique::WritePerFrameUbo(uint32_t frameIndex) {
 	ubo.shadowBiasConstant = m_shadow_bias_constant;
 	ubo.shadowBiasSlope    = m_shadow_bias_slope;
 	ubo.worldVoxelSize     = kWorldVoxelSize;
-	auto now = std::chrono::steady_clock::now();
-	ubo.time = std::chrono::duration<float>(now - m_start_time).count() * m_animation_speed;
+	const double now = GetTimeSeconds();
+	ubo.time = static_cast<float>(now - m_start_time_seconds) * m_animation_speed;
 
 	std::memcpy(m_frame_ubo_mapped[frameIndex], &ubo, sizeof(ubo));
 }

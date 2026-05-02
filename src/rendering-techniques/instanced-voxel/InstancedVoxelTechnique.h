@@ -142,7 +142,7 @@ private:
 	float m_shadow_bias_constant  = 0.0f;
 	float m_shadow_bias_slope     = 0.0f;
 
-	std::chrono::steady_clock::time_point m_start_time;
+	double m_start_time_seconds = -1.0;
 
 	std::vector<TechniqueParameter> m_parameters;
 

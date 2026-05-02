@@ -13,6 +13,7 @@
 #include "GPUProfiler.h"
 #include "RenderGraphTypes.h"
 #include "post-process/PostProcessEffect.h"
+#include "CaptureSystem.h"
 
 #include <functional>
 #include <memory>
@@ -64,6 +65,7 @@ public:
 	void RequestReload();
 	void RequestSwitchTechnique(size_t idx);
 	void RequestScreenshot();
+	void RequestToggleRecording();
 
 	// Bound to FrameController's swapchain-resize callback.
 	void HandleSwapchainResize();
@@ -106,9 +108,16 @@ public:
 	// these is optional — they're invoked only if non-null.
 	void SetOnBeforeGraphRebuild(std::function<void()> cb) { m_onBeforeGraphRebuild = std::move(cb); }
 	void SetOnAfterGraphRebuild (std::function<void()> cb) { m_onAfterGraphRebuild  = std::move(cb); }
-	// Optional: invoked with the saved screenshot path. Application uses this to
-	// forward the path to the editor's "last screenshot" footer.
+	// Optional: invoked with the saved screenshot / recording path. Application
+	// uses these to forward paths to the editor's "last capture" footer.
 	void SetOnScreenshotSaved(std::function<void(const std::string&)> cb) { m_onScreenshotSaved = std::move(cb); }
+	void SetOnRecordingSaved (std::function<void(const std::string&)> cb) { m_onRecordingSaved  = std::move(cb); }
+
+	// Capture subsystem accessor — UI panels read status / options through this
+	// reference (no extra wiring per-knob). Lifetime: lives as long as the
+	// RenderingSystem; Editor must drop its pointer before Shutdown.
+	Capture::CaptureSystem&       GetCapture()       { return m_capture; }
+	const Capture::CaptureSystem& GetCapture() const { return m_capture; }
 
 	// Push from outside (e.g. technique event sinks set up by AddTechnique).
 	void PushEvent(AppEvent e) { m_events.push_back(e); }
@@ -118,7 +127,6 @@ private:
 	void RebuildGraph();
 	void HotReloadShaders();
 	void SwitchRenderer(size_t index);
-	void CaptureScreenshot();
 	RenderContext BuildRenderContext() const;
 
 	RenderingSystemConfig m_cfg{};
@@ -136,6 +144,9 @@ private:
 	std::function<void()> m_onBeforeGraphRebuild;
 	std::function<void()> m_onAfterGraphRebuild;
 	std::function<void(const std::string&)> m_onScreenshotSaved;
+	std::function<void(const std::string&)> m_onRecordingSaved;
+
+	Capture::CaptureSystem m_capture;
 
 	// Frame-local item list. Cleared each DrawFrame, refilled by SceneExtractor
 	// from m_world. Plumbed into RenderContext (RegisterPasses-time) and into

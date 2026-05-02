@@ -1,5 +1,6 @@
 #include "ViewportPanel.h"
 #include "../UIStyle.h"
+#include "CaptureSystem.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -74,8 +75,22 @@ void ViewportPanel::Draw() {
 	ImVec2 wp = ImGui::GetWindowPos();
 	ImVec2 ws = ImGui::GetWindowSize();
 
-	// Camera-focused outline
-	if (active) {
+	// State outline. Priority: recording (red, pulsing) > focused (green) > none.
+	// Recording wins because losing track of an active recording is worse than
+	// losing track of camera focus, and the user can always click out of the
+	// viewport if they need the focus indicator while a recording continues.
+	const bool recording = m_capture && m_capture->IsRecording();
+	if (recording) {
+		// Pulse the alpha at ~1.5 Hz so the outline reads as "active recording"
+		// rather than a static badge — recognizable from across the screen.
+		const float t = static_cast<float>(ImGui::GetTime());
+		const float a = 0.65f + 0.35f * std::sin(t * 2.0f * 3.14159265f * 1.5f);
+		ImU32 col = UIStyle::U32(UIStyle::Alpha(UIStyle::kBudgetOver, a));
+		dl->AddRect(
+			ImVec2(wp.x + 0.5f, wp.y + 0.5f),
+			ImVec2(wp.x + ws.x - 0.5f, wp.y + ws.y - 0.5f),
+			col, 0.0f, 0, 2.0f);
+	} else if (active) {
 		ImU32 col = UIStyle::U32(UIStyle::kAccent);
 		dl->AddRect(
 			ImVec2(wp.x + 0.5f, wp.y + 0.5f),

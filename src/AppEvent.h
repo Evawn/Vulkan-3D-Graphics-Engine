@@ -9,6 +9,7 @@ enum class AppEventType {
 	HotReloadShaders,
 	SwitchRenderer,
 	CaptureScreenshot,
+	ToggleRecording,
 	ReloadTechnique,
 	RebuildGraph,
 	RecreatePipelines,
