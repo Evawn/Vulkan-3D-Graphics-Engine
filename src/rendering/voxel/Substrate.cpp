@@ -4,7 +4,7 @@
 #include <cassert>
 #include <climits>
 
-namespace InstancedVoxel {
+namespace Substrate {
 
 namespace {
 
@@ -27,7 +27,7 @@ inline int CeilDivBrick(int v) {
 // instance's integer voxel position.
 struct VoxelAabb { glm::ivec3 lo, hi; };
 
-VoxelAabb InstanceAabb(const SubstrateInstanceInput& inst, glm::uvec3 assetSize) {
+VoxelAabb InstanceAabb(const InstanceInput& inst, glm::uvec3 assetSize) {
 	const int sx = static_cast<int>(assetSize.x);
 	const int sy = static_cast<int>(assetSize.y);
 	const int sz = static_cast<int>(assetSize.z);
@@ -43,10 +43,10 @@ VoxelAabb InstanceAabb(const SubstrateInstanceInput& inst, glm::uvec3 assetSize)
 
 }  // namespace
 
-uint32_t SubstrateUpperBoundWords(uint32_t   instanceCount,
-                                  glm::uvec3 assetSize,
-                                  uint32_t   bladeGridDim,
-                                  uint32_t   bladePitchVoxels)
+uint32_t UpperBoundWords(uint32_t   instanceCount,
+                         glm::uvec3 assetSize,
+                         uint32_t   bladeGridDim,
+                         uint32_t   bladePitchVoxels)
 {
 	// Cloud-local voxel footprint plus yaw overhang on BOTH sides:
 	//   yaw 1/2 puts the blade's negative-side AABB at -max(asset.x, asset.y);
@@ -84,11 +84,11 @@ uint32_t SubstrateUpperBoundWords(uint32_t   instanceCount,
 	return kSubstrateHeaderWords + topGridCells + maxOffsets + maxEntries;
 }
 
-SubstrateBuild BuildFoliageSubstrate(const SubstrateInstanceInput* instances,
-                                     uint32_t                       instanceCount,
-                                     glm::uvec3                     assetSize)
+Build BuildFoliage(const InstanceInput* instances,
+                   uint32_t              instanceCount,
+                   glm::uvec3            assetSize)
 {
-	SubstrateBuild out;
+	Build out;
 
 	// 1. Cloud-local voxel AABB across all instances.
 	if (instanceCount == 0) {
@@ -199,4 +199,4 @@ SubstrateBuild BuildFoliageSubstrate(const SubstrateInstanceInput* instances,
 	return out;
 }
 
-}  // namespace InstancedVoxel
+}  // namespace Substrate

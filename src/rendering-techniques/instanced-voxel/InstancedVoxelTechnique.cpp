@@ -22,15 +22,16 @@ constexpr const char* kSkyPassName   = "InstancedVoxel Sky";
 constexpr const char* kTracePassName = "InstancedVoxel Trace";
 
 // World voxel size — the engine's canonical voxel pitch (VISION.md §1.1).
-// One day this graduates out to a Scene-level concept shared with the brickmap
-// pillar; today it lives here because the foliage technique is the only
-// consumer that has been quantized onto the world voxel grid. The substrate
-// (LIGHTING.md §3) keys off this value: every quantized instance position maps
-// to integer world-voxel coordinates via this scale.
+// One inch per voxel. CombinedRenderer (which shares the substrate with the
+// terrain pillar) pins to this same value via its own constant; the two
+// techniques agree on the world voxel grid so foliage instances and terrain
+// bricks address the same integer-voxel coordinate system.
 //
-// The chosen value preserves the pre-quantization visual: 16-voxel-wide blades
-// at 0.0125 m/voxel = 0.2 m wide, matching the previous m_grid_spacing default.
-constexpr float kWorldVoxelSize = 0.0125f;
+// Physical implication: the existing 16×32×16 grass-blade asset is 16″×32″×16″
+// at this pitch — the asset's voxel count and per-voxel texture are unchanged;
+// the blade simply renders larger in world space. Re-tune asset dimensions if
+// the visual scale needs adjustment.
+constexpr float kWorldVoxelSize = 0.0254f;
 
 // CPU layout must match shaders/instanced_voxel.vert::InstanceData.
 // std430-compatible: 16-byte alignment for vec3+scalar pairs, vec4 for quat.
@@ -205,9 +206,9 @@ void InstancedVoxelTechnique::RegisterPasses(
 	m_bitmask_buffer = graph.CreateBuffer("instanced_voxel_bitmask", bm);
 
 	// World-grid substrate. Allocated at upper-bound size (see
-	// SubstrateUpperBoundWords); the populated extent is recorded in the
+	// Substrate::UpperBoundWords); the populated extent is recorded in the
 	// buffer header so the shader doesn't read the trailing slack.
-	m_substrate_word_capacity = InstancedVoxel::SubstrateUpperBoundWords(
+	m_substrate_word_capacity = Substrate::UpperBoundWords(
 		m_instance_count, m_volume_size,
 		static_cast<uint32_t>(m_grid_dim),
 		static_cast<uint32_t>(m_blade_pitch_voxels));
@@ -539,20 +540,20 @@ void InstancedVoxelTechnique::RebuildInstanceData(RenderGraph& graph) {
 	// Build the world-grid substrate from the just-quantized instances. The
 	// substrate sees only what it needs (cloud-local voxel position + yawIdx),
 	// keeping its inputs decoupled from anything else GpuInstance might grow.
-	std::vector<InstancedVoxel::SubstrateInstanceInput> substrateInputs;
+	std::vector<Substrate::InstanceInput> substrateInputs;
 	substrateInputs.reserve(instances.size());
 	for (const auto& gi : instances) {
-		InstancedVoxel::SubstrateInstanceInput in;
+		Substrate::InstanceInput in;
 		in.cloudVoxelPos = glm::ivec3(glm::round(gi.position));
 		in.yawIdx        = static_cast<uint8_t>(gi.yawIdx & 0x3);
 		substrateInputs.push_back(in);
 	}
-	auto build = InstancedVoxel::BuildFoliageSubstrate(
+	auto build = Substrate::BuildFoliage(
 		substrateInputs.data(),
 		static_cast<uint32_t>(substrateInputs.size()),
 		m_volume_size);
 	assert(build.data.size() <= m_substrate_word_capacity &&
-	       "substrate upper bound was too small — recheck SubstrateUpperBoundWords");
+	       "substrate upper bound was too small — recheck Substrate::UpperBoundWords");
 	graph.UploadBufferData(m_substrate_buffer, build.data.data(),
 		build.data.size() * sizeof(uint32_t), m_graphics_pool);
 }

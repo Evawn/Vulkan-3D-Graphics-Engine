@@ -1,18 +1,27 @@
 // World-grid occupancy substrate — GLSL query interface.
 //
-// Companion to src/rendering-techniques/instanced-voxel/Substrate.h. The
-// includer `#include`s this file and gets one function — `traceShadowWorld`
-// — that walks the substrate via DDA and returns 0 (occluded) or 1 (lit).
+// Companion to src/rendering/voxel/Substrate.h. The includer `#include`s this
+// file and gets one function — `traceShadowWorld` — that walks the substrate
+// via DDA and returns 0 (occluded) or 1 (lit).
 //
-// v1 implements only the foliage contribution. The static (terrain, M-E)
-// and dynamic (water, beyond) contributions plug in additively as extra
-// per-voxel checks inside the inner loop.
+// Layered contributions (LIGHTING.md §3):
+//   - **Foliage** (always): per-brick instance overlap CSR, ORd in via the
+//     instance bitmask at brick entry.
+//   - **Static / terrain** (opt-in via SUBSTRATE_TERRAIN): per-voxel check
+//     into the bound terrain brickmap. Requires the includer to also define
+//     a `terrain` SSBO and provide `ivec3 terrainOriginVoxel`. See
+//     terrain_brickmap.glsl for the exact contract.
 //
 // REQUIRES the includer to bind these descriptors with these names:
 //
 //   layout(std430, ...) readonly buffer SubstrateBuffer { uint data[]; } substrate;
 //   layout(std430, ...) readonly buffer InstanceBuffer  { InstanceData instances[]; } ib;
 //   layout(std430, ...) readonly buffer BitmaskBuffer   { uint bits[]; } bitmask;
+//
+// If SUBSTRATE_TERRAIN is defined, additionally:
+//
+//   layout(std430, ...) readonly buffer TerrainBrickmapBuffer { uint data[]; } terrain;
+//   ivec3 terrainOriginVoxel;   // world-voxel offset of terrain voxel (0,0,0)
 //
 // And these uniforms accessible by name:
 //
@@ -25,6 +34,10 @@
 
 #ifndef SUBSTRATE_GLSL_INCLUDED
 #define SUBSTRATE_GLSL_INCLUDED
+
+#ifdef SUBSTRATE_TERRAIN
+#include "terrain_brickmap.glsl"
+#endif
 
 // Mirrors src/rendering-techniques/instanced-voxel/Substrate.h.
 const int  kSubstrateBrickSize    = 8;
@@ -189,9 +202,9 @@ float traceShadowWorld(vec3   originWorld,
 	float t = 0.0;
 
 	// Iteration cap: rays longer than this are clipped to "lit" rather than
-	// erroring. 512 voxels = ~6.4m at 0.0125/voxel — covers the v1 cloud
-	// diagonal under any sun angle. Bump if longer ranges are needed.
-	const int kMaxSteps = 512;
+	// erroring. 2048 voxels = 52m at 0.0254/voxel (1 inch) — covers the
+	// CombinedRenderer's 1024×1024-voxel island diagonal at any sun angle.
+	const int kMaxSteps = 2048;
 
 	for (int s = 0; s < kMaxSteps; ++s) {
 		if (t > voxelMax) return 1.0;
@@ -235,6 +248,16 @@ float traceShadowWorld(vec3   originWorld,
 				}
 			}
 		}
+
+#ifdef SUBSTRATE_TERRAIN
+		// Static terrain contribution. Runs at every voxel step regardless
+		// of the foliage substrate's grid extent — terrain may extend past
+		// the foliage cloud's footprint, so the substrate grid bounds don't
+		// gate it. Receiver's own voxel is exempt to avoid self-shadowing.
+		if (voxel != skipCloudVoxel && terrainSolidAtWorldVoxel(voxel)) {
+			return 0.0;
+		}
+#endif
 
 		// Advance to the next voxel along whichever axis crosses first.
 		if (tMax.x <= tMax.y && tMax.x <= tMax.z) {

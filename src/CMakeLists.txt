@@ -19,6 +19,7 @@ target_include_directories(VulkanEngine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/brickmap-palette"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/animated-geometry"
     "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/instanced-voxel"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rendering-techniques/combined"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor"
     "${CMAKE_CURRENT_SOURCE_DIR}/editor/panels"
     "${CMAKE_SOURCE_DIR}/dep"

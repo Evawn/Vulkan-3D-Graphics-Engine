@@ -34,6 +34,13 @@ struct BrickmapData {
 	uint32_t   brickSize  = 8;
 	uint32_t   brickCount = 0;               // populated bricks; mirrors data[7]
 
+	// World-voxel coords of voxel (0,0,0) of this brickmap. The standalone
+	// brickmap-palette technique centers its volume at world origin and ignores
+	// this; the CombinedRenderer pins the terrain to a known world-voxel anchor
+	// (so the shadow substrate can address terrain bricks via shared world-voxel
+	// coords). Default zero — pre-existing producers don't have to set it.
+	glm::ivec3 originVoxel = glm::ivec3(0);
+
 	// Single contiguous buffer matching the GPU layout described above. Size in
 	// uint32 words = 8 + gridDim.x*gridDim.y*gridDim.z + brickCount * 128.
 	std::vector<uint32_t> data;

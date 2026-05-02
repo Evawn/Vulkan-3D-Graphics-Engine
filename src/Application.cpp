@@ -3,6 +3,7 @@
 #include "BrickmapPaletteRenderer.h"
 #include "AnimatedGeometryRenderer.h"
 #include "InstancedVoxelTechnique.h"
+#include "CombinedRenderer.h"
 #include "Scene.h"
 #include "post-process/BloomEffect.h"
 #include "post-process/LensFlareEffect.h"
@@ -43,6 +44,7 @@ void Application::Init() {
 	m_rendering.AddTechnique(std::make_unique<BrickmapPaletteRenderer>());
 	m_rendering.AddTechnique(std::make_unique<AnimatedGeometryRenderer>());
 	m_rendering.AddTechnique(std::make_unique<InstancedVoxelTechnique>());
+	m_rendering.AddTechnique(std::make_unique<CombinedRenderer>());
 	m_rendering.AddTechnique(std::make_unique<MeshRasterizer>());
 
 	// Wire UI record + before/after rebuild hooks BEFORE first build runs, so

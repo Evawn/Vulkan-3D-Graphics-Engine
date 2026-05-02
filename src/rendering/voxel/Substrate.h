@@ -1,29 +1,33 @@
 #pragma once
 
-// ---- World-grid occupancy substrate (foliage layer, v1) ----
+// ---- World-grid occupancy substrate ----
 //
 // CPU-side builder for the per-brick instance overlap index that the
-// InstancedVoxelTechnique's shadow query (shaders/include/substrate.glsl)
-// walks. See VISION.md §3 and LIGHTING.md §3 for the architectural framing;
-// this header is the v1 implementation, scoped to the foliage contribution
-// only. The static (terrain) and dynamic (water) contributions are sibling
-// layers added in later milestones.
+// substrate's GLSL shadow query (shaders/include/substrate.glsl) walks.
+// See VISION.md §3 and LIGHTING.md §3 for the architectural framing.
 //
-// Lifetime: built host-side once per `RebuildInstanceData`. The same
-// determinism that drives the per-instance grid (RNG seeded by `0xC0FFEE`)
-// drives this build, so re-running it produces an identical buffer.
+// Layered contributions per VISION.md §3.2:
+//   - **Foliage** (v1, this file): per-brick instance overlap CSR. The foliage
+//     cloud's quantized-instance set is reduced to "which instances touch this
+//     brick", and the GLSL query ORs each touching instance's per-frame
+//     bitmask into a per-brick scratch test at brick entry.
+//   - **Static** (Milestone E): the terrain brickmap pillar's existing brick
+//     payload. The shadow query walks the bound terrain BrickmapBuffer in
+//     lockstep with the substrate DDA — see shaders/include/terrain_brickmap.glsl.
+//     No data fold here; the substrate stays foliage-shaped, and the GLSL inner
+//     loop tests both layers per voxel.
+//   - **Dynamic** (water/particles, future): a sibling layer; the GLSL query
+//     ORs it in alongside foliage and static.
 //
-// Forward-look: this lives next to the foliage technique because the
-// substrate currently only tracks foliage. When Milestone E adds the
-// terrain contribution, the *type* graduates to `src/rendering/voxel/`
-// (alongside Brickmap.h) and gains a `static_brick_payload` slot. The
-// query interface in substrate.glsl stays put — only the inputs grow.
+// Lifetime: built host-side once per substrate-affecting change (foliage
+// instance edit, terrain bake, etc). Determinism: same inputs → byte-
+// identical output buffer.
 
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <vector>
 
-namespace InstancedVoxel {
+namespace Substrate {
 
 // Brick edge length, in world voxels. Matches the static brickmap pillar so
 // Milestone E can plug terrain bricks into the same coordinate system without
@@ -41,13 +45,14 @@ constexpr uint32_t kSubstrateEmptyBrick = 0xFFFFFFFFu;
 //   [7]    brickCount                   — number of populated bricks
 constexpr uint32_t kSubstrateHeaderWords = 8;
 
-// Per-instance input the substrate consumes. Decoupled from `GpuInstance` so
-// the substrate doesn't have to know about anything else stored alongside
-// position+yaw (palette, animation phase, future per-instance signals). The
-// caller reads the relevant fields out of its instance source-of-truth.
-struct SubstrateInstanceInput {
+// Per-instance input the substrate consumes. Decoupled from any technique's
+// instance struct so the substrate doesn't have to know about anything else
+// stored alongside position+yaw (palette, animation phase, future per-
+// instance signals). The caller reads the relevant fields out of its
+// instance source-of-truth.
+struct InstanceInput {
 	glm::ivec3 cloudVoxelPos;   // integer voxel position in cloud-local space
-	uint8_t    yawIdx;          // 0..3, Z-yaw enumeration (matches GpuInstance::yawIdx)
+	uint8_t    yawIdx;          // 0..3, Z-yaw enumeration
 };
 
 // Output of a build: the originating dimensions plus a packed std430 buffer
@@ -55,7 +60,7 @@ struct SubstrateInstanceInput {
 // (data.size() × 4) may be smaller than the upper bound the technique
 // allocated; the shader honours `brickCount` from the header to know where
 // the CSR ends.
-struct SubstrateBuild {
+struct Build {
 	glm::ivec3            originVoxel = glm::ivec3(0);   // brick(0,0,0) anchor in cloud voxels
 	glm::uvec3            gridDim     = glm::uvec3(0);   // bricks per axis
 	uint32_t              brickCount  = 0;               // populated bricks
@@ -74,15 +79,15 @@ struct SubstrateBuild {
 //   - CSR entries worst case = instanceCount * maxBricksPerInstance, where
 //     maxBricksPerInstance = ceil(asset.x/8 + 1) * ceil(asset.y/8 + 1) *
 //     ceil(asset.z/8 + 1) — small for grass-sized assets.
-uint32_t SubstrateUpperBoundWords(uint32_t  instanceCount,
-                                  glm::uvec3 assetSize,
-                                  uint32_t  bladeGridDim,
-                                  uint32_t  bladePitchVoxels);
+uint32_t UpperBoundWords(uint32_t  instanceCount,
+                         glm::uvec3 assetSize,
+                         uint32_t  bladeGridDim,
+                         uint32_t  bladePitchVoxels);
 
-// Build the foliage substrate from a quantized instance set. Called from
-// `RebuildInstanceData`. Determinism: same inputs → byte-identical output.
-SubstrateBuild BuildFoliageSubstrate(const SubstrateInstanceInput* instances,
-                                     uint32_t                       instanceCount,
-                                     glm::uvec3                     assetSize);
+// Build the foliage layer of the substrate from a quantized instance set.
+// Determinism: same inputs → byte-identical output buffer.
+Build BuildFoliage(const InstanceInput* instances,
+                   uint32_t              instanceCount,
+                   glm::uvec3            assetSize);
 
-}  // namespace InstancedVoxel
+}  // namespace Substrate
