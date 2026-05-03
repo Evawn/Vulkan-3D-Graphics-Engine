@@ -82,6 +82,25 @@ struct GltfImportSession {
     bool       lastBudgetExceeded = false;     // last submission would have exceeded the cell budget
     glm::uvec3 previewVolumeSize  = glm::uvec3(0);
     float      previewVoxelSize   = 0.0f;      // mesh-local voxel edge length the bake used
+
+    // ---- Full bake state (M4) ----
+    //
+    // The same procedural volume slot serves both single-frame previews and
+    // full bakes — frameCount morphs from 1 → N when a full bake completes,
+    // and back to 1 if the user fires a new preview. The flags below let the
+    // panel know which mode we're in and how to render the progress UI.
+    //
+    // `bakeRangeStart` / `bakeRangeEnd` mirror the panel's range sliders so
+    // they survive workspace switches.
+    bool       hasFullBake          = false;
+    uint32_t   bakeFrameCount       = 0;
+    float      bakeFps              = 24.0f;
+    float      bakeRangeStart       = 0.0f;
+    float      bakeRangeEnd         = 0.0f;
+    float      bakeStartedAtSeconds = 0.0f;     // wall-clock seconds at SubmitFullBake (UI ETA)
+    bool       lastSaveSucceeded    = false;
+    std::string lastSavedManifestPath;          // populated on successful SaveBake
+    std::string lastBakeStatusMessage;          // human-readable status for the panel (errors etc.)
 };
 
 class GltfImportTechnique : public RenderTechnique {
@@ -140,8 +159,30 @@ public:
     void  SetPreviewMode(PreviewMode mode);
     PreviewMode GetPreviewMode() const { return m_previewMode; }
 
+    // ---- Full-bake controls (M4) ----
+    //
+    // StartFullBake snapshots the current voxel size + clip + range into a
+    // FullBakeJob and submits it to the worker. The bake runs asynchronously;
+    // the panel polls IsBakingFull / FullBakeProgress to render UI, and the
+    // result is applied to the procedural volume by TickBakeState when ready.
+    //
+    // SaveBake writes the most recent completed full bake to disk as a .vxa
+    // manifest + per-frame .vox files. Returns true on success; the session
+    // captures the saved path so the panel can show "Saved to ...".
+    //
+    // LoadBakeFromDisk loads a .vxa file, replaces the current preview volume
+    // with its contents (frameCount → manifest.frameCount, size → manifest's
+    // grid), and switches preview mode to Voxels. The round-trip demo for M4.
+    void StartFullBake(float startTime, float endTime, float fps);
+    void CancelFullBake();
+    bool SaveBake(const std::string& directory, const std::string& name);
+    bool LoadBakeFromDisk(const std::string& vxaPath);
+
     // Status hints for BakerPanel — all relaxed reads.
     bool  IsBakingPreview() const { return m_baker.IsPreviewBaking(); }
+    bool  IsBakingFull()    const { return m_baker.IsFullBaking(); }
+    int   FullBakeFramesDone()  const { return m_baker.FullBakeFramesDone(); }
+    int   FullBakeFramesTotal() const { return m_baker.FullBakeFramesTotal(); }
 
     // Read-only view the panel uses to render its UI rows.
     const GltfImportSession& GetSession() const { return m_session; }

@@ -60,6 +60,18 @@ void EvaluateClipFlat(const Animation&         clip,
                       std::vector<glm::quat>&  trs_rotation,
                       std::vector<glm::vec3>&  trs_scale);
 
+// Channels-based variant. Same semantics as EvaluateClipFlat but takes the
+// channel vector by reference, so repeated calls (per-frame in the bake
+// pipeline) don't allocate a new Animation copy each call. The caller is
+// responsible for clamping `time` to the clip's authored duration; if you
+// want the same clamp behavior pass a non-zero `clipDuration`.
+void EvaluateChannelsFlat(const std::vector<AnimationChannel>& channels,
+                          float                                  clipDuration,
+                          float                                  time,
+                          std::vector<glm::vec3>&                trs_translation,
+                          std::vector<glm::quat>&                trs_rotation,
+                          std::vector<glm::vec3>&                trs_scale);
+
 // Reads structural fields (parent, children) from `nodes`, but reads TRS
 // from the parallel flat arrays. `nodes` is treated as read-only.
 //

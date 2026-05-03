@@ -6,6 +6,7 @@
 #include "MeshIR.h"
 #include "PaletteResource.h"
 #include "DefaultVoxPalette.h"
+#include "VoxAnimFormat.h"
 #include "config.h"
 
 #include <glm/gtc/quaternion.hpp>
@@ -445,11 +446,27 @@ void GltfImportTechnique::RegisterPasses(
                 const glm::vec3 camWorld = m_camera->GetPosition();
                 const glm::vec3 camLocal = glm::vec3(invModel * glm::vec4(camWorld, 1.0f));
 
+                // Multi-frame frameIdx: when a full bake is active, the
+                // baked volume animates synchronously with the SkinnedMesh
+                // component's currentTime. The conversion uses the bake's
+                // recorded fps so playback matches what was actually baked
+                // (independent of the panel's playbackSpeed slider, which
+                // already affects currentTime upstream in SceneExtractor).
+                int frameIdx   = 0;
+                int frameCount = 1;
+                if (m_session.hasFullBake && m_session.bakeFrameCount > 0 && m_session.bakeFps > 0.0f) {
+                    frameCount = static_cast<int>(m_session.bakeFrameCount);
+                    const float t = GetTime();    // already wrapped to clip duration upstream
+                    int idx = static_cast<int>(std::floor(t * m_session.bakeFps));
+                    if (idx < 0) idx = 0;
+                    frameIdx = idx % frameCount;
+                }
+
                 VoxelPreviewDrawUbo draw{};
                 draw.cameraLocalPos = camLocal;
-                draw.frameIdx       = 0;                        // M3 is single-frame
+                draw.frameIdx       = frameIdx;
                 draw.size           = glm::ivec3(m_session.previewVolumeSize);
-                draw.frameCount     = 1;
+                draw.frameCount     = frameCount;
                 draw.maxIterations  = kPreviewMaxIterations;
                 std::memcpy(m_voxel_draw_ubos_mapped[pctx.frameIndex], &draw, sizeof(draw));
 
@@ -958,6 +975,12 @@ void GltfImportTechnique::TickBakeState() {
             // Push the bake bytes into the procedural volume. AssetRegistry's
             // upload path runs after Compile; if size changed, trigger a
             // graph rebuild so the image re-allocates at the new dims first.
+            //
+            // A new preview bake also collapses any prior full bake — the
+            // user has explicitly re-tuned the grid, so the multi-frame
+            // animation no longer matches the single new pose. Resize back
+            // to frameCount=1; both the slot and the AssetID are preserved.
+            const bool wasFullBake = m_session.hasFullBake;
             if (auto* vol = m_assets->GetVoxelVolume(m_session.previewVolume)) {
                 m_assets->ResizeProceduralVoxelVolume(m_session.previewVolume,
                     newSize, /*newFrameCount=*/1);
@@ -965,10 +988,94 @@ void GltfImportTechnique::TickBakeState() {
                 vol->palette      = voxel::GetDefaultPalette();
                 vol->needsUpload  = true;
             }
-            m_session.hasBake = true;
-            if (sizeChanged && m_eventSink) {
+            m_session.hasBake        = true;
+            m_session.hasFullBake    = false;
+            m_session.bakeFrameCount = 1;
+            if ((sizeChanged || wasFullBake) && m_eventSink) {
                 m_eventSink({AppEventType::RebuildGraph});
             }
+        }
+    }
+
+    // ---- Step 1b: pick up any completed full bake ----
+    //
+    // The full bake produces N frames of identical grid size. We morph the
+    // procedural volume in-place: ResizeProceduralVoxelVolume re-stamps the
+    // size + frameCount on the same AssetID, then we Z-pack every frame's
+    // bytes into one contiguous blob and let UploadPending push it next
+    // graph cycle. The image's depth changes (size.z * N vs. size.z * 1) so
+    // a graph rebuild is mandatory.
+    if (auto fullBake = m_baker.TakeCompletedFullBake()) {
+        spdlog::get("Render")->info(
+            "TickBakeState: full bake result picked up — frames={} size=({},{},{}) budgetExceeded={} cancelled={}",
+            fullBake->frames.size(),
+            fullBake->frameSize.x, fullBake->frameSize.y, fullBake->frameSize.z,
+            fullBake->budgetExceeded, fullBake->cancelled);
+        if (fullBake->budgetExceeded) {
+            m_session.lastBudgetExceeded   = true;
+            // The worker logs the specific cause (per-frame cells, total
+            // bytes, or packed-depth limit). The panel shows a generic
+            // pointer to the log; we don't try to mirror the worker's
+            // detailed reason here because that'd duplicate the policy in
+            // two places. The tip covers all three guards uniformly.
+            m_session.lastBakeStatusMessage =
+                "Bake exceeded a budget (cells / bytes / packed-depth) — see log. "
+                "Try: coarser voxel size, fewer fps, or shorter range.";
+            spdlog::get("Render")->warn("GltfImportTechnique: full bake skipped — budget exceeded");
+        } else if (fullBake->frames.empty() || fullBake->frameSize.x == 0) {
+            // Worker returned an empty/invalid result without flagging it as
+            // budget-exceeded. Surface the cause so the panel doesn't just go
+            // silent when something upstream (no quantizer, AABB collapse,
+            // etc.) bails the bake out.
+            m_session.lastBakeStatusMessage =
+                "Bake produced no frames — check log (no quantizer / invalid AABB / posing failure).";
+        } else if (!fullBake->frames.empty() && fullBake->frameSize.x > 0) {
+            m_session.lastBudgetExceeded = false;
+            const glm::uvec3 newSize = fullBake->frameSize;
+            const uint32_t   newFrames = static_cast<uint32_t>(fullBake->frames.size());
+
+            const bool sizeChanged   = (newSize != m_session.previewVolumeSize);
+            const bool framesChanged = (newFrames != m_session.bakeFrameCount);
+
+            m_assets->ResizeProceduralVoxelVolume(m_session.previewVolume, newSize, newFrames);
+
+            if (auto* vol = m_assets->GetVoxelVolume(m_session.previewVolume)) {
+                const size_t bytesPerFrame = static_cast<size_t>(newSize.x) * newSize.y * newSize.z;
+                vol->data.assign(bytesPerFrame * newFrames, 0);
+                for (uint32_t i = 0; i < newFrames; ++i) {
+                    if (fullBake->frames[i].indices.size() >= bytesPerFrame) {
+                        std::memcpy(vol->data.data() + i * bytesPerFrame,
+                                    fullBake->frames[i].indices.data(),
+                                    bytesPerFrame);
+                    }
+                }
+                vol->palette     = voxel::GetDefaultPalette();
+                vol->needsUpload = true;
+            }
+
+            m_session.previewVolumeSize    = newSize;
+            m_session.previewVoxelSize     = fullBake->voxelSizeWorld;
+            m_session.previewAabbMin       = fullBake->worldOriginMin;
+            m_session.previewAabbMax       = fullBake->worldOriginMax;
+            m_session.hasBake              = true;
+            m_session.hasFullBake          = true;
+            m_session.bakeFrameCount       = newFrames;
+            m_session.bakeFps              = fullBake->fps;
+            m_session.lastBakeStatusMessage = "Bake complete — " + std::to_string(newFrames) + " frames.";
+            m_session.lastSaveSucceeded    = false;
+            m_session.lastSavedManifestPath.clear();
+
+            // Image depth changed → graph rebuild required to re-allocate the
+            // VkImage at (size.z * frameCount). Even if frameCount stayed the
+            // same, a size change still requires the rebuild; only a same-
+            // size, same-frameCount full bake (rare in practice) could skip.
+            if (sizeChanged || framesChanged) {
+                if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
+            }
+
+            // Switch into Voxels view so the user immediately sees the bake.
+            // (If they were in Mesh while a long bake ran, jump them over.)
+            m_previewMode = PreviewMode::Voxels;
         }
     }
 
@@ -984,6 +1091,15 @@ void GltfImportTechnique::TickBakeState() {
         std::chrono::steady_clock::now() - m_voxelSizeChangeAt).count();
     if (elapsed < m_debounceMs) return;
 
+    // The preview supersedes any active full bake — once the user moves the
+    // voxel-size slider, they're back in interactive exploration mode and
+    // any in-flight long bake is no longer what they want. Discard it and
+    // fall back to single-frame preview.
+    if (m_session.hasFullBake) {
+        m_session.hasFullBake    = false;
+        m_session.bakeFrameCount = 0;
+        m_baker.CancelFullBake();
+    }
     SubmitPreviewBake();
     m_voxelSizeDirty = false;
 }
@@ -1033,10 +1149,189 @@ void GltfImportTechnique::SubmitPreviewBake() {
         spdlog::get("Render")->warn("GltfImportTechnique: BuildSnapshot failed; bake cancelled");
         return;
     }
-    job.time             = GetTime();
-    job.voxelSizeWorld   = m_voxelSizeRequested;
-    job.colorSource.mode = voxel_bake::VoxColorSource::Mode::MaterialBaseColor;
-    job.maxGridCells     = m_maxGridCells;
+    job.time                 = GetTime();
+    job.voxelSizeWorld       = m_voxelSizeRequested;
+    job.colorSource.mode     = voxel_bake::VoxColorSource::Mode::MaterialBaseColor;
+    job.maxGridCellsPerFrame = m_maxGridCells;
 
     m_baker.SubmitPreview(std::move(job));
+}
+
+// =============================================================================
+// Full-bake API (M4)
+// =============================================================================
+
+void GltfImportTechnique::StartFullBake(float startTime, float endTime, float fps) {
+    auto logger = spdlog::get("Render");
+    if (logger) logger->info("StartFullBake: enter (start={:.3f} end={:.3f} fps={:.1f})", startTime, endTime, fps);
+    if (!m_assets) {
+        if (logger) logger->warn("StartFullBake: m_assets null — bake aborted");
+        m_session.lastBakeStatusMessage = "Internal: assets not wired.";
+        return;
+    }
+    if (!m_session.meshAsset.valid()) {
+        if (logger) logger->warn("StartFullBake: meshAsset invalid — bake aborted");
+        m_session.lastBakeStatusMessage = "No mesh loaded.";
+        return;
+    }
+    if (m_session.activeClipIndex < 0
+     || m_session.activeClipIndex >= static_cast<int>(m_session.clipAssets.size()))
+    {
+        if (logger) logger->warn("StartFullBake: activeClipIndex={} (clipAssets={})",
+            m_session.activeClipIndex, m_session.clipAssets.size());
+        m_session.lastBakeStatusMessage = "No active clip selected.";
+        return;
+    }
+    const AssetID clipId = m_session.clipAssets[m_session.activeClipIndex];
+
+    // Clamp range to clip duration; keep at least one frame.
+    const float duration = m_session.clipDurations[m_session.activeClipIndex];
+    startTime = std::clamp(startTime, 0.0f, duration);
+    endTime   = std::clamp(endTime,   startTime, duration);
+    fps       = std::clamp(fps, 1.0f, 240.0f);
+
+    voxel_bake::FullBakeJob job;
+    if (!voxel_bake::BuildSnapshot(*m_assets, m_session.meshAsset, clipId, /*skinIndex=*/0,
+                                   job.snapshot))
+    {
+        if (logger) logger->warn("StartFullBake: BuildSnapshot returned false");
+        m_session.lastBakeStatusMessage = "Failed to snapshot mesh for bake.";
+        return;
+    }
+    if (logger) logger->info("StartFullBake: snapshot OK ({} prims, clipDuration={:.3f}s, channels={})",
+        job.snapshot.primitives.size(), job.snapshot.clipDuration, job.snapshot.channels.size());
+    job.startTime           = startTime;
+    job.endTime             = endTime;
+    job.fps                 = fps;
+    job.voxelSizeWorld      = m_voxelSizeRequested;
+    job.colorSource.mode    = voxel_bake::VoxColorSource::Mode::MaterialBaseColor;
+    job.maxGridCellsPerFrame = m_maxGridCells;
+    // Total-bytes budget — defaults to 1 GB across all frames (R8_UINT == 1
+    // byte/voxel). Prevents a "high-res long bake" from quietly allocating
+    // tens of GB on the worker thread before failing.
+    job.maxTotalBytes        = 1ull * 1024 * 1024 * 1024;
+
+    m_session.bakeRangeStart       = startTime;
+    m_session.bakeRangeEnd         = endTime;
+    m_session.bakeFps              = fps;
+    m_session.bakeStartedAtSeconds = static_cast<float>(
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    m_session.lastBakeStatusMessage = "Submitted bake job…";
+    m_session.lastSaveSucceeded    = false;
+    m_session.lastSavedManifestPath.clear();
+
+    // Defensive: if the baker thread hasn't started yet (panel click landed
+    // before the first RegisterPasses for this technique), the job would sit
+    // in m_pendingFull forever and the user would see "nothing happens".
+    EnsureBakerStarted();
+
+    const uint64_t gen = m_baker.SubmitFullBake(std::move(job));
+    if (logger) logger->info("StartFullBake: submitted gen={} (worker started={})", gen, m_bakerStarted);
+}
+
+void GltfImportTechnique::CancelFullBake() {
+    m_baker.CancelFullBake();
+    m_session.lastBakeStatusMessage = "Bake cancelled.";
+}
+
+bool GltfImportTechnique::SaveBake(const std::string& directory, const std::string& name) {
+    if (!m_session.hasFullBake || m_session.bakeFrameCount == 0) {
+        m_session.lastSaveSucceeded = false;
+        m_session.lastBakeStatusMessage = "No full bake to save.";
+        return false;
+    }
+    if (!m_assets) return false;
+    const auto* vol = m_assets->GetVoxelVolume(m_session.previewVolume);
+    if (!vol || vol->data.empty()) {
+        m_session.lastSaveSucceeded = false;
+        m_session.lastBakeStatusMessage = "Bake bytes not available — re-bake and retry.";
+        return false;
+    }
+
+    // Slice the contiguous Z-slab buffer back into per-frame VoxFrames for
+    // the writer. We deliberately don't keep the per-frame vector alive in
+    // memory after the bake completes — the procedural volume's `data` is
+    // the source of truth, so this slicing happens once at save time.
+    const glm::uvec3 size = m_session.previewVolumeSize;
+    const size_t bytesPerFrame = static_cast<size_t>(size.x) * size.y * size.z;
+    if (bytesPerFrame == 0) {
+        m_session.lastSaveSucceeded = false;
+        m_session.lastBakeStatusMessage = "Bake has zero size.";
+        return false;
+    }
+    if (vol->data.size() < bytesPerFrame * m_session.bakeFrameCount) {
+        m_session.lastSaveSucceeded = false;
+        m_session.lastBakeStatusMessage = "Bake byte count smaller than expected.";
+        return false;
+    }
+
+    std::vector<voxel_bake::VoxFrame> frames(m_session.bakeFrameCount);
+    for (uint32_t i = 0; i < m_session.bakeFrameCount; ++i) {
+        frames[i].size = size;
+        frames[i].indices.assign(
+            vol->data.data() + i * bytesPerFrame,
+            vol->data.data() + (i + 1) * bytesPerFrame);
+    }
+
+    const bool ok = voxel_bake::WriteVxa(
+        directory, name,
+        m_session.bakeFrameCount,
+        m_session.bakeFps,
+        m_session.previewVoxelSize,
+        m_session.previewAabbMin,
+        m_session.previewAabbMax,
+        frames,
+        voxel::GetDefaultPalette());
+
+    m_session.lastSaveSucceeded = ok;
+    if (ok) {
+        m_session.lastSavedManifestPath =
+            (std::filesystem::path(directory) / (name + ".vxa")).string();
+        m_session.lastBakeStatusMessage = "Saved to " + m_session.lastSavedManifestPath;
+    } else {
+        m_session.lastBakeStatusMessage = "Save failed (see log).";
+    }
+    return ok;
+}
+
+bool GltfImportTechnique::LoadBakeFromDisk(const std::string& vxaPath) {
+    if (!m_assets) return false;
+    auto loaded = voxel_bake::LoadVxa(vxaPath);
+    if (!loaded) {
+        m_session.lastBakeStatusMessage = "Load failed (see log).";
+        return false;
+    }
+
+    EnsurePreviewVolumeRegistered();   // creates the slot if it doesn't exist yet
+
+    const glm::uvec3 size = loaded->manifest.size;
+    const uint32_t frames = loaded->manifest.frameCount;
+    m_assets->ResizeProceduralVoxelVolume(m_session.previewVolume, size, frames);
+    if (auto* vol = m_assets->GetVoxelVolume(m_session.previewVolume)) {
+        vol->data        = std::move(loaded->framesData);
+        vol->palette     = loaded->palette;
+        vol->needsUpload = true;
+    }
+
+    m_session.previewVolumeSize    = size;
+    m_session.previewVoxelSize     = loaded->manifest.voxelSizeWorld;
+    m_session.previewAabbMin       = loaded->manifest.originWorldMin;
+    m_session.previewAabbMax       = loaded->manifest.originWorldMax;
+    m_session.hasBake              = true;
+    m_session.hasFullBake          = (frames > 1);
+    m_session.bakeFrameCount       = frames;
+    m_session.bakeFps              = loaded->manifest.fps;
+    m_session.bakeRangeStart       = 0.0f;
+    m_session.bakeRangeEnd         = (loaded->manifest.fps > 0.0f && frames > 0)
+        ? (static_cast<float>(frames - 1) / loaded->manifest.fps) : 0.0f;
+    m_session.lastBakeStatusMessage = "Loaded " + vxaPath;
+    m_session.lastSaveSucceeded    = false;
+    m_session.lastSavedManifestPath = vxaPath;
+    m_session.lastBudgetExceeded   = false;
+
+    // Switch to Voxels view so the load is immediately visible.
+    m_previewMode = PreviewMode::Voxels;
+
+    if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
+    return true;
 }

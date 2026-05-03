@@ -77,11 +77,11 @@ bool BuildSnapshot(const AssetRegistry& assets,
 
 struct PreviewBakeJob {
     BakeSourceSnapshot snapshot;
-    float              time            = 0.0f;
-    float              voxelSizeWorld  = 0.05f;
+    float              time                 = 0.0f;
+    float              voxelSizeWorld       = 0.05f;
     VoxColorSource     colorSource{};
-    uint32_t           maxGridCells    = 512u * 512u * 512u; // ~134M cells, plan §10
-    uint64_t           generation      = 0;                  // matches submitted-gen at result return
+    uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u; // ~134M cells, plan §10
+    uint64_t           generation           = 0;                  // matches submitted-gen at result return
 };
 
 struct PreviewBakeResult {
@@ -90,35 +90,68 @@ struct PreviewBakeResult {
     glm::vec3  worldOriginMax = glm::vec3(0.0f);
     float      voxelSizeWorld = 0.0f;
     uint64_t   generation     = 0;                 // copy of the job's gen
-    bool       budgetExceeded = false;             // grid would have exceeded maxGridCells
+    bool       budgetExceeded = false;             // grid would have exceeded maxGridCellsPerFrame
 };
 
-// ---- FullBakeJob (M4 — interface only in M3) ----
+// ---- FullBakeJob ----
 //
-// Same shape as PreviewBakeJob but iterates [startTime, endTime] @ fps. M3
-// doesn't service these — SubmitFullBake is wired so M4 just adds the worker
-// branch. TakeCompletedFullBake always returns nullopt today.
+// Iterates [startTime, endTime] in 1/fps steps and produces one VoxFrame per
+// step. The grid (size + origin) is held constant across every frame using a
+// clip-wide AABB sampled at K poses before the per-frame loop starts — that's
+// what guarantees the per-frame outputs can be Z-slab-packed into one volume
+// image without resizing each frame.
+//
+// Two cell-budget layers:
+//   - maxGridCellsPerFrame guards the per-frame grid (same units as the
+//     preview budget); a clip-wide AABB whose grid would exceed this rejects
+//     the whole bake before the loop starts.
+//   - maxTotalBytes guards `frameCount * cells * bytesPerCell` (R8_UINT == 1B).
+//     Cheap insurance against a "60 seconds @ 24 fps @ 256³" mistake silently
+//     allocating ~20 GB of voxel data on the worker thread.
 
 struct FullBakeJob {
     BakeSourceSnapshot snapshot;
-    float              startTime       = 0.0f;
-    float              endTime         = 0.0f;
-    float              fps             = 24.0f;
-    float              voxelSizeWorld  = 0.05f;
+    float              startTime           = 0.0f;
+    float              endTime             = 0.0f;
+    float              fps                 = 24.0f;
+    float              voxelSizeWorld      = 0.05f;
     VoxColorSource     colorSource{};
-    uint32_t           maxGridCells    = 512u * 512u * 512u;
-    uint64_t           generation      = 0;
+    uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u;       // ~134M cells
+    uint64_t           maxTotalBytes        = 1ull * 1024 * 1024 * 1024; // 1 GB
+    // Vulkan 3D-image depth cap. Animated volumes pack frames as Z-slabs
+    // (image.depth = size.z * frameCount), and the spec guarantees 2048 as
+    // the minimum supported maxImageDimension3D. Apple Silicon enforces this
+    // exactly; cross-platform code stays safe by capping at the spec floor
+    // rather than querying device limits at job-submission time. Lifting
+    // this requires a packing-scheme change (e.g. sampler2DArray) that
+    // ripples through every animated-voxel consumer.
+    uint32_t           maxPackedDepth       = 2048;
+    uint32_t           aabbSampleCount      = 32;                        // K poses for clip-wide AABB
+    uint64_t           generation           = 0;
 };
+
+// ---- FullBakeResult ----
+//
+// Per-frame voxel data + the constant grid metadata used across every frame.
+// The main thread concatenates frames[i].indices Z-sequentially into one byte
+// blob and uploads via VoxelVolumeAsset::data. Frames are guaranteed to all
+// share the same `size`; the worker fails the bake otherwise.
+//
+// `budgetExceeded` (per-frame or total) and `cancelled` (user-cancelled mid
+// bake) are sticky on the result — the main thread surfaces the reason in
+// the panel rather than just dropping the result silently.
 
 struct FullBakeResult {
     std::vector<VoxFrame> frames;
     glm::vec3             worldOriginMin = glm::vec3(0.0f);
     glm::vec3             worldOriginMax = glm::vec3(0.0f);
+    glm::uvec3            frameSize      = glm::uvec3(0);
     float                 voxelSizeWorld = 0.0f;
     float                 startTime      = 0.0f;
     float                 fps            = 24.0f;
     uint64_t              generation     = 0;
     bool                  budgetExceeded = false;
+    bool                  cancelled      = false;
 };
 
 // ---- AnimationBaker ----
@@ -152,21 +185,34 @@ public:
     // returned value is the gen the worker will tag onto the result.
     uint64_t SubmitPreview(PreviewBakeJob job);
 
-    // M4 entry point — services nothing in M3 (the worker drops the job after
-    // logging). Wired today so M4 only adds the worker branch.
+    // Submit a full-animation bake. Replaces any pending (not-yet-started) full
+    // bake; an already-running full bake continues to completion (call
+    // CancelFullBake first if you want to interrupt it).
     uint64_t SubmitFullBake(FullBakeJob job);
+
+    // Cancel the in-flight full bake (if any). The worker bails out between
+    // frames — the partial result is discarded. Idempotent; safe to call when
+    // nothing is baking.
+    void CancelFullBake();
 
     // Main-thread polls: returns nullopt when no result waiting.
     std::optional<PreviewBakeResult> TakeCompletedPreview();
     std::optional<FullBakeResult>    TakeCompletedFullBake();
 
-    // Status hint for the UI — does not block.
+    // Status hints for the UI — relaxed reads, do not block.
     bool IsPreviewBaking() const  { return m_previewInFlight.load(std::memory_order_relaxed); }
     bool IsFullBaking()    const  { return m_fullInFlight.load(std::memory_order_relaxed); }
+
+    // Per-frame progress on the in-flight (or just-finished) full bake.
+    // Both return 0 when no full bake has run this session. `framesDone` lags
+    // by ~one frame on a busy worker — fine for a progress bar.
+    int  FullBakeFramesDone()  const { return m_fullFramesDone.load(std::memory_order_relaxed); }
+    int  FullBakeFramesTotal() const { return m_fullFramesTotal.load(std::memory_order_relaxed); }
 
 private:
     void WorkerLoop();
     PreviewBakeResult RunPreview(PreviewBakeJob& job, std::atomic<bool>& cancel) const;
+    FullBakeResult    RunFullBake(FullBakeJob& job, std::atomic<bool>& cancel) const;
 
     // Worker thread + signaling.
     std::thread             m_worker;
@@ -181,12 +227,24 @@ private:
 
     // In-flight cancellation flags. The worker reads these by reference from
     // a stack-local copy of the active job; the main thread flips the
-    // currently-active flag when a newer preview arrives.
+    // currently-active flag when (a) a newer preview arrives or (b) the user
+    // hits Cancel on the full bake. Held under m_mutex so the main thread
+    // never dereferences a stack-local that has gone out of scope.
     std::atomic<bool>* m_activePreviewCancel = nullptr;
+    std::atomic<bool>* m_activeFullCancel    = nullptr;
 
     // Status flags (relaxed atomics are sufficient — UI is purely informational).
     std::atomic<bool> m_previewInFlight{false};
     std::atomic<bool> m_fullInFlight{false};
+
+    // Per-frame progress on the in-flight full bake. Read by the panel each
+    // frame to render the progress bar. Worker writes framesDone after every
+    // completed frame; framesTotal is stamped at job start. `mutable` because
+    // RunFullBake is logically const (no observable AnimationBaker state
+    // changes from the *consumer's* point of view) but writes to these
+    // atomics for UI hand-off.
+    mutable std::atomic<int> m_fullFramesDone{0};
+    mutable std::atomic<int> m_fullFramesTotal{0};
 
     // Completed results awaiting main-thread pickup.
     std::optional<PreviewBakeResult> m_completedPreview;

@@ -231,15 +231,24 @@ inline glm::mat4 LocalMatFlat(const glm::vec3& t, const glm::quat& r, const glm:
 
 } // namespace
 
+void EvaluateChannelsFlat(const std::vector<AnimationChannel>& channels,
+                          float clipDuration, float time,
+                          std::vector<glm::vec3>& trs_t,
+                          std::vector<glm::quat>& trs_r,
+                          std::vector<glm::vec3>& trs_s)
+{
+    const float t = (clipDuration > 0.0f) ? std::clamp(time, 0.0f, clipDuration) : time;
+    for (const auto& ch : channels) {
+        ApplyChannelFlat(ch, trs_t, trs_r, trs_s, t);
+    }
+}
+
 void EvaluateClipFlat(const Animation& clip, float time,
                       std::vector<glm::vec3>& trs_t,
                       std::vector<glm::quat>& trs_r,
                       std::vector<glm::vec3>& trs_s)
 {
-    const float t = std::clamp(time, 0.0f, clip.duration);
-    for (const auto& ch : clip.channels) {
-        ApplyChannelFlat(ch, trs_t, trs_r, trs_s, t);
-    }
+    EvaluateChannelsFlat(clip.channels, clip.duration, time, trs_t, trs_r, trs_s);
 }
 
 void ComputeWorldMatricesFlat(const std::vector<Node>& nodes,

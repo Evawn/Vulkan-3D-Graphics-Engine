@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 void BakerPanel::Draw() {
@@ -118,11 +119,14 @@ void BakerPanel::Draw() {
         } else {
             // ---- Voxel size slider (debounced re-bake on release) ----
             //
-            // Logarithmic-ish range: 1mm to 1m. Most useful range for a 10-unit
-            // asset (the AnimatedOak scaled into the viewport) is 1cm–10cm —
-            // the slider sits there by default.
+            // Logarithmic range: 5mm to 5m. The upper end exists to let the
+            // user dodge the Z-slab packed-depth limit (2048) on long bakes
+            // — a 50-unit-tall source mesh at voxelSize=1m is still 50
+            // voxels tall, which * 140 frames = 7000 packed depth. Allowing
+            // up to 5m gives 10 voxels tall in that case (tractable). The
+            // logarithmic mapping keeps the lower-cm range usable.
             float voxelSize = m_technique->GetVoxelSize();
-            if (ImGui::SliderFloat("voxel size", &voxelSize, 0.005f, 1.0f, "%.4f m",
+            if (ImGui::SliderFloat("voxel size", &voxelSize, 0.005f, 5.0f, "%.4f m",
                 ImGuiSliderFlags_Logarithmic))
             {
                 m_technique->SetVoxelSize(voxelSize);
@@ -160,11 +164,21 @@ void BakerPanel::Draw() {
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
                     "Cell budget exceeded — increase voxel size.");
             } else if (session.hasBake) {
-                ImGui::Text("Grid: %u x %u x %u  @ %.4f m",
-                    session.previewVolumeSize.x,
-                    session.previewVolumeSize.y,
-                    session.previewVolumeSize.z,
-                    session.previewVoxelSize);
+                if (session.hasFullBake) {
+                    ImGui::Text("Grid: %u x %u x %u  @ %.4f m  (%u frames @ %.0f fps)",
+                        session.previewVolumeSize.x,
+                        session.previewVolumeSize.y,
+                        session.previewVolumeSize.z,
+                        session.previewVoxelSize,
+                        session.bakeFrameCount,
+                        session.bakeFps);
+                } else {
+                    ImGui::Text("Grid: %u x %u x %u  @ %.4f m",
+                        session.previewVolumeSize.x,
+                        session.previewVolumeSize.y,
+                        session.previewVolumeSize.z,
+                        session.previewVoxelSize);
+                }
             } else {
                 ImGui::TextColored(UIStyle::kTextDim,
                     "No bake yet — adjust voxel size to bake.");
@@ -173,17 +187,179 @@ void BakerPanel::Draw() {
     }
 
     // ============================================================
-    // Bake animation (M4 placeholder)
+    // Bake animation (M4)
     // ============================================================
-    if (ImGui::CollapsingHeader("Bake animation")) {
-        ImGui::TextColored(UIStyle::kTextDim,
-            "Full-animation bake + .vxa export land in M4.");
-        ImGui::BeginDisabled();
-        ImGui::Button("Bake animation");
-        ImGui::SameLine();
-        ImGui::Button("Save\xE2\x80\xA6");
-        ImGui::SameLine();
-        ImGui::Button("Promote to scene");
-        ImGui::EndDisabled();
+    if (ImGui::CollapsingHeader("Bake animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const bool clipReady = session.hasLoadedAsset
+                            && session.activeClipIndex >= 0
+                            && session.activeClipIndex < static_cast<int>(session.clipDurations.size());
+        if (!clipReady) {
+            ImGui::TextColored(UIStyle::kTextDim,
+                "Load a .glb with at least one animation clip to bake.");
+        } else {
+            const float clipDuration = session.clipDurations[session.activeClipIndex];
+
+            // First-time / clip-switch initialization of the local range
+            // mirror. We default to the full clip duration so the user can
+            // just hit "Bake" without touching anything for the demo case.
+            if (!m_bakeRangeInitialized || m_lastSeenClipIndex != session.activeClipIndex) {
+                m_bakeStart = 0.0f;
+                m_bakeEnd   = clipDuration;
+                m_lastSeenClipIndex = session.activeClipIndex;
+                m_bakeRangeInitialized = true;
+            }
+
+            // Range sliders — clamped to the clip's duration.
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("range start", &m_bakeStart, 0.0f, clipDuration, "%.2fs")) {
+                m_bakeStart = std::clamp(m_bakeStart, 0.0f, m_bakeEnd);
+            }
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderFloat("range end",   &m_bakeEnd,   0.0f, clipDuration, "%.2fs")) {
+                m_bakeEnd = std::clamp(m_bakeEnd, m_bakeStart, clipDuration);
+            }
+
+            // FPS dropdown — common multiples of the engine display rate.
+            const float fpsOptions[] = { 12.0f, 15.0f, 24.0f, 30.0f, 48.0f, 60.0f };
+            int fpsIdx = 2;     // 24 default
+            for (int i = 0; i < (int)(sizeof(fpsOptions) / sizeof(fpsOptions[0])); ++i) {
+                if (std::abs(fpsOptions[i] - m_bakeFps) < 0.5f) { fpsIdx = i; break; }
+            }
+            char fpsLabel[16];
+            std::snprintf(fpsLabel, sizeof(fpsLabel), "%.0f fps", m_bakeFps);
+            if (ImGui::BeginCombo("fps", fpsLabel)) {
+                for (int i = 0; i < (int)(sizeof(fpsOptions) / sizeof(fpsOptions[0])); ++i) {
+                    char label[16]; std::snprintf(label, sizeof(label), "%.0f", fpsOptions[i]);
+                    bool sel = (i == fpsIdx);
+                    if (ImGui::Selectable(label, sel)) m_bakeFps = fpsOptions[i];
+                }
+                ImGui::EndCombo();
+            }
+
+            // Predicted frame count (matches RunFullBake's schedule:
+            // inclusive both ends, so duration*fps + 1 samples).
+            const float duration  = std::max(0.0f, m_bakeEnd - m_bakeStart);
+            const int   frameCount = std::max(1, static_cast<int>(std::round(duration * m_bakeFps)) + 1);
+            ImGui::Text("Frames: %d  (%.2fs * %.0ffps + 1)", frameCount, duration, m_bakeFps);
+
+            // Z-slab pack budget. The animated volume packs frames as
+            // Z-slabs (image.depth = size.z * frameCount); Vulkan's
+            // guaranteed cap is 2048. We don't know size.z until the bake
+            // computes the clip-wide AABB — but we can show the user the
+            // current preview's size.z as a proxy so they get an early
+            // warning. If a preview hasn't run yet, hide the hint.
+            constexpr uint32_t kMaxPackedDepth = 2048;
+            if (session.previewVolumeSize.z > 0) {
+                const uint32_t packed = session.previewVolumeSize.z * static_cast<uint32_t>(frameCount);
+                ImVec4 col = (packed > kMaxPackedDepth)
+                    ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : UIStyle::kTextDim;
+                ImGui::TextColored(col,
+                    "Packed depth: %u (z=%u * frames=%d) / %u limit",
+                    packed, session.previewVolumeSize.z, frameCount, kMaxPackedDepth);
+            }
+
+            // Diagnostic readout — surfaces the disabled-button reason and
+            // the live worker state without forcing the user to a terminal.
+            const bool baking_dbg = m_technique->IsBakingFull();
+            ImGui::TextColored(UIStyle::kTextDim,
+                "[dbg] clipReady=%d duration=%.3f baking=%d done=%d total=%d",
+                clipReady ? 1 : 0, duration, baking_dbg ? 1 : 0,
+                m_technique->FullBakeFramesDone(), m_technique->FullBakeFramesTotal());
+
+            ImGui::Spacing();
+
+            // ---- Bake / Cancel buttons ----
+            //
+            // The "##bake" / "##cancel" suffixes give these buttons unique
+            // ImGui IDs that don't collide with the CollapsingHeader's
+            // "Bake animation" label hash. Without the suffix, ImGui treats
+            // the header and the button as the same widget for input
+            // routing, and the Button() never returns true (the click is
+            // attributed to the header instead). The visible label is
+            // everything before "##".
+            const bool baking = baking_dbg;
+            if (baking) {
+                if (ImGui::Button("Cancel bake##cancel")) {
+                    m_technique->CancelFullBake();
+                }
+                ImGui::SameLine();
+                const int done  = m_technique->FullBakeFramesDone();
+                const int total = std::max(1, m_technique->FullBakeFramesTotal());
+                const float frac = std::clamp(static_cast<float>(done) / static_cast<float>(total), 0.0f, 1.0f);
+                char overlay[32];
+                std::snprintf(overlay, sizeof(overlay), "%d / %d", done, total);
+                ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
+            } else {
+                ImGui::BeginDisabled(!clipReady || duration <= 0.0f);
+                if (ImGui::Button("Bake animation##bake")) {
+                    m_technique->StartFullBake(m_bakeStart, m_bakeEnd, m_bakeFps);
+                }
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Spacing();
+
+            // ---- Save / Load row ----
+            ImGui::BeginDisabled(!session.hasFullBake || baking);
+            if (ImGui::Button("Save bake\xE2\x80\xA6")) {
+                m_wantSaveDialog = true;
+            }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(baking);
+            if (ImGui::Button("Load .vxa\xE2\x80\xA6")) {
+                m_wantLoadVxaDialog = true;
+            }
+            ImGui::EndDisabled();
+
+            // ---- Status line ----
+            //
+            // Surfaces the latest message from the technique (save/load
+            // success or failure, cancellation, budget overruns). Cleared
+            // when a new bake starts.
+            if (!session.lastBakeStatusMessage.empty()) {
+                ImVec4 color = session.lastSaveSucceeded
+                    ? ImVec4(0.5f, 0.85f, 0.5f, 1.0f)
+                    : UIStyle::kTextDim;
+                if (session.lastBudgetExceeded) color = ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+                ImGui::TextColored(color, "%s", session.lastBakeStatusMessage.c_str());
+            }
+
+            // ---- Dialog handling (deferred to next frame so ImGui can
+            //      finish its current draw before we block on the OS) ----
+            if (m_wantSaveDialog) {
+                m_wantSaveDialog = false;
+                // Default name = source basename (stem). User can rename in
+                // the save dialog; we strip the .vxa extension before
+                // splitting because the writer adds it back.
+                std::string defaultName = std::filesystem::path(session.sourceFileName).stem().string();
+                if (defaultName.empty()) defaultName = "bake";
+                std::string suggested = defaultName + ".vxa";
+                std::string picked = FileDialog::SaveFile(
+                    "Save Voxel Animation",
+                    {"vxa"},
+                    suggested,
+                    "");
+                if (!picked.empty()) {
+                    std::filesystem::path p(picked);
+                    std::string dir  = p.parent_path().string();
+                    std::string name = p.stem().string();
+                    if (name.empty()) name = defaultName;
+                    m_technique->SaveBake(dir, name);
+                }
+            }
+
+            if (m_wantLoadVxaDialog) {
+                m_wantLoadVxaDialog = false;
+                std::string picked = FileDialog::OpenFile(
+                    "Load Voxel Animation",
+                    {"vxa"},
+                    "");
+                if (!picked.empty()) {
+                    m_technique->LoadBakeFromDisk(picked);
+                }
+            }
+        }
     }
 }
