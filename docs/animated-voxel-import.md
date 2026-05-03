@@ -110,7 +110,7 @@ AnimationBaker (worker thread):
   full bake job:
     for each frame in [t0..t1] step (1/fps):
       same as above
-    pack frames as Z-slabs → one byte buffer
+    pack frames sequentially → one byte buffer (uploaded as 2D-array layers)
     AssetRegistry.ReplacePreviewVolumeWithBake(...)
 
         │ (Save button)
@@ -371,7 +371,8 @@ VoxFrame Voxelize(const VoxelizeInput& in,
 
 1. Compute the grid: `size = ceil((max - min) / voxelSize)`. The same min/max
    is used for every frame of the animation so the volume size is constant
-   across frames (required by Z-slab packing).
+   across frames (required by the layered upload — every layer must share
+   the same 2D extent).
 2. For each triangle:
    - Compute triangle AABB → grid cell range
    - For each cell in range:
@@ -393,9 +394,9 @@ matches your existing foliage aesthetic.
 Box Overlap" test. ~50 lines of code, no dependencies.
 
 **Coordinate stability across frames**: the voxel grid origin/size MUST be
-constant for every frame so the resulting Z-slab volume is well-formed. The
-baker computes a *bake-wide AABB* by sampling joint matrices over the full
-clip duration once, before per-frame voxelization starts.
+constant for every frame so all 2D-array layers share one extent. The baker
+computes a *bake-wide AABB* by sampling joint matrices over the full clip
+duration once, before per-frame voxelization starts.
 
 ### 5.4 PaletteQuantizer — `src/import/PaletteQuantizer.{h,cpp}`
 
@@ -506,7 +507,9 @@ no GPU work happens off-thread.
 `Load(manifestPath) → AnimatedVoxAsset`:
 - Parse manifest
 - Iterate `frames[]`, load each `.vox`, validate sizes match `size`
-- Concatenate volumes into one byte buffer (Z-slabs)
+- Concatenate volumes into one byte buffer (one frame per array layer; the
+  byte order matches what `vkCmdCopyBufferToImage` expects for a layered
+  copy with imageExtent = (size.x, size.y * size.z))
 - Return ready-to-pass-to `AssetRegistry::RegisterAnimatedVoxelAsset` shape
 
 ### 5.7 GltfImportTechnique — combined mesh + voxel viewer
@@ -635,7 +638,9 @@ moment; live re-bake is the second.
   ~250ms after each move. Toggle Mesh / Voxels.
 
 ### Milestone 4 — Full animation bake + write
-- `AnimationBaker` full-bake path (all frames, packed into Z-slab buffer)
+- `AnimationBaker` full-bake path (all frames, packed sequentially into one
+  byte buffer; uploaded as 2D-array layers — see
+  docs/migrate-animated-format.md)
 - `AssetRegistry::ResizeProceduralVoxelVolume` integration: preview
   (frameCount=1) → full bake (frameCount=N) reuses the same AssetID
 - "Bake animation" button + progress bar

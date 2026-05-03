@@ -1,8 +1,8 @@
 # Migrate Animated Voxel Volumes — Z-slab → Frame-as-Array-Layer
 
-Status: design draft, pre-implementation
+Status: implemented (2026-05-03)
 Owner: Evan
-Last updated: 2026-05-02
+Last updated: 2026-05-03
 
 ## 1. The problem
 
@@ -294,26 +294,24 @@ Land in dependency order so each phase leaves the tree green and demoable.
 **Total**: ~2.5 engineer-days. Most of the time is testing — every active
 technique must be smoke-tested at least once after the shader switch.
 
-## 8. Open questions
+## 8. Open questions — resolutions
 
 1. **Within-layer Y/Z packing order** (`y + z*size.y` vs `y*size.z + z`):
-   pick based on DDA stride benchmark, or default to one and measure later?
-2. **1-layer 2D arrays for static volumes**: do we keep static volumes on
-   `VK_IMAGE_TYPE_2D` with `arrayLayers = 1`, or stay on
-   `VK_IMAGE_TYPE_3D` for them and only switch animated volumes? Mixed
-   would mean shaders need to know which they're sampling — easier to
-   unify on 2D-array even for `frameCount == 1`.
-3. **MoltenVK descriptor-indexing path for the future**: if 2048 frames
-   ever stops being enough (long cinematic bakes), the next move is
-   descriptor arrays of independent volumes. Keep the asset format and
-   the in-memory `VoxelVolumeAsset` structure compatible with that
-   future direction — no fields should bake in the "one image per asset"
-   assumption.
-4. **Animated geometry renderer migration**: it currently uses
-   `CreateProceduralVoxelVolume` (single-frame). Do we keep it on the old
-   `usampler3D` path forever, or migrate it to `usampler2DArray` for
-   uniformity? Recommendation: migrate for uniformity — the cost is one
-   shader edit, the benefit is one shader convention.
+   shipped with `y + z*size.y` (Z-major). Reason: the host-side
+   `VoxelVolumeAsset.data` byte layout already happens to match this
+   exactly, so the upload is a single `vkCmdCopyBufferToImage` region with
+   no host repack. Revisit if DDA cache profiling shows a regression — the
+   alternative is one-line.
+2. **1-layer 2D arrays for static volumes**: yes, unified. Static volumes
+   (`frameCount == 1`) declare as `VK_IMAGE_TYPE_2D` with `arrayLayers = 1`.
+   Shaders use a single `usampler2DArray` convention and address
+   `(x, y + z*size.y, 0)` regardless of animation state.
+3. **MoltenVK descriptor-indexing path for the future**: still the future
+   move if 2048 frames is ever insufficient. `VoxelVolumeAsset` stays free
+   of "one image per asset" assumptions in its API surface.
+4. **Animated geometry renderer migration**: migrated. Both
+   `animated_geometry_trace.frag` and `animated_geometry_generate.comp`
+   now use the 2D-array convention with `layer = 0`.
 
 ## 9. Out of scope
 
