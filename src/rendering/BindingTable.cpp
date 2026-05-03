@@ -47,6 +47,14 @@ BindingTable& BindingTable::BindUniformBufferPerFrame(uint32_t binding,
 	return *this;
 }
 
+BindingTable& BindingTable::BindStorageBufferPerFrame(uint32_t binding,
+                                                       std::vector<std::shared_ptr<VWrap::Buffer>> buffers,
+                                                       VkDeviceSize range) {
+	assert(buffers.size() == m_setCount && "per-frame buffer count must match setCount");
+	m_sources.push_back(StorageBufferPerFrame{ binding, std::move(buffers), range });
+	return *this;
+}
+
 void BindingTable::ReplaceExternalSampledImage(uint32_t binding,
                                                 std::shared_ptr<VWrap::ImageView> view,
                                                 std::shared_ptr<VWrap::Sampler> sampler,
@@ -146,6 +154,16 @@ void BindingTable::Update(const RenderGraph& graph) {
 				bufferInfos.push_back(info);
 				w.dstBinding = p->binding;
 				w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				w.pBufferInfo = &bufferInfos.back();
+			}
+			else if (auto p = std::get_if<StorageBufferPerFrame>(&src)) {
+				VkDescriptorBufferInfo info{};
+				info.buffer = p->buffers[setIdx]->Get();
+				info.offset = 0;
+				info.range = p->range;
+				bufferInfos.push_back(info);
+				w.dstBinding = p->binding;
+				w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 				w.pBufferInfo = &bufferInfos.back();
 			}
 

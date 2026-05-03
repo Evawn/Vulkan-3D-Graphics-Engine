@@ -159,6 +159,22 @@ std::vector<TechniqueParameter>& SceneNode::GetParameters() {
 				}
 				break;
 			}
+			case ComponentType::SkinnedMesh: {
+				label = "Skinned Mesh";
+				if (g_inspectorAssets) {
+					if (const auto* m = g_inspectorAssets->GetSkinnedMesh(c.asset)) {
+						value = m->name + " (" + std::to_string(m->primitives.size()) + " prims)";
+						if (const auto* clip = g_inspectorAssets->GetAnimationClip(c.clipAsset)) {
+							char buf[64];
+							snprintf(buf, sizeof(buf), " · clip %.2fs · t=%.2fs",
+								clip->duration, c.currentTime);
+							value += buf;
+						}
+					}
+				}
+				if (value.empty()) value = "(asset missing)";
+				break;
+			}
 		}
 		m_componentTextCache.push_back(std::move(value));
 		TechniqueParameter p;

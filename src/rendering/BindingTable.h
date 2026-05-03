@@ -57,6 +57,14 @@ public:
 	                                         std::vector<std::shared_ptr<VWrap::Buffer>> buffers,
 	                                         VkDeviceSize range);
 
+	// Per-frame storage buffer: one VkBuffer per frame in flight. Matches the
+	// UniformBufferPerFrame pattern but emits VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+	// writes. Use for unbounded per-frame data the technique writes from CPU
+	// (e.g. the SkinnedMesh joint matrix arena, foliage instance scratch).
+	BindingTable& BindStorageBufferPerFrame(uint32_t binding,
+	                                         std::vector<std::shared_ptr<VWrap::Buffer>> buffers,
+	                                         VkDeviceSize range);
+
 	// Mutates the existing ExternalSampledImage source at `binding` without
 	// rebuilding the layout/pool/sets. The new view+sampler take effect on the
 	// next Update(). Used for hot-swap of technique-owned textures.
@@ -83,9 +91,10 @@ private:
 	struct GraphStorageBuffer { uint32_t binding; BufferHandle handle; };
 	struct ExternalSampledImage { uint32_t binding; std::shared_ptr<VWrap::ImageView> view; std::shared_ptr<VWrap::Sampler> sampler; VkImageLayout layout; };
 	struct UniformBufferPerFrame { uint32_t binding; std::vector<std::shared_ptr<VWrap::Buffer>> buffers; VkDeviceSize range; };
+	struct StorageBufferPerFrame { uint32_t binding; std::vector<std::shared_ptr<VWrap::Buffer>> buffers; VkDeviceSize range; };
 
 	using Source = std::variant<GraphSampledImage, GraphStorageImage, GraphStorageBuffer,
-	                            ExternalSampledImage, UniformBufferPerFrame>;
+	                            ExternalSampledImage, UniformBufferPerFrame, StorageBufferPerFrame>;
 
 	std::shared_ptr<VWrap::Device> m_device;
 	uint32_t m_setCount;

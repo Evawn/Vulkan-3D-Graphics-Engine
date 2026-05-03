@@ -103,6 +103,21 @@ void Editor::InitPanels(std::vector<std::unique_ptr<RenderTechnique>>* renderers
 	// Render Graph
 	m_gui->RegisterPanel("Render Graph", [this]() { m_renderGraphPanel.Draw(); });
 
+	// Baker (Import & Bake workspace). The technique pointer is wired in
+	// SetGltfImportTechnique by Application after both objects exist. The
+	// panel always begins/ends an ImGui window — visibility is gated by the
+	// workspace via GUIRenderer::SetPanelVisible.
+	m_gui->RegisterPanel("Baker", [this]() {
+		ImGui::Begin("Baker");
+		m_baker.Draw();
+		ImGui::End();
+	});
+
+	// Apply the initial workspace's panel visibility set so first frame is
+	// already correct. Default workspace = Scene → no panels hidden, the
+	// Baker panel is hidden.
+	ApplyWorkspaceVisibility();
+
 	// Top menu bar + bottom status bar
 	m_gui->SetMenuBar  ([this]{ DrawMenuBar();   });
 	m_gui->SetStatusBar([this]{ DrawStatusBar(); });
@@ -206,6 +221,45 @@ void Editor::SetPerformanceMetrics(const GPUProfiler::PerformanceMetrics* metric
 	m_performance.SetMetrics(metrics);
 }
 
+// ---- Workspace ----
+
+void Editor::SetWorkspace(Workspace ws) {
+	if (ws == m_workspace) return;
+	const Workspace prev = m_workspace;
+	m_workspace = ws;
+
+	// Capture / restore the Scene technique on the way in / out.
+	if (ws == Workspace::ImportBake && prev == Workspace::Scene) {
+		if (m_active_renderer_index) {
+			m_savedSceneTechniqueIndex = static_cast<int>(*m_active_renderer_index);
+		}
+	}
+
+	const auto cfg = WorkspaceConfigOf(ws);
+	if (cfg.lockedTechniqueName && cfg.lockedTechniqueName[0] != '\0') {
+		if (m_switchByNameCallback) m_switchByNameCallback(std::string(cfg.lockedTechniqueName));
+	} else if (ws == Workspace::Scene && m_savedSceneTechniqueIndex >= 0) {
+		// Restore the Scene-side technique. We dispatch this via the inspector's
+		// switch callback which is already wired to the rendering event queue.
+		m_inspector.RequestSwitchTechnique(static_cast<size_t>(m_savedSceneTechniqueIndex));
+	}
+
+	ApplyWorkspaceVisibility();
+}
+
+void Editor::ApplyWorkspaceVisibility() {
+	if (!m_gui) return;
+	const auto cfg = WorkspaceConfigOf(m_workspace);
+	m_gui->SetPanelVisible("Hierarchy",     cfg.showsHierarchy);
+	m_gui->SetPanelVisible("Inspector",     cfg.showsInspector);
+	m_gui->SetPanelVisible("Baker",         cfg.showsBaker);
+	m_gui->SetPanelVisible("Render Graph",  cfg.showsRenderGraph);
+	m_gui->SetPanelVisible("Performance",   cfg.showsPerformance);
+	m_gui->SetPanelVisible("Memory",        cfg.showsMemory);
+	m_gui->SetPanelVisible("Console",       cfg.showsConsole);
+	// Viewport is always visible.
+}
+
 // =============================================================================
 // Menu bar
 // =============================================================================
@@ -284,6 +338,33 @@ void Editor::DrawMenuBar() {
 		ImGui::TextColored(UIStyle::kTextDim, "Vulkan Voxel Engine");
 		ImGui::TextColored(UIStyle::kTextDim, "Diorama renderer · matrix-green build");
 		ImGui::EndMenu();
+	}
+
+	// ---- Workspace tab strip (right-aligned) ----
+	//
+	// Lives in the menu bar so it's always visible regardless of layout
+	// preset. Right-anchored so it doesn't shift when menu titles change.
+	const Workspace workspaces[] = { Workspace::Scene, Workspace::ImportBake };
+	float wstripWidth = 0.0f;
+	for (auto ws : workspaces) {
+		const auto cfg = WorkspaceConfigOf(ws);
+		ImVec2 sz = ImGui::CalcTextSize(cfg.displayName);
+		wstripWidth += sz.x + ImGui::GetStyle().FramePadding.x * 2.0f
+		                    + ImGui::GetStyle().ItemSpacing.x;
+	}
+	const float menuW = ImGui::GetWindowSize().x;
+	ImGui::SameLine(std::max(0.0f, menuW - wstripWidth - 8.0f));
+
+	for (auto ws : workspaces) {
+		const auto cfg = WorkspaceConfigOf(ws);
+		const bool active = (m_workspace == ws);
+		ImVec4 col = active ? UIStyle::kAccent : ImGui::GetStyleColorVec4(ImGuiCol_Button);
+		ImGui::PushStyleColor(ImGuiCol_Button, col);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+		if (ImGui::SmallButton(cfg.displayName) && !active) {
+			SetWorkspace(ws);
+		}
+		ImGui::PopStyleColor(2);
 	}
 }
 

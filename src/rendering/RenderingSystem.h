@@ -64,6 +64,10 @@ public:
 	// Public requests posted to the queue and drained in ProcessEvents().
 	void RequestReload();
 	void RequestSwitchTechnique(size_t idx);
+	// Look up a technique by display name and switch to it. No-op if no match.
+	// Used by the Workspace switcher (Editor::SetWorkspace) so it doesn't have
+	// to know technique indices.
+	void RequestSwitchTechniqueByName(const std::string& displayName);
 	void RequestScreenshot();
 	void RequestToggleRecording();
 
@@ -166,4 +170,8 @@ private:
 
 	// Per-frame producer that consumes m_world + m_assets and writes m_scene.
 	SceneExtractor m_extractor;
+
+	// Last logical-time stamp used to compute dt for the extractor's animation
+	// playback. <= 0 means "this is the first frame, no dt yet."
+	double m_lastExtractTime = 0.0;
 };

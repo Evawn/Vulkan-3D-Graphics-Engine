@@ -36,6 +36,7 @@ enum class ComponentType : uint8_t {
 	Mesh,
 	VoxelVolume,
 	InstanceCloud,
+	SkinnedMesh,
 };
 
 struct Component {
@@ -45,6 +46,18 @@ struct Component {
 	// VoxelVolume / InstanceCloud — number of animation frames packed in the
 	// asset (Z-slabs of the volume image). Mesh ignores this.
 	uint32_t frameCount = 1;
+
+	// ---- SkinnedMesh-only ----
+	//
+	// Drives playback of an animation clip against a skinned mesh asset. The
+	// SceneExtractor evaluates the clip on the CPU each frame and emits one
+	// RenderItem::SkinnedMesh per primitive; the joint matrix array lives on
+	// the RenderScene's per-frame arena.
+	AssetID  clipAsset;            // index into AnimationClip pool; invalid = rest pose
+	int      skinIndex     = 0;    // which skin in the SkinnedMeshAsset to drive
+	float    currentTime   = 0.0f; // seconds, wraps modulo clip.duration
+	float    playbackSpeed = 1.0f; // 1.0 = real-time
+	bool     paused        = false;
 
 	// ---- InstanceCloud-only ----
 	//

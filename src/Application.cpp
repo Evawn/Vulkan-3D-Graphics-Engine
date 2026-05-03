@@ -4,6 +4,7 @@
 #include "AnimatedGeometryRenderer.h"
 #include "InstancedVoxelTechnique.h"
 #include "CombinedRenderer.h"
+#include "GltfImportTechnique.h"
 #include "Scene.h"
 #include "post-process/BloomEffect.h"
 #include "post-process/LensFlareEffect.h"
@@ -48,6 +49,12 @@ void Application::Init() {
 	m_rendering.AddTechnique(std::make_unique<AnimatedGeometryRenderer>());
 	m_rendering.AddTechnique(std::make_unique<InstancedVoxelTechnique>());
 	m_rendering.AddTechnique(std::make_unique<MeshRasterizer>());
+	// Workspace-locked technique for the Import & Bake workspace. Coexists
+	// with the Scene techniques — Editor's workspace switcher (M2) routes
+	// the user here when they enter ImportBake mode.
+	auto gltfImport = std::make_unique<GltfImportTechnique>();
+	GltfImportTechnique* gltfImportPtr = gltfImport.get();
+	m_rendering.AddTechnique(std::move(gltfImport));
 
 	// Wire UI record + before/after rebuild hooks BEFORE first build runs, so
 	// the initial graph already has the ImGui draw callback wired in.
@@ -119,6 +126,14 @@ void Application::Init() {
 
 	// Editor reads capture state directly (live status for the indicator + UI footer).
 	m_editor.SetCaptureSystem(&m_rendering.GetCapture());
+
+	// Workspace plumbing: editor needs to drive the import technique through
+	// the BakerPanel + ask the rendering system to switch techniques by name
+	// when the workspace changes.
+	m_editor.SetGltfImportTechnique(gltfImportPtr);
+	m_editor.SetSwitchTechniqueByNameCallback([this](const std::string& name) {
+		m_rendering.RequestSwitchTechniqueByName(name);
+	});
 
 	m_state = AppState::Running;
 }

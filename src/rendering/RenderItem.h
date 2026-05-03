@@ -26,6 +26,7 @@ enum class RenderItemType : uint8_t {
 	Fullscreen,          // Full-screen quad — ray-march tracers, post-process effects.
 	InstancedVoxelMesh,  // Bounding-volume rasterized voxel volume + per-instance SSBO; for foliage.
 	BrickmapVolume,      // Reserved — bounded brickmap rendering (vs the current full-screen tracer).
+	SkinnedMesh,         // GPU-skinned indexed triangle mesh; joints come from the RenderScene arena.
 
 	Count_  // sentinel for bucketing — must be last
 };
@@ -35,7 +36,7 @@ inline constexpr size_t kRenderItemTypeCount = static_cast<size_t>(RenderItemTyp
 struct RenderItem {
 	RenderItemType type = RenderItemType::Mesh;
 
-	// --- Geometry (Mesh, InstancedVoxelMesh) ---
+	// --- Geometry (Mesh, InstancedVoxelMesh, SkinnedMesh) ---
 	BufferHandle  vertexBuffer;
 	BufferHandle  indexBuffer;
 	uint32_t      indexCount       = 0;
@@ -63,6 +64,16 @@ struct RenderItem {
 	// --- AABB (InstancedVoxelMesh — sizes the bounding-box rasterization draw) ---
 	glm::vec3     aabbMin          = glm::vec3(0.0f);
 	glm::vec3     aabbMax          = glm::vec3(0.0f);
+
+	// --- SkinnedMesh fields ---
+	// Joints come from the RenderScene's per-frame joint arena. SceneExtractor
+	// pushes the joint matrices in once per Component::SkinnedMesh, then emits
+	// one RenderItem per primitive sharing the same (firstJoint, jointCount)
+	// range. The technique uploads the whole arena to its per-frame SSBO and
+	// the shader indexes via `joints[firstJoint + boneIdx]`.
+	uint32_t      firstJoint       = 0;
+	uint32_t      jointCount       = 0;
+	glm::vec4     baseColorFactor  = glm::vec4(1.0f);
 };
 
 // ---- Draw helpers ----
@@ -77,3 +88,4 @@ class RenderGraph;
 void DrawMeshItem           (const PassContext& ctx, const RenderItem& item, const RenderGraph& graph);
 void DrawFullscreenItem     (const PassContext& ctx, const RenderItem& item);
 void DrawInstancedVoxelMesh (const PassContext& ctx, const RenderItem& item, const RenderGraph& graph);
+void DrawSkinnedMeshItem    (const PassContext& ctx, const RenderItem& item, const RenderGraph& graph);

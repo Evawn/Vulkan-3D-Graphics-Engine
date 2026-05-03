@@ -4,6 +4,7 @@
 #include "VoxLoader.h"
 #include "Utils.h"          // VWrap::Vertex
 #include "CommandPool.h"
+#include "SkinnedMeshAsset.h"
 
 #include <glm/glm.hpp>
 #include <array>
@@ -22,7 +23,7 @@ class RenderGraph;
 // these on lookup failure).
 
 struct AssetID {
-	enum class Type : uint8_t { Invalid, Mesh, VoxelVolume };
+	enum class Type : uint8_t { Invalid, Mesh, VoxelVolume, SkinnedMesh, AnimationClip };
 	uint32_t id   = UINT32_MAX;
 	Type     type = Type::Invalid;
 
@@ -177,6 +178,34 @@ public:
 	const VoxelVolumeAsset* GetVoxelVolume(AssetID id) const;
 	VoxelVolumeAsset*       GetVoxelVolume(AssetID id);
 
+	// ---- Skinned mesh API ----
+	// Promote an in-memory SkinnedMeshAsset (assembled from MeshIR by the
+	// import pipeline) into the registry. The next graph rebuild will allocate
+	// per-primitive vertex/index buffers; UploadPending pushes the bytes after
+	// Compile. Pass-by-value because the caller has typically just constructed
+	// the asset on the heap and we move-take ownership.
+	AssetID RegisterSkinnedMesh(SkinnedMeshAsset asset);
+
+	// Replace an existing skinned mesh in place. Returns true if any primitive
+	// vertex/index sizes changed (caller should request a graph rebuild).
+	bool    ReplaceSkinnedMesh(AssetID id, SkinnedMeshAsset newAsset);
+
+	// Drop a skinned mesh and its graph buffers. v1 doesn't free the slot —
+	// the asset is just marked empty (data cleared, primitives erased). The
+	// next ReplaceSkinnedMesh on the same ID will refill it. This keeps
+	// AssetID stable across re-imports of the same file.
+	void    ClearSkinnedMesh(AssetID id);
+
+	const SkinnedMeshAsset* GetSkinnedMesh(AssetID id) const;
+	SkinnedMeshAsset*       GetSkinnedMesh(AssetID id);
+
+	// ---- Animation clip API ----
+	AssetID RegisterAnimationClip(AnimationClipAsset clip);
+	bool    ReplaceAnimationClip(AssetID id, AnimationClipAsset clip);
+	void    ClearAnimationClip(AssetID id);
+	const AnimationClipAsset* GetAnimationClip(AssetID id) const;
+	AnimationClipAsset*       GetAnimationClip(AssetID id);
+
 	// ---- Lifecycle hooks (called by RenderingSystem) ----
 	// Re-declare every owned asset's persistent graph resources. Must run
 	// before techniques' RegisterPasses so handles are valid when techniques
@@ -192,12 +221,16 @@ public:
 	void UploadPending(RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
 
 	// ---- Introspection ----
-	size_t MeshCount()        const { return m_meshes.size(); }
-	size_t VoxelVolumeCount() const { return m_volumes.size(); }
+	size_t MeshCount()           const { return m_meshes.size(); }
+	size_t VoxelVolumeCount()    const { return m_volumes.size(); }
+	size_t SkinnedMeshCount()    const { return m_skinnedMeshes.size(); }
+	size_t AnimationClipCount()  const { return m_clips.size(); }
 
 private:
-	std::vector<MeshAsset>        m_meshes;
-	std::vector<VoxelVolumeAsset> m_volumes;
+	std::vector<MeshAsset>          m_meshes;
+	std::vector<VoxelVolumeAsset>   m_volumes;
+	std::vector<SkinnedMeshAsset>   m_skinnedMeshes;
+	std::vector<AnimationClipAsset> m_clips;
 
 	// Set by DeclareGraphResources, cleared by UploadPending. While non-null
 	// any new asset registered via the public Register*/Create* APIs has its
@@ -207,6 +240,8 @@ private:
 
 	void DeclareMesh(MeshAsset& m, RenderGraph& graph);
 	void DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph);
+	void DeclareSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph);
 	void UploadMesh(MeshAsset& m, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
 	void UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
+	void UploadSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
 };

@@ -170,6 +170,82 @@ VoxelVolumeAsset* AssetRegistry::GetVoxelVolume(AssetID id) {
 	return &m_volumes[id.id];
 }
 
+// ---- Skinned mesh API ----
+
+AssetID AssetRegistry::RegisterSkinnedMesh(SkinnedMeshAsset asset) {
+	asset.needsUpload = !asset.primitives.empty();
+	m_skinnedMeshes.push_back(std::move(asset));
+	if (m_currentGraph) DeclareSkinnedMesh(m_skinnedMeshes.back(), *m_currentGraph);
+	return AssetID{ static_cast<uint32_t>(m_skinnedMeshes.size() - 1), AssetID::Type::SkinnedMesh };
+}
+
+bool AssetRegistry::ReplaceSkinnedMesh(AssetID id, SkinnedMeshAsset newAsset) {
+	auto* s = GetSkinnedMesh(id);
+	if (!s) return false;
+	// Compare per-primitive sizes — any change in vertex/index count requires
+	// a graph rebuild because persistent buffers are sized at declare time.
+	bool sizeChanged = (s->primitives.size() != newAsset.primitives.size());
+	if (!sizeChanged) {
+		for (size_t i = 0; i < s->primitives.size(); ++i) {
+			if (s->primitives[i].vertices.size() != newAsset.primitives[i].vertices.size()
+			 || s->primitives[i].indices.size()  != newAsset.primitives[i].indices.size())
+			{
+				sizeChanged = true;
+				break;
+			}
+		}
+	}
+	*s = std::move(newAsset);
+	s->needsUpload = !s->primitives.empty();
+	return sizeChanged;
+}
+
+void AssetRegistry::ClearSkinnedMesh(AssetID id) {
+	auto* s = GetSkinnedMesh(id);
+	if (!s) return;
+	*s = SkinnedMeshAsset{};
+}
+
+const SkinnedMeshAsset* AssetRegistry::GetSkinnedMesh(AssetID id) const {
+	if (id.type != AssetID::Type::SkinnedMesh || id.id >= m_skinnedMeshes.size()) return nullptr;
+	return &m_skinnedMeshes[id.id];
+}
+
+SkinnedMeshAsset* AssetRegistry::GetSkinnedMesh(AssetID id) {
+	if (id.type != AssetID::Type::SkinnedMesh || id.id >= m_skinnedMeshes.size()) return nullptr;
+	return &m_skinnedMeshes[id.id];
+}
+
+// ---- Animation clip API ----
+
+AssetID AssetRegistry::RegisterAnimationClip(AnimationClipAsset clip) {
+	m_clips.push_back(std::move(clip));
+	return AssetID{ static_cast<uint32_t>(m_clips.size() - 1), AssetID::Type::AnimationClip };
+}
+
+bool AssetRegistry::ReplaceAnimationClip(AssetID id, AnimationClipAsset clip) {
+	auto* c = GetAnimationClip(id);
+	if (!c) return false;
+	*c = std::move(clip);
+	return true;
+}
+
+void AssetRegistry::ClearAnimationClip(AssetID id) {
+	auto* c = GetAnimationClip(id);
+	if (!c) return;
+	*c = AnimationClipAsset{};
+}
+
+const AnimationClipAsset* AssetRegistry::GetAnimationClip(AssetID id) const {
+	if (id.type != AssetID::Type::AnimationClip || id.id >= m_clips.size()) return nullptr;
+	return &m_clips[id.id];
+}
+
+AnimationClipAsset* AssetRegistry::GetAnimationClip(AssetID id) {
+	if (id.type != AssetID::Type::AnimationClip || id.id >= m_clips.size()) return nullptr;
+	return &m_clips[id.id];
+}
+
 // ---- Lifecycle ----
 
 void AssetRegistry::DeclareGraphResources(RenderGraph& graph) {
@@ -179,6 +255,7 @@ void AssetRegistry::DeclareGraphResources(RenderGraph& graph) {
 	// the spot. UploadPending clears the pointer at the end of the build.
 	for (auto& m : m_meshes) DeclareMesh(m, graph);
 	for (auto& v : m_volumes) DeclareVolume(v, graph);
+	for (auto& s : m_skinnedMeshes) DeclareSkinnedMesh(s, graph);
 	m_currentGraph = &graph;
 }
 
@@ -233,7 +310,44 @@ void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
 void AssetRegistry::UploadPending(RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool) {
 	for (auto& m : m_meshes) UploadMesh(m, graph, pool);
 	for (auto& v : m_volumes) UploadVolume(v, graph, pool);
+	for (auto& s : m_skinnedMeshes) UploadSkinnedMesh(s, graph, pool);
 	m_currentGraph = nullptr;
+}
+
+void AssetRegistry::DeclareSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph) {
+	for (size_t i = 0; i < s.primitives.size(); ++i) {
+		auto& p = s.primitives[i];
+		if (p.vertices.empty() || p.indices.empty()) {
+			p.vertexBuffer = {};
+			p.indexBuffer  = {};
+			continue;
+		}
+		BufferDesc vb{};
+		vb.size     = sizeof(gltf_import::SkinnedVertex) * p.vertices.size();
+		vb.usage    = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		vb.lifetime = Lifetime::Persistent;
+		p.vertexBuffer = graph.CreateBuffer(s.name + "_p" + std::to_string(i) + "_vbuf", vb);
+
+		BufferDesc ib{};
+		ib.size     = sizeof(uint32_t) * p.indices.size();
+		ib.usage    = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		ib.lifetime = Lifetime::Persistent;
+		p.indexBuffer = graph.CreateBuffer(s.name + "_p" + std::to_string(i) + "_ibuf", ib);
+	}
+}
+
+void AssetRegistry::UploadSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph,
+                                      std::shared_ptr<VWrap::CommandPool> pool) {
+	if (!s.needsUpload) return;
+	for (auto& p : s.primitives) {
+		if (p.vertices.empty()) continue;
+		if (p.vertexBuffer.id == UINT32_MAX) continue;
+		const VkDeviceSize vbSize = sizeof(gltf_import::SkinnedVertex) * p.vertices.size();
+		const VkDeviceSize ibSize = sizeof(uint32_t) * p.indices.size();
+		graph.UploadBufferData(p.vertexBuffer, p.vertices.data(), vbSize, pool);
+		graph.UploadBufferData(p.indexBuffer,  p.indices.data(),  ibSize, pool);
+	}
+	s.needsUpload = false;
 }
 
 void AssetRegistry::UploadMesh(MeshAsset& m, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool) {

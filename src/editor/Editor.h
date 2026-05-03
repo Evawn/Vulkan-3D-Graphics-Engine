@@ -2,6 +2,7 @@
 
 #include "GUIRenderer.h"
 #include "UIState.h"
+#include "Workspace.h"
 #include "ViewportPanel.h"
 #include "PerformancePanel.h"
 #include "MemoryPanel.h"
@@ -9,12 +10,15 @@
 #include "InspectorPanel.h"
 #include "HierarchyPanel.h"
 #include "RenderGraphPanel.h"
+#include "BakerPanel.h"
 #include "VulkanContext.h"
 #include "Sampler.h"
 #include "ImageView.h"
 #include "Camera.h"
 #include "CameraController.h"
 #include "RenderTechnique.h"
+
+class GltfImportTechnique;
 
 namespace Capture { class CaptureSystem; }
 
@@ -104,6 +108,22 @@ public:
 	// Shared UI state (panel sizes, viewport-only mode, camera focus mirror, etc.)
 	UIState* GetState() { return &m_ui; }
 
+	// ---- Workspace ----
+	//
+	// SetWorkspace toggles between Scene and ImportBake. Application wires the
+	// callback through which we ask the rendering system to switch the active
+	// technique by display-name match (Workspace::ImportBake locks to "GLB
+	// Import & Bake"). Returning to Scene restores whichever technique was
+	// active before the user entered ImportBake.
+	void SetWorkspace(Workspace ws);
+	Workspace GetWorkspace() const { return m_workspace; }
+	void SetGltfImportTechnique(GltfImportTechnique* tech) {
+		m_baker.SetTechnique(tech);
+	}
+	void SetSwitchTechniqueByNameCallback(std::function<void(const std::string&)> cb) {
+		m_switchByNameCallback = std::move(cb);
+	}
+
 private:
 	UIState m_ui;
 	std::shared_ptr<GUIRenderer> m_gui;
@@ -117,6 +137,17 @@ private:
 	InspectorPanel m_inspector;
 	HierarchyPanel m_hierarchy;
 	RenderGraphPanel m_renderGraphPanel;
+	BakerPanel       m_baker;
+
+	// Workspace state.
+	Workspace m_workspace = Workspace::Scene;
+	// Snapshot of the Scene-workspace's active technique index. When the user
+	// enters ImportBake we capture the current m_active_renderer_index here
+	// and restore it on the way back. -1 = no snapshot taken yet.
+	int       m_savedSceneTechniqueIndex = -1;
+	std::function<void(const std::string&)> m_switchByNameCallback;
+	// Apply m_workspace's WorkspaceConfig to GUIRenderer panel visibility.
+	void ApplyWorkspaceVisibility();
 
 	Scene* m_scene = nullptr;
 	std::vector<std::unique_ptr<RenderTechnique>>* m_renderers = nullptr;

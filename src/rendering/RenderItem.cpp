@@ -31,3 +31,16 @@ void DrawInstancedVoxelMesh(const PassContext& ctx, const RenderItem& item, cons
 	(void)graph;
 	ctx.cmd->CmdDraw(36, item.instanceCount, 0, item.firstInstance);
 }
+
+void DrawSkinnedMeshItem(const PassContext& ctx, const RenderItem& item, const RenderGraph& graph) {
+	if (item.indexCount == 0) return;
+	auto vk_cmd = ctx.cmd->Get();
+
+	VkBuffer vbufs[]      = { graph.GetVkBuffer(item.vertexBuffer) };
+	VkDeviceSize offsets[] = { 0 };
+	vkCmdBindVertexBuffers(vk_cmd, 0, 1, vbufs, offsets);
+	vkCmdBindIndexBuffer(vk_cmd, graph.GetVkBuffer(item.indexBuffer), 0, VK_INDEX_TYPE_UINT32);
+	vkCmdDrawIndexed(vk_cmd,
+		item.indexCount, item.instanceCount,
+		item.firstIndex, item.vertexOffset, item.firstInstance);
+}

@@ -136,6 +136,16 @@ void RenderingSystem::RequestSwitchTechnique(size_t i) { PushEvent({AppEventType
 void RenderingSystem::RequestScreenshot()              { PushEvent({AppEventType::CaptureScreenshot}); }
 void RenderingSystem::RequestToggleRecording()         { PushEvent({AppEventType::ToggleRecording}); }
 
+void RenderingSystem::RequestSwitchTechniqueByName(const std::string& name) {
+	for (size_t i = 0; i < m_techniques.size(); ++i) {
+		if (m_techniques[i]->GetDisplayName() == name) {
+			RequestSwitchTechnique(i);
+			return;
+		}
+	}
+	spdlog::get("App")->warn("RequestSwitchTechniqueByName: no technique named '{}'", name);
+}
+
 void RenderingSystem::HandleSwapchainResize() {
 	// Swapchain rebuild — graph needs full rebuild so the UI pass picks up new
 	// swapchain framebuffers. Scene offscreen images stay at m_offscreenExtent.
@@ -252,8 +262,16 @@ void RenderingSystem::DrawFrame(std::shared_ptr<VWrap::CommandBuffer> cmd, uint3
 	// the extractor walk the world tree to refill it. Techniques are pure
 	// consumers — they never write to m_scene; pass record callbacks read
 	// items via PassContext::scene during graph Execute.
+	//
+	// dt drives skinned-mesh playback advancement (Component::currentTime). We
+	// derive it from logical time so FixedStep recordings step animation by
+	// 1/fps regardless of wall-clock pacing.
+	const double now = m_capture.GetLogicalTimeSeconds();
+	const float  dt  = (m_lastExtractTime > 0.0) ? static_cast<float>(now - m_lastExtractTime) : 0.0f;
+	m_lastExtractTime = now;
+
 	m_scene.Clear();
-	m_extractor.Extract(m_world, m_assets, m_scene);
+	m_extractor.Extract(m_world, m_assets, m_scene, dt);
 	m_renderer.GetGraph().SetScene(&m_scene);
 
 	m_lastMetrics = m_profiler->GetMetrics(frameIndex);

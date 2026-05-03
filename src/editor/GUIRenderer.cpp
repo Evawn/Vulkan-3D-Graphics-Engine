@@ -27,7 +27,13 @@ void GUIRenderer::LoadFonts(float dpi_scale) {
 }
 
 void GUIRenderer::RegisterPanel(const std::string& name, std::function<void()> drawFn) {
-	m_panels.push_back({ name, std::move(drawFn) });
+	m_panels.push_back({ name, std::move(drawFn), true });
+}
+
+void GUIRenderer::SetPanelVisible(const std::string& name, bool visible) {
+	for (auto& p : m_panels) {
+		if (p.name == name) { p.visible = visible; return; }
+	}
 }
 
 void GUIRenderer::SetupDefaultLayout(ImGuiID dockspace_id) {
@@ -160,6 +166,9 @@ void GUIRenderer::CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer) 
 		// Skip non-Viewport panels in viewport-only / Performance preset.
 		const bool only_viewport = viewport_only || preset == LayoutPreset::Performance;
 		if (only_viewport && panel.name != "Viewport") continue;
+		// Workspace gating — panels hidden by the active workspace are not
+		// drawn (their dock window also disappears).
+		if (!panel.visible) continue;
 		panel.drawFn();
 	}
 

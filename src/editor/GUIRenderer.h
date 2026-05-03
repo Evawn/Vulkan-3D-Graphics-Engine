@@ -36,6 +36,7 @@ private:
 	struct Panel {
 		std::string name;
 		std::function<void()> drawFn;
+		bool visible = true;     // workspaces gate this; defaults visible
 	};
 	std::vector<Panel> m_panels;
 
@@ -53,6 +54,11 @@ public:
 
 	void SetUIState(UIState* ui) { m_ui = ui; }
 	void RegisterPanel(const std::string& name, std::function<void()> drawFn);
+	// Toggle whether a registered panel's drawFn is invoked. Workspaces use
+	// this to hide panels that don't belong (e.g. Hierarchy in ImportBake).
+	// No-op for unknown names — caller doesn't need to track which panels were
+	// registered, only which ones to gate.
+	void SetPanelVisible(const std::string& name, bool visible);
 	void SetMenuBar(std::function<void()> fn)   { m_menu_bar_fn   = std::move(fn); }
 	void SetStatusBar(std::function<void()> fn) { m_status_bar_fn = std::move(fn); }
 	void CmdDraw(std::shared_ptr<VWrap::CommandBuffer> command_buffer);
