@@ -5,8 +5,9 @@
 // The vertex shader sets us up at a point on the cube surface in
 // instance-local space (aabbMin..aabbMax). We march from there in the local
 // equivalent of the world-space view direction, sampling the voxel image at
-// `(x, y, z + frameIdx * size.z)` (frames as Z-slabs). On hit we read the
-// palette and run the existing lighting + corner-AO helpers.
+// `(x, y + z*size.y, frameIdx)` — frames are 2D-array layers, with each
+// layer's (y, z) flattened into its 2D extent. On hit we read the palette
+// and run the existing lighting + corner-AO helpers.
 //
 // Direct lighting is computed by walking the world-grid occupancy substrate
 // (substrate.glsl / Substrate.h) from the world-space hit point toward the
@@ -42,7 +43,7 @@ layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {
 	InstanceData instances[];
 } ib;
 
-layout(set = 0, binding = 1) uniform usampler3D volume_sampler;
+layout(set = 0, binding = 1) uniform usampler2DArray volume_sampler;
 layout(set = 0, binding = 2) uniform sampler2D  palette_sampler;
 layout(set = 0, binding = 3) uniform VolumeMeta {
 	ivec3 size;          // single-frame dimensions
@@ -91,7 +92,7 @@ vec3 quatRotate(vec4 q, vec3 v) {
 uint sampleMaterialAtFrame(ivec3 voxelCoord, int f) {
 	if (any(lessThan(voxelCoord, ivec3(0))) ||
 	    any(greaterThanEqual(voxelCoord, meta.size))) return 0u;
-	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y, voxelCoord.z + f * meta.size.z);
+	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y + voxelCoord.z * meta.size.y, f);
 	return texelFetch(volume_sampler, c, 0).r;
 }
 

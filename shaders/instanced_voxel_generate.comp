@@ -27,7 +27,7 @@
 
 layout(local_size_x = 1, local_size_y = 4, local_size_z = 4) in;
 
-layout(set = 0, binding = 0, r8ui) uniform writeonly uimage3D volume;
+layout(set = 0, binding = 0, r8ui) uniform writeonly uimage2DArray volume;
 layout(std430, set = 0, binding = 1) writeonly buffer BitmaskBuffer {
 	uint bits[];
 } bitmask;
@@ -200,7 +200,8 @@ void main() {
 			}
 		}
 
-		imageStore(volume, ivec3(x, y, zf), uvec4(mat));
+		// Frame-as-layer: layer = frame; store at (x, y + zInFrame*sizeY).
+		imageStore(volume, ivec3(x, y + zInFrame * pc.sizeY, frame), uvec4(mat));
 		if (mat != 0u) maskBits |= (1u << uint(bit));
 	}
 

@@ -121,6 +121,11 @@ namespace VWrap {
 	}
 
 	void CommandBuffer::CmdCopyBufferToImage(std::shared_ptr<Buffer> src_buffer, std::shared_ptr<Image> dst_image, uint32_t width, uint32_t height, uint32_t depth = 1) {
+		// 2D-array images (animated voxel volumes) need layerCount = arrayLayers;
+		// the source buffer must already be laid out as N consecutive (width*height)
+		// layer slabs. 3D / plain-2D images keep layerCount = 1.
+		const uint32_t layer_count = dst_image->GetArrayLayers();
+
 		VkBufferImageCopy copy{};
 		copy.bufferOffset = 0;
 		copy.imageOffset = { 0, 0,0 };
@@ -130,7 +135,7 @@ namespace VWrap {
 		copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		copy.imageSubresource.mipLevel = 0;
 		copy.imageSubresource.baseArrayLayer = 0;
-		copy.imageSubresource.layerCount = 1;
+		copy.imageSubresource.layerCount = layer_count;
 		copy.imageExtent = { width, height, depth };
 
 		vkCmdCopyBufferToImage(m_command_buffer, src_buffer->Get(), dst_image->Get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
@@ -302,7 +307,8 @@ namespace VWrap {
 		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		barrier.subresourceRange.baseMipLevel = 0;
 		barrier.subresourceRange.baseArrayLayer = 0;
-		barrier.subresourceRange.layerCount = 1;
+		// Cover every layer; harmless for plain-2D / 3D images (layers == 1).
+		barrier.subresourceRange.layerCount = image->GetArrayLayers();
 		barrier.subresourceRange.levelCount = image->GetMipLevels();
 
 		VkPipelineStageFlags sourceStage;

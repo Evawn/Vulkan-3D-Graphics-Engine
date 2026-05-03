@@ -7,9 +7,11 @@
 // sky color → write per-fragment hit depth so the volume integrates correctly
 // with the rest of the scene's depth buffer.
 //
-// Frame addressing: the volume image packs frames as Z-slabs of one 3D
-// image. M3 always uses frameIdx=0 (single-frame preview); M4 will animate
-// frameIdx against engine time without changing this shader.
+// Frame addressing: the volume image packs frames as 2D-array layers (one
+// frame per layer). Within a layer voxel (x, y, z) lives at
+// (x, y + z*size.y, frameIdx). M3 always uses frameIdx=0 (single-frame
+// preview); M4 animates frameIdx against engine time without changing this
+// shader.
 
 layout(push_constant) uniform PC {
     mat4 model;
@@ -34,7 +36,7 @@ layout(set = 0, binding = 1) uniform DrawUbo {
     int   maxIterations;      int _pad0;  int _pad1;  int _pad2;
 } draw;
 
-layout(set = 0, binding = 2) uniform usampler3D volume_sampler;
+layout(set = 0, binding = 2) uniform usampler2DArray volume_sampler;
 layout(set = 0, binding = 3) uniform sampler2D  palette_sampler;
 
 layout(location = 0) in  vec3 vLocalPos;
@@ -64,8 +66,9 @@ vec3 localToVoxel(vec3 p) { return (p - g_local_origin) / g_voxel_local; }
 uint sampleMaterial(ivec3 voxelCoord) {
     if (any(lessThan(voxelCoord, ivec3(0))) ||
         any(greaterThanEqual(voxelCoord, meta.size))) return 0u;
-    // Single-frame preview today; vFrameIdx>0 is M4 territory.
-    ivec3 c = ivec3(voxelCoord.x, voxelCoord.y, voxelCoord.z + vFrameIdx * meta.size.z);
+    // Frame-as-layer: layer = vFrameIdx; (y, z) flatten into the layer's
+    // 2D extent as y' = y + z*size.y.
+    ivec3 c = ivec3(voxelCoord.x, voxelCoord.y + voxelCoord.z * meta.size.y, vFrameIdx);
     return texelFetch(volume_sampler, c, 0).r;
 }
 

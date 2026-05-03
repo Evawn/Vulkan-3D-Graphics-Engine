@@ -299,16 +299,42 @@ void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
 		return;
 	}
 
+	const uint32_t frameCount = std::max<uint32_t>(v.frameCount, 1);
+
+	// Frame-as-array-layer packing: each frame lives on its own 2D-array
+	// layer; within a layer voxel (x, y, z) is at (x, y + z*size.y, layer).
+	// Lifts the old `size.z * frameCount <= maxImageDimension3D` ceiling
+	// (2048 on Apple Silicon) — new caps are maxImageArrayLayers and
+	// (size.y * size.z) <= maxImageDimension2D. See
+	// docs/migrate-animated-format.md.
+	const auto limits = graph.GetDevice()->GetPhysicalDevice()->GetProperties().limits;
+	const uint64_t packedHeight = static_cast<uint64_t>(v.size.y) * v.size.z;
+	if (frameCount > limits.maxImageArrayLayers ||
+	    packedHeight > limits.maxImageDimension2D ||
+	    v.size.x > limits.maxImageDimension2D) {
+		spdlog::get("Render")->error(
+			"AssetRegistry: volume '{}' exceeds device limits "
+			"(frames={}, size.y*size.z={}, size.x={}; caps: layers={}, dim2D={}). Rejecting.",
+			v.name, frameCount, packedHeight, v.size.x,
+			limits.maxImageArrayLayers, limits.maxImageDimension2D);
+		v.volumeImage = {};
+		return;
+	}
+
 	ImageDesc d{};
-	d.width      = v.size.x;
-	d.height     = v.size.y;
-	// Animated volumes pack frames as Z-slabs: depth = size.z * frameCount.
-	// frameCount == 1 collapses to a static volume, so this single declaration
-	// path serves both cases.
-	d.depth      = v.size.z * std::max<uint32_t>(v.frameCount, 1);
-	d.format     = v.format;
-	d.samples    = VK_SAMPLE_COUNT_1_BIT;
-	d.imageType  = VK_IMAGE_TYPE_3D;
+	d.width       = v.size.x;
+	d.height      = v.size.y * v.size.z;
+	d.depth       = 1;
+	d.arrayLayers = frameCount;
+	d.format      = v.format;
+	d.samples     = VK_SAMPLE_COUNT_1_BIT;
+	d.imageType   = VK_IMAGE_TYPE_2D;
+	// Always present the volume as a 2D-array to the shader, even when there's
+	// only one frame. The animated-volume shaders (`usampler2DArray`) demand
+	// an array view; a plain 2D view here would silently mismatch the
+	// descriptor and produce zero-reads (visible as a frame of cube AABB then
+	// a fully discarded fragment for static volumes / single-frame previews).
+	d.viewAsArray = true;
 	// File-loaded volumes need TRANSFER_DST for the host upload. Procedural
 	// volumes don't strictly need it — the graph derives STORAGE from a
 	// compute writer — but we set it uniformly so a procedural volume can also
@@ -396,14 +422,19 @@ void AssetRegistry::UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph,
 	if (!v.needsUpload || v.data.empty()) return;
 	if (v.volumeImage.id == UINT32_MAX) return;
 
-	// Mirror BrickmapPaletteRenderer::UploadVolumeData — staging buffer →
-	// CmdCopyBufferToImage → leave the image in GENERAL so subsequent compute
-	// passes can read it without re-transitioning. For animated volumes, all
-	// frames are packed Z-sequentially in v.data, and the image's Z extent is
-	// already size.z * frameCount, so the copy treats it as one contiguous
-	// volume.
-	const uint32_t fullDepth = v.size.z * std::max<uint32_t>(v.frameCount, 1);
-	const VkDeviceSize size = static_cast<VkDeviceSize>(v.size.x) * v.size.y * fullDepth;
+	// Staging buffer → CmdCopyBufferToImage → leave the image in GENERAL so
+	// subsequent compute passes can read it without re-transitioning.
+	//
+	// Frame-as-array-layer packing makes this a single copy region: the host
+	// blob already happens to match the layered destination byte-for-byte.
+	// Frame f starts at offset f*S (S = sx*sy*sz) and within a frame the
+	// bytes are z-major (z*sx*sy + y*sx + x). The destination layer expects
+	// rows packed as y'*sx + x with y' = z*sy + y — substituting,
+	// f*S + (z*sy + y)*sx + x = f*S + z*sx*sy + y*sx + x. Same bytes.
+	// CmdCopyBufferToImage reads layerCount from the image's arrayLayers, so
+	// one region with imageExtent = (sx, sy*sz, 1) covers every frame.
+	const uint32_t frameCount = std::max<uint32_t>(v.frameCount, 1);
+	const VkDeviceSize size = static_cast<VkDeviceSize>(v.size.x) * v.size.y * v.size.z * frameCount;
 	auto allocator = graph.GetImage(v.volumeImage)->GetAllocator();
 	auto staging   = VWrap::Buffer::CreateStaging(allocator, size);
 	void* mapped   = staging->Map();
@@ -415,7 +446,7 @@ void AssetRegistry::UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph,
 	cmd->BeginSingle();
 	cmd->CmdTransitionImageLayout(image, v.format,
 		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	cmd->CmdCopyBufferToImage(staging, image, v.size.x, v.size.y, fullDepth);
+	cmd->CmdCopyBufferToImage(staging, image, v.size.x, v.size.y * v.size.z, 1);
 	cmd->CmdTransitionImageLayout(image, v.format,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
 	cmd->EndAndSubmit();

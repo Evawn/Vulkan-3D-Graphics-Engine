@@ -72,12 +72,14 @@ struct VoxelVolumeAsset {
 	VkFormat    format = VK_FORMAT_R8_UINT;
 
 	// Number of animation frames packed into the volume image. Frames are
-	// stored as Z-slabs of a single 3D image: voxel `(x, y, z)` of frame `f`
-	// lives at `(x, y, z + f * size.z)`. The image's full Z-extent is therefore
-	// `size.z * frameCount`. `frameCount == 1` is a static volume — the v1 path
-	// for .vox files and the existing brickmap-palette / animated-geometry
-	// procedural volumes. The InstancedVoxelTechnique reads frameCount per
-	// per-instance offset into time → frame index in the shader.
+	// stored as layers of a 2D-array image: voxel `(x, y, z)` of frame `f`
+	// lives at `(x, y + z*size.y, f)`. The image is allocated as 2D with
+	// extent `(size.x, size.y * size.z)` and `arrayLayers = frameCount`,
+	// sidestepping the maxImageDimension3D ceiling that the prior Z-slab
+	// packing hit. `frameCount == 1` is a static volume — the same single
+	// declaration path serves both cases (a 1-layer 2D-array is a no-overhead
+	// resource). The InstancedVoxelTechnique reads frameCount per per-instance
+	// offset into time → frame index in the shader.
 	uint32_t    frameCount = 1;
 
 	// File-backed only — empty for procedural.
@@ -152,11 +154,12 @@ public:
 	                                    VkFormat format = VK_FORMAT_R8_UINT,
 	                                    VkImageUsageFlags extraUsage = 0);
 
-	// Procedural animated volume — `frameCount` Z-slabs of `size`. Image is
-	// allocated as a 3D image of dimensions (size.x, size.y, size.z * frameCount).
-	// Shaders address frame `f` by sampling at z' = z + f * size.z. Used by the
-	// foliage workflow (compute writes each frame into its slab) and by the
-	// InstancedVoxelTechnique (per-instance shader picks a frame).
+	// Procedural animated volume — `frameCount` array layers of `size`. Image
+	// is allocated as a 2D-array of dimensions (size.x, size.y * size.z) with
+	// arrayLayers = frameCount. Shaders address frame `f` by sampling at
+	// `(x, y + z * size.y, f)`. Used by the foliage workflow (compute writes
+	// each frame into its layer) and by the InstancedVoxelTechnique
+	// (per-instance shader picks a frame).
 	AssetID CreateProceduralAnimatedVoxelVolume(std::string name, glm::uvec3 size,
 	                                            uint32_t frameCount,
 	                                            VkFormat format = VK_FORMAT_R8_UINT,

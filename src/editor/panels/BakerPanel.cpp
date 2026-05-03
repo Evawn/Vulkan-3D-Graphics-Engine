@@ -119,12 +119,12 @@ void BakerPanel::Draw() {
         } else {
             // ---- Voxel size slider (debounced re-bake on release) ----
             //
-            // Logarithmic range: 5mm to 5m. The upper end exists to let the
-            // user dodge the Z-slab packed-depth limit (2048) on long bakes
-            // — a 50-unit-tall source mesh at voxelSize=1m is still 50
-            // voxels tall, which * 140 frames = 7000 packed depth. Allowing
-            // up to 5m gives 10 voxels tall in that case (tractable). The
-            // logarithmic mapping keeps the lower-cm range usable.
+            // Logarithmic range: 5mm to 5m. With frame-as-array-layer packing
+            // the old Z-slab packed-depth ceiling no longer bites; remaining
+            // caps are frameCount <= maxImageArrayLayers (2048 on Apple
+            // Silicon → 85s @ 24fps) and size.y * size.z <=
+            // maxImageDimension2D (16384). The upper-end voxel size is kept
+            // as a coarse-bake escape hatch for cell-budget pressure.
             float voxelSize = m_technique->GetVoxelSize();
             if (ImGui::SliderFloat("voxel size", &voxelSize, 0.005f, 5.0f, "%.4f m",
                 ImGuiSliderFlags_Logarithmic))
@@ -270,20 +270,26 @@ void BakerPanel::Draw() {
             const int   frameCount = std::max(1, static_cast<int>(std::round(duration * m_bakeFps)) + 1);
             ImGui::Text("Frames: %d  (%.2fs * %.0ffps + 1)", frameCount, duration, m_bakeFps);
 
-            // Z-slab pack budget. The animated volume packs frames as
-            // Z-slabs (image.depth = size.z * frameCount); Vulkan's
-            // guaranteed cap is 2048. We don't know size.z until the bake
-            // computes the clip-wide AABB — but we can show the user the
-            // current preview's size.z as a proxy so they get an early
-            // warning. If a preview hasn't run yet, hide the hint.
-            constexpr uint32_t kMaxPackedDepth = 2048;
+            // Frame-as-array-layer pack budget. The animated volume now
+            // packs each frame as one layer of a 2D-array (image extent
+            // (size.x, size.y * size.z), arrayLayers = frameCount). Apple
+            // Silicon caps both maxImageArrayLayers and maxImageDimension2D
+            // at 2048 / 16384 respectively. We don't know size until the
+            // bake computes the clip-wide AABB — show the current preview's
+            // size as a proxy so the user gets an early warning. If a
+            // preview hasn't run yet, hide the hint.
+            constexpr uint32_t kMaxFrameCount  = 2048;
+            constexpr uint32_t kMaxFrameDimYZ  = 16384;
             if (session.previewVolumeSize.z > 0) {
-                const uint32_t packed = session.previewVolumeSize.z * static_cast<uint32_t>(frameCount);
-                ImVec4 col = (packed > kMaxPackedDepth)
-                    ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : UIStyle::kTextDim;
+                const uint32_t packedYZ = session.previewVolumeSize.y * session.previewVolumeSize.z;
+                const bool over = (static_cast<uint32_t>(frameCount) > kMaxFrameCount)
+                               || (packedYZ > kMaxFrameDimYZ);
+                ImVec4 col = over ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : UIStyle::kTextDim;
                 ImGui::TextColored(col,
-                    "Packed depth: %u (z=%u * frames=%d) / %u limit",
-                    packed, session.previewVolumeSize.z, frameCount, kMaxPackedDepth);
+                    "Layers: %d / %u  YZ extent: %u (y=%u * z=%u) / %u",
+                    frameCount, kMaxFrameCount,
+                    packedYZ, session.previewVolumeSize.y, session.previewVolumeSize.z,
+                    kMaxFrameDimYZ);
             }
 
             // Diagnostic readout — surfaces the disabled-button reason and

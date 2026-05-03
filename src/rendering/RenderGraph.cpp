@@ -468,6 +468,8 @@ void RenderGraph::AllocateTransientResources() {
 		info.mip_levels = 1;
 		info.samples = res.desc.samples;
 		info.image_type = res.desc.imageType;
+		info.array_layers = res.desc.arrayLayers;
+		info.view_as_array = res.desc.viewAsArray;
 
 		// Resolve images also need SAMPLED_BIT for ImGui + TRANSFER_SRC_BIT for screenshots
 		if (res.desc.samples == VK_SAMPLE_COUNT_1_BIT &&

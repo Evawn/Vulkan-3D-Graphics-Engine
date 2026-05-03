@@ -11,6 +11,8 @@ namespace VWrap {
 		ret->m_width = info.width;
 		ret->m_height = info.height;
 		ret->m_image_type = info.image_type;
+		ret->m_array_layers = info.array_layers == 0 ? 1 : info.array_layers;
+		ret->m_view_as_array = info.view_as_array;
 
 		VkSampleCountFlagBits samples = info.samples ? info.samples : VK_SAMPLE_COUNT_1_BIT;
 
@@ -21,7 +23,7 @@ namespace VWrap {
 		imageInfo.extent.height = info.height;
 		imageInfo.extent.depth = (info.image_type == VK_IMAGE_TYPE_3D) ? info.depth : 1;
 		imageInfo.format = info.format;
-		imageInfo.arrayLayers = 1;
+		imageInfo.arrayLayers = ret->m_array_layers;
 		imageInfo.mipLevels = ret->m_mip_levels;
 		imageInfo.tiling = info.tiling;
 		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;

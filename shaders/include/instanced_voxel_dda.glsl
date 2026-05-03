@@ -5,16 +5,16 @@
 // trace shader to shade the hit.
 //
 // REQUIRES the includer to define:
-//   layout(...) uniform usampler3D volume_sampler;
+//   layout(...) uniform usampler2DArray volume_sampler;
 //   layout(...) uniform { ivec3 size; int frameCount; } meta;
-//   flat int  vFrameIdx;                          // varying — slab index
+//   flat int  vFrameIdx;                          // varying — array layer index
 //   vec3 g_voxel_local;                           // world-units-per-voxel (per axis)
 //   vec3 g_local_origin;                          // pc.aabbMin
 //   int  uMaxIterations;                          // iteration cap (e.g. frame.maxIterations)
 //
 // REQUIRES the includer to provide:
 //   vec3 localToVoxel(vec3 p);
-//   uint sampleMaterial(ivec3 voxelCoord);        // wraps texelFetch + frame slab
+//   uint sampleMaterial(ivec3 voxelCoord);        // wraps texelFetch into (x, y+z*size.y, vFrameIdx)
 //   bool isSolidAt(ivec3 voxelCoord);             // sampleMaterial != 0u
 
 struct DdaHit {

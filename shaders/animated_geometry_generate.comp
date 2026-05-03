@@ -2,7 +2,7 @@
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
-layout(r8ui, set = 0, binding = 0) uniform writeonly uimage3D volume;
+layout(r8ui, set = 0, binding = 0) uniform writeonly uimage2DArray volume;
 
 layout(push_constant) uniform PC {
 	int pattern;
@@ -58,5 +58,6 @@ void main() {
 	if (filled && matIdx == 0u) {
 		matIdx = uint(pc.pattern + 1);
 	}
-	imageStore(volume, coord, uvec4(matIdx, 0, 0, 0));
+	// Single-frame volume packed as a 1-layer 2D-array for shader uniformity.
+	imageStore(volume, ivec3(coord.x, coord.y + coord.z * pc.volume_size_y, 0), uvec4(matIdx, 0, 0, 0));
 }

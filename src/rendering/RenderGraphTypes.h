@@ -48,6 +48,17 @@ struct ImageDesc {
 	VkImageType imageType = VK_IMAGE_TYPE_2D;
 	VkImageUsageFlags extraUsage = 0; // ORed into auto-derived usage flags
 	Lifetime lifetime = Lifetime::Transient;
+	// Animated voxel volumes pack frames as 2D-array layers (one frame per
+	// layer). Default of 1 keeps every existing call site behaving as a plain
+	// 2D / 3D image. Combined with imageType == VK_IMAGE_TYPE_2D and
+	// arrayLayers > 1, the auto-derived ImageView becomes VIEW_TYPE_2D_ARRAY.
+	// Placed last so positional aggregate init at existing call sites is
+	// unaffected.
+	uint32_t arrayLayers = 1;
+	// Force the auto-derived ImageView to VIEW_TYPE_2D_ARRAY even when
+	// arrayLayers == 1. Set by AssetRegistry for static voxel volumes that
+	// share the animated-volume `usampler2DArray` shader convention.
+	bool viewAsArray = false;
 };
 
 struct BufferDesc {

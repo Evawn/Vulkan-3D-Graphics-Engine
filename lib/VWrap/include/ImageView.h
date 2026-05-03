@@ -29,7 +29,7 @@ namespace VWrap {
 		/// <summary> 
 		/// Creates a new image view directly from a VkImage handle. Used for wrapping swapchain images. 
 		/// </summary>
-		static std::shared_ptr<ImageView> Create(std::shared_ptr<Device> device, VkImage image, VkFormat format, VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT, uint32_t mip_levels = 1, VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D);
+		static std::shared_ptr<ImageView> Create(std::shared_ptr<Device> device, VkImage image, VkFormat format, VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT, uint32_t mip_levels = 1, VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D, uint32_t layer_count = 1);
 
 		/// <summary> Gets the Vulkan image view handle. </summary>
 		VkImageView Get() const { return m_image_view; }

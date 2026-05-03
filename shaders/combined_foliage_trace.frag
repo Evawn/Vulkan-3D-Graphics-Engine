@@ -36,7 +36,7 @@ layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {
 	InstanceData instances[];
 } ib;
 
-layout(set = 0, binding = 1) uniform usampler3D volume_sampler;
+layout(set = 0, binding = 1) uniform usampler2DArray volume_sampler;
 layout(set = 0, binding = 2) uniform sampler2D  palette_sampler;
 layout(set = 0, binding = 3) uniform VolumeMeta {
 	ivec3 size;
@@ -81,7 +81,7 @@ vec3 quatRotate(vec4 q, vec3 v) {
 uint sampleMaterialAtFrame(ivec3 voxelCoord, int f) {
 	if (any(lessThan(voxelCoord, ivec3(0))) ||
 	    any(greaterThanEqual(voxelCoord, meta.size))) return 0u;
-	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y, voxelCoord.z + f * meta.size.z);
+	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y + voxelCoord.z * meta.size.y, f);
 	return texelFetch(volume_sampler, c, 0).r;
 }
 

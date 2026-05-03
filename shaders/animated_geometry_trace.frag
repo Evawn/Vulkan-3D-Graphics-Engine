@@ -20,7 +20,7 @@ layout(push_constant) uniform PushConstantBlock {
 	int   _pad1;
 } pc;
 
-layout(set = 0, binding = 0) uniform usampler3D volume_sampler;
+layout(set = 0, binding = 0) uniform usampler2DArray volume_sampler;
 layout(set = 0, binding = 1) uniform sampler2D palette_sampler;
 
 layout(location = 0) out vec4 outColor;
@@ -36,7 +36,9 @@ vec3 voxelToWorld(vec3 p) { return p * g_voxel_world_size - g_half_extents; }
 uint sampleMaterial(ivec3 voxelCoord) {
 	if (any(lessThan(voxelCoord, ivec3(0))) ||
 	    any(greaterThanEqual(voxelCoord, pc.volumeSize))) return 0u;
-	return texelFetch(volume_sampler, voxelCoord, 0).r;
+	// Single-frame volume packed as a 1-layer 2D-array for shader uniformity.
+	ivec3 c = ivec3(voxelCoord.x, voxelCoord.y + voxelCoord.z * pc.volumeSize.y, 0);
+	return texelFetch(volume_sampler, c, 0).r;
 }
 
 // Required by voxel_ao.glsl.
