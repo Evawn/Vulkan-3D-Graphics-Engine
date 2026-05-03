@@ -1,12 +1,12 @@
 #pragma once
 
-#include "AssetRegistry.h"
 #include "MeshIR.h"
 #include "Voxelizer.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -19,69 +19,52 @@ namespace voxel_bake {
 
 class PaletteQuantizer;
 
-// ---- BakeSourceSnapshot ----
+// ---- Job source-of-truth: the loaded MeshIR ----
 //
-// Self-contained slice of an animated asset that the worker thread can
-// voxelize without ever touching the AssetRegistry. We snapshot at job
-// submission so a concurrent LoadGlb (which may push_back into
-// AssetRegistry::m_skinnedMeshes and invalidate raw pointers) can't race the
-// worker. Cost is one shallow vector-copy per debounce tick (~250ms apart);
-// memory peak is roughly the size of one skinned-mesh asset.
+// Bake jobs hold a `shared_ptr<const gltf_import::MeshIR>` rather than a
+// copied-out flat snapshot. The IR is everything cgltf parsed from the .glb
+// (nodes, skins, animations, primitives with full SkinnedVertex layout,
+// materials, decoded textures), and the bake worker reads what it needs
+// directly. Two reasons this is correct:
 //
-// Per-primitive: positions are pre-extracted from the SkinnedVertex array so
-// the worker doesn't carry the full vertex layout — it only needs positions
-// + joints + weights for skinning, plus indices for triangle lookup.
-
-struct BakeSourceSnapshot {
-    struct Prim {
-        std::vector<glm::vec3>   positions;        // mesh-local rest-pose positions
-        std::vector<glm::vec2>   uvs;              // empty if absent — M5 will require non-empty
-        std::vector<glm::uvec4>  joints;
-        std::vector<glm::vec4>   weights;
-        std::vector<uint32_t>    indices;
-        glm::vec4                baseColorFactor = glm::vec4(1.0f);
-        int                      ownerNodeIndex  = -1;
-    };
-    std::vector<Prim> primitives;
-
-    std::vector<int>                            skinJoints;
-    std::vector<glm::mat4>                      inverseBindMatrices;
-
-    std::vector<gltf_import::Node>              nodes;
-    std::vector<glm::vec3>                      restTranslation;
-    std::vector<glm::quat>                      restRotation;
-    std::vector<glm::vec3>                      restScale;
-    std::vector<bool>                           activeNodeMask;
-
-    std::vector<gltf_import::AnimationChannel>  channels;
-    float                                        clipDuration = 0.0f;
-};
-
-// Build a snapshot from the registered assets. Returns false if the mesh
-// asset is invalid; clip can be invalid (snapshot will be rest-pose).
-bool BuildSnapshot(const AssetRegistry& assets,
-                   AssetID meshId, AssetID clipId, int skinIndex,
-                   BakeSourceSnapshot& out);
+//   1. The IR is the natural fan-out point. Both the runtime mesh draw
+//      (SkinnedMeshAsset) and the bake worker should consume the IR
+//      independently — neither should be downstream of the other.
+//
+//   2. Lifetime is automatic. A LoadGlb mid-bake replaces the technique's
+//      `m_meshIR` with a new shared_ptr, but the in-flight job's refcount
+//      keeps the old IR alive until the bake finishes. Zero coordination on
+//      the consumer side.
+//
+// Texture data lives in `meshIR->textures`; the worker reads it by reference
+// (raw pointer into the IR's vector). Safe because the IR shared_ptr keeps
+// the whole IR alive while the worker borrows.
 
 // ---- PreviewBakeJob ----
 //
-// A single-frame voxelization request. The worker:
-//   1. Evaluates `snapshot.channels` at `time` → poses the skeleton
-//   2. CPU-skins each primitive's positions → mesh-local world positions
-//   3. Computes the bake AABB (current pose only — M3) and pads
-//   4. Voxelizes into a VoxFrame
-//   5. Stashes the result; main thread polls via TakeCompletedPreview
+// A single-frame voxelization. The worker:
+//   1. Pose: evaluate animations[clipIndex] at `time` → per-node TRS
+//   2. World matrices: BFS through meshIR->nodes (active-skin mask pruned)
+//   3. Joint matrices: standard glTF skinning math
+//   4. Skin: CPU-skin every primitive bound to skinIndex
+//   5. AABB: union deformed positions (current pose only)
+//   6. Voxelize: feeds VoxelizePrimitive[] (with texture pointers + alpha
+//      config sourced from meshIR->materials / meshIR->textures) into
+//      Voxelize() → VoxFrame
 //
 // `cancelled` flips when a newer preview job arrives — the in-flight job
-// bails out at the next triangle boundary inside Voxelize().
+// bails out at the next triangle boundary inside Voxelize() and at frame
+// boundaries inside RunFullBake.
 
 struct PreviewBakeJob {
-    BakeSourceSnapshot snapshot;
+    std::shared_ptr<const gltf_import::MeshIR> meshIR;
+    int                clipIndex            = -1;     // -1 = rest pose / no clip
+    int                skinIndex            = 0;
     float              time                 = 0.0f;
     float              voxelSizeWorld       = 0.05f;
     VoxColorSource     colorSource{};
-    uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u; // ~134M cells, plan §10
-    uint64_t           generation           = 0;                  // matches submitted-gen at result return
+    uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u;
+    uint64_t           generation           = 0;
 };
 
 struct PreviewBakeResult {
@@ -89,8 +72,8 @@ struct PreviewBakeResult {
     glm::vec3  worldOriginMin = glm::vec3(0.0f);   // mesh-local space
     glm::vec3  worldOriginMax = glm::vec3(0.0f);
     float      voxelSizeWorld = 0.0f;
-    uint64_t   generation     = 0;                 // copy of the job's gen
-    bool       budgetExceeded = false;             // grid would have exceeded maxGridCellsPerFrame
+    uint64_t   generation     = 0;
+    bool       budgetExceeded = false;
 };
 
 // ---- FullBakeJob ----
@@ -110,23 +93,17 @@ struct PreviewBakeResult {
 //     allocating ~20 GB of voxel data on the worker thread.
 
 struct FullBakeJob {
-    BakeSourceSnapshot snapshot;
+    std::shared_ptr<const gltf_import::MeshIR> meshIR;
+    int                clipIndex           = -1;
+    int                skinIndex           = 0;
     float              startTime           = 0.0f;
     float              endTime             = 0.0f;
     float              fps                 = 24.0f;
     float              voxelSizeWorld      = 0.05f;
     VoxColorSource     colorSource{};
-    uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u;       // ~134M cells
-    uint64_t           maxTotalBytes        = 1ull * 1024 * 1024 * 1024; // 1 GB
-    // Vulkan 3D-image depth cap. Animated volumes pack frames as Z-slabs
-    // (image.depth = size.z * frameCount), and the spec guarantees 2048 as
-    // the minimum supported maxImageDimension3D. Apple Silicon enforces this
-    // exactly; cross-platform code stays safe by capping at the spec floor
-    // rather than querying device limits at job-submission time. Lifting
-    // this requires a packing-scheme change (e.g. sampler2DArray) that
-    // ripples through every animated-voxel consumer.
-    uint32_t           maxPackedDepth       = 2048;
-    uint32_t           aabbSampleCount      = 32;                        // K poses for clip-wide AABB
+    uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u;
+    uint64_t           maxTotalBytes        = 1ull * 1024 * 1024 * 1024;
+    uint32_t           aabbSampleCount      = 32;
     uint64_t           generation           = 0;
 };
 
@@ -157,8 +134,8 @@ struct FullBakeResult {
 // ---- AnimationBaker ----
 //
 // Owns one worker thread. Two job slots:
-//   - Preview (M3): replaces any in-flight preview job; latest wins.
-//   - FullBake (M4): queued separately so a long bake doesn't block previews.
+//   - Preview: replaces any in-flight preview job; latest wins.
+//   - FullBake: queued separately so a long bake doesn't block previews.
 //
 // Lifecycle: Start() spins up the thread; Shutdown() signals + joins. Both
 // are idempotent; OK to call Start once and Shutdown once across the
@@ -204,8 +181,6 @@ public:
     bool IsFullBaking()    const  { return m_fullInFlight.load(std::memory_order_relaxed); }
 
     // Per-frame progress on the in-flight (or just-finished) full bake.
-    // Both return 0 when no full bake has run this session. `framesDone` lags
-    // by ~one frame on a busy worker — fine for a progress bar.
     int  FullBakeFramesDone()  const { return m_fullFramesDone.load(std::memory_order_relaxed); }
     int  FullBakeFramesTotal() const { return m_fullFramesTotal.load(std::memory_order_relaxed); }
 
@@ -220,41 +195,23 @@ private:
     std::condition_variable m_cv;
     std::atomic<bool>       m_shutdown{false};
 
-    // Pending submissions. Latest preview wins (cancellation atomic flips on
-    // the in-flight job inside the worker before we replace).
     std::optional<PreviewBakeJob> m_pendingPreview;
     std::optional<FullBakeJob>    m_pendingFull;
 
-    // In-flight cancellation flags. The worker reads these by reference from
-    // a stack-local copy of the active job; the main thread flips the
-    // currently-active flag when (a) a newer preview arrives or (b) the user
-    // hits Cancel on the full bake. Held under m_mutex so the main thread
-    // never dereferences a stack-local that has gone out of scope.
     std::atomic<bool>* m_activePreviewCancel = nullptr;
     std::atomic<bool>* m_activeFullCancel    = nullptr;
 
-    // Status flags (relaxed atomics are sufficient — UI is purely informational).
     std::atomic<bool> m_previewInFlight{false};
     std::atomic<bool> m_fullInFlight{false};
 
-    // Per-frame progress on the in-flight full bake. Read by the panel each
-    // frame to render the progress bar. Worker writes framesDone after every
-    // completed frame; framesTotal is stamped at job start. `mutable` because
-    // RunFullBake is logically const (no observable AnimationBaker state
-    // changes from the *consumer's* point of view) but writes to these
-    // atomics for UI hand-off.
     mutable std::atomic<int> m_fullFramesDone{0};
     mutable std::atomic<int> m_fullFramesTotal{0};
 
-    // Completed results awaiting main-thread pickup.
     std::optional<PreviewBakeResult> m_completedPreview;
     std::optional<FullBakeResult>    m_completedFull;
 
-    // Quantizer — late-bound (palette set after construction); held as
-    // unique_ptr so we can rebuild it if the palette ever changes.
     std::unique_ptr<PaletteQuantizer> m_quantizer;
 
-    // Generation counters (separate for preview vs full).
     uint64_t m_previewGenCounter = 0;
     uint64_t m_fullGenCounter    = 0;
 };

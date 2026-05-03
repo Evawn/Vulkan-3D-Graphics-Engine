@@ -132,6 +132,34 @@ void BakerPanel::Draw() {
                 m_technique->SetVoxelSize(voxelSize);
             }
 
+            // ---- Color source (M5) ----
+            //
+            // Material vs Texture. Toggling reuses the voxel-size debounce
+            // path on the technique side — there's a ~250ms wait, then a
+            // re-bake. Disabled when the loaded asset has no textures
+            // (radio still visible so the user can see why).
+            ImGui::TextUnformatted("Color source:");
+            ImGui::SameLine();
+            const auto cs = m_technique->GetColorSource();
+            const bool noTextures = (session.totalTextures == 0);
+            ImGui::BeginDisabled(noTextures);
+            if (ImGui::RadioButton("Material",
+                cs == voxel_bake::VoxColorSource::Mode::MaterialBaseColor))
+            {
+                m_technique->SetColorSource(voxel_bake::VoxColorSource::Mode::MaterialBaseColor);
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Texture",
+                cs == voxel_bake::VoxColorSource::Mode::TextureSampled))
+            {
+                m_technique->SetColorSource(voxel_bake::VoxColorSource::Mode::TextureSampled);
+            }
+            ImGui::EndDisabled();
+            if (noTextures) {
+                ImGui::SameLine();
+                ImGui::TextColored(UIStyle::kTextDim, "(no textures)");
+            }
+
             // ---- View mode toggle ----
             //
             // Pure UI state; the technique selects which pass actually draws.

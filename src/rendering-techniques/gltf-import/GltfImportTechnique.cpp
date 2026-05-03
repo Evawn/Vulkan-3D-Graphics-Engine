@@ -636,10 +636,35 @@ void GltfImportTechnique::PerformPendingLoad() {
         logger->warn("GLB load failed: {}", path);
         return;
     }
-    auto& ir = *irOpt;
+    // Move the IR into a shared_ptr<const> immediately. The bake worker reads
+    // from this — `SkinnedMeshAsset` is a parallel view we'll build below for
+    // the runtime mesh draw, but the bake pipeline doesn't go through it.
+    // (See M5 plan: IR is the canonical fan-out point.)
+    auto irShared = std::make_shared<gltf_import::MeshIR>(std::move(*irOpt));
+    const gltf_import::MeshIR& ir = *irShared;
     logger->info("Loaded GLB: {} — {} nodes, {} skins, {} prims, {} animations, {} verts",
         path, ir.nodes.size(), ir.skins.size(), ir.primitives.size(),
         ir.animations.size(), ir.TotalVertices());
+
+    // Material diagnostics — each material's alpha policy + texture binding.
+    // Useful when a bake produces unexpected colors (e.g. mostly-black foliage
+    // = leaf material in Blend mode pulling gutter pixels through bilinear
+    // filtering). Logged once per import, cheap regardless of asset size.
+    auto modeName = [](gltf_import::Material::AlphaMode m) {
+        switch (m) {
+            case gltf_import::Material::AlphaMode::Opaque: return "Opaque";
+            case gltf_import::Material::AlphaMode::Mask:   return "Mask";
+            case gltf_import::Material::AlphaMode::Blend:  return "Blend";
+        }
+        return "?";
+    };
+    for (size_t i = 0; i < ir.materials.size(); ++i) {
+        const auto& m = ir.materials[i];
+        logger->info("  mat[{}] '{}': alpha={} cutoff={:.3f} factor=({:.3f},{:.3f},{:.3f},{:.3f}) tex={}",
+            i, m.name, modeName(m.alphaMode), m.alphaCutoff,
+            m.baseColorFactor.r, m.baseColorFactor.g, m.baseColorFactor.b, m.baseColorFactor.a,
+            m.baseColorTextureIndex);
+    }
 
     // ---- Build SkinnedMeshAsset ----
     //
@@ -837,6 +862,23 @@ void GltfImportTechnique::PerformPendingLoad() {
     }
     m_session.activeClipIndex = (newCount > 0) ? 0 : -1;
     m_session.hasLoadedAsset  = true;
+    m_session.totalTextures   = ir.textures.size();
+
+    // Stash the IR for the bake worker. From this point on, any in-flight
+    // bake holds its own shared_ptr to the *previous* IR (if any) — keeping
+    // its pose/texture data alive until the bake completes — while subsequent
+    // jobs use the new IR. No mutex; the IR is frozen at construction.
+    m_meshIR = std::move(irShared);
+
+    // If the user already had Texture mode selected from a previous asset
+    // and the new asset has no textures, fall back to Material so the bake
+    // doesn't quietly degrade. The radio in the panel is greyed in this case
+    // so the state stays consistent.
+    if (m_session.totalTextures == 0
+     && m_session.colorSource.mode == voxel_bake::VoxColorSource::Mode::TextureSampled)
+    {
+        m_session.colorSource.mode = voxel_bake::VoxColorSource::Mode::MaterialBaseColor;
+    }
 
     EnsureSceneNode();
 
@@ -927,6 +969,16 @@ void GltfImportTechnique::SetVoxelSize(float worldUnits) {
 
 void GltfImportTechnique::SetPreviewMode(PreviewMode mode) {
     m_previewMode = mode;
+}
+
+void GltfImportTechnique::SetColorSource(voxel_bake::VoxColorSource::Mode mode) {
+    if (m_session.colorSource.mode == mode) return;
+    m_session.colorSource.mode = mode;
+    // Reuse the voxel-size debounce path: flip dirty + restart the timer so
+    // the next TickBakeState fires a re-bake after the standard debounce
+    // interval. Avoids a second "color-source-changed" submit pipeline.
+    m_voxelSizeDirty    = true;
+    m_voxelSizeChangeAt = std::chrono::steady_clock::now();
 }
 
 void GltfImportTechnique::EnsureBakerStarted() {
@@ -1133,25 +1185,18 @@ void GltfImportTechnique::WriteFrameUbo(uint32_t frameIndex) {
 }
 
 void GltfImportTechnique::SubmitPreviewBake() {
-    if (!m_assets) return;
-    if (!m_session.meshAsset.valid()) return;
-    AssetID clipId{};
-    if (m_session.activeClipIndex >= 0
-     && m_session.activeClipIndex < static_cast<int>(m_session.clipAssets.size()))
-    {
-        clipId = m_session.clipAssets[m_session.activeClipIndex];
+    if (!m_meshIR) {
+        spdlog::get("Render")->warn("GltfImportTechnique: no MeshIR loaded; preview bake skipped");
+        return;
     }
 
     voxel_bake::PreviewBakeJob job;
-    if (!voxel_bake::BuildSnapshot(*m_assets, m_session.meshAsset, clipId, /*skinIndex=*/0,
-                                   job.snapshot))
-    {
-        spdlog::get("Render")->warn("GltfImportTechnique: BuildSnapshot failed; bake cancelled");
-        return;
-    }
+    job.meshIR               = m_meshIR;          // shared_ptr copy — refcount keeps the IR alive
+    job.clipIndex            = m_session.activeClipIndex;
+    job.skinIndex            = 0;
     job.time                 = GetTime();
     job.voxelSizeWorld       = m_voxelSizeRequested;
-    job.colorSource.mode     = voxel_bake::VoxColorSource::Mode::MaterialBaseColor;
+    job.colorSource          = m_session.colorSource;
     job.maxGridCellsPerFrame = m_maxGridCells;
 
     m_baker.SubmitPreview(std::move(job));
@@ -1164,25 +1209,19 @@ void GltfImportTechnique::SubmitPreviewBake() {
 void GltfImportTechnique::StartFullBake(float startTime, float endTime, float fps) {
     auto logger = spdlog::get("Render");
     if (logger) logger->info("StartFullBake: enter (start={:.3f} end={:.3f} fps={:.1f})", startTime, endTime, fps);
-    if (!m_assets) {
-        if (logger) logger->warn("StartFullBake: m_assets null — bake aborted");
-        m_session.lastBakeStatusMessage = "Internal: assets not wired.";
-        return;
-    }
-    if (!m_session.meshAsset.valid()) {
-        if (logger) logger->warn("StartFullBake: meshAsset invalid — bake aborted");
+    if (!m_meshIR) {
+        if (logger) logger->warn("StartFullBake: no MeshIR loaded — bake aborted");
         m_session.lastBakeStatusMessage = "No mesh loaded.";
         return;
     }
     if (m_session.activeClipIndex < 0
-     || m_session.activeClipIndex >= static_cast<int>(m_session.clipAssets.size()))
+     || m_session.activeClipIndex >= static_cast<int>(m_session.clipDurations.size()))
     {
-        if (logger) logger->warn("StartFullBake: activeClipIndex={} (clipAssets={})",
-            m_session.activeClipIndex, m_session.clipAssets.size());
+        if (logger) logger->warn("StartFullBake: activeClipIndex={} (clipDurations={})",
+            m_session.activeClipIndex, m_session.clipDurations.size());
         m_session.lastBakeStatusMessage = "No active clip selected.";
         return;
     }
-    const AssetID clipId = m_session.clipAssets[m_session.activeClipIndex];
 
     // Clamp range to clip duration; keep at least one frame.
     const float duration = m_session.clipDurations[m_session.activeClipIndex];
@@ -1191,20 +1230,16 @@ void GltfImportTechnique::StartFullBake(float startTime, float endTime, float fp
     fps       = std::clamp(fps, 1.0f, 240.0f);
 
     voxel_bake::FullBakeJob job;
-    if (!voxel_bake::BuildSnapshot(*m_assets, m_session.meshAsset, clipId, /*skinIndex=*/0,
-                                   job.snapshot))
-    {
-        if (logger) logger->warn("StartFullBake: BuildSnapshot returned false");
-        m_session.lastBakeStatusMessage = "Failed to snapshot mesh for bake.";
-        return;
-    }
-    if (logger) logger->info("StartFullBake: snapshot OK ({} prims, clipDuration={:.3f}s, channels={})",
-        job.snapshot.primitives.size(), job.snapshot.clipDuration, job.snapshot.channels.size());
+    job.meshIR              = m_meshIR;
+    job.clipIndex           = m_session.activeClipIndex;
+    job.skinIndex           = 0;
+    if (logger) logger->info("StartFullBake: IR ready ({} prims, {} animations)",
+        m_meshIR->primitives.size(), m_meshIR->animations.size());
     job.startTime           = startTime;
     job.endTime             = endTime;
     job.fps                 = fps;
     job.voxelSizeWorld      = m_voxelSizeRequested;
-    job.colorSource.mode    = voxel_bake::VoxColorSource::Mode::MaterialBaseColor;
+    job.colorSource         = m_session.colorSource;
     job.maxGridCellsPerFrame = m_maxGridCells;
     // Total-bytes budget — defaults to 1 GB across all frames (R8_UINT == 1
     // byte/voxel). Prevents a "high-res long bake" from quietly allocating

@@ -12,6 +12,17 @@ namespace voxel_bake {
 
 class PaletteQuantizer;
 
+// ---- BaryHit ----
+//
+// Barycentric coordinates + the closest point on the triangle to the query
+// (cell center). The voxelizer computes this for every triangle-cell overlap
+// using ClosestPointOnTriangle; the ColorSampler consumes (u, v, w) to
+// interpolate per-vertex UVs at the closest point for texture sampling. The
+// flat-color sampler ignores the contents — the hit is still computed because
+// distance² (point − cellCenter) drives the nearest-triangle seam policy.
+
+struct BaryHit { float u, v, w; glm::vec3 point; };
+
 // ---- VoxColorSource ----
 //
 // Selects how a fragment of triangle painted into a voxel cell sources its
@@ -52,8 +63,16 @@ struct VoxFrame {
 // such primitives even when texture sampling is requested.
 //
 // `baseColorTexture` is also optional — when set and colorSource.mode is
-// TextureSampled, the M5 path will sample it bilinearly using the
-// barycentric-interpolated UV. M3 ignores this field.
+// TextureSampled, the M5 path samples it bilinearly using the barycentric-
+// interpolated UV. The pointer is borrowed from a MeshIR held alive by the
+// owning bake job (shared_ptr<const MeshIR>); the voxelizer never extends its
+// lifetime, so callers must guarantee the IR outlives the Voxelize() call.
+//
+// `alphaMode` + `alphaCutoff` come straight from the source material. When
+// alphaMode == Mask, the TextureColorSampler treats sampled-alpha < cutoff as
+// "skip this voxel" — the cell is left for a farther opaque triangle to claim
+// instead of being painted with a transparent texel and locking out bark
+// behind a foliage card. Opaque/Blend modes paint regardless.
 
 struct VoxelizePrimitive {
     const glm::vec3* positions     = nullptr;   // length = vertexCount
@@ -64,7 +83,9 @@ struct VoxelizePrimitive {
     size_t           indexCount    = 0;          // multiple of 3
 
     glm::vec4                    baseColorFactor   = glm::vec4(1.0f);
-    const gltf_import::Texture*  baseColorTexture  = nullptr;   // M5 only; ignored in M3
+    const gltf_import::Texture*  baseColorTexture  = nullptr;
+    gltf_import::Material::AlphaMode alphaMode    = gltf_import::Material::AlphaMode::Opaque;
+    float                        alphaCutoff      = 0.5f;
 };
 
 // ---- VoxelizeInput ----

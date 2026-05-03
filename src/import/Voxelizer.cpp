@@ -1,9 +1,11 @@
 #include "Voxelizer.h"
 #include "PaletteQuantizer.h"
+#include "VoxelColorSampler.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 
 namespace voxel_bake {
 namespace {
@@ -160,7 +162,7 @@ bool TriangleBoxOverlap(const glm::vec3& boxCenter, const glm::vec3& boxHalf,
 // All Voronoi region cases handled explicitly — a touch verbose, but each
 // branch is a couple of dot products and the function is hot.
 
-struct BaryHit { float u, v, w; glm::vec3 point; };
+// BaryHit moved to Voxelizer.h so the ColorSampler interface can consume it.
 
 BaryHit ClosestPointOnTriangle(const glm::vec3& p,
                                const glm::vec3& a, const glm::vec3& b, const glm::vec3& c)
@@ -271,9 +273,12 @@ VoxFrame Voxelize(const VoxelizeInput& in,
         const auto& prim = in.primitives[pi];
         if (prim.indexCount < 3 || !prim.positions || !prim.indices) continue;
 
-        // M3: flat material color quantized once per primitive.
-        const glm::vec3 rgb = glm::vec3(prim.baseColorFactor);
-        const uint8_t flatIdx = quantizer.QuantizeF(rgb.r, rgb.g, rgb.b);
+        // Build the per-primitive sampler once. MaterialBaseColor + missing-
+        // UV/missing-texture cases collapse to FlatColorSampler so the inner
+        // loop is branch-free. The unique_ptr holds for the lifetime of this
+        // primitive's triangle loop — quantization is O(1) inside Sample().
+        std::unique_ptr<ColorSampler> sampler =
+            MakeSampler(prim, in.colorSource, quantizer);
 
         const size_t triCount = prim.indexCount / 3;
         for (size_t tri = 0; tri < triCount; ++tri) {
@@ -319,11 +324,17 @@ VoxFrame Voxelize(const VoxelizeInput& in,
                         const size_t li = LinearIndex(x, y, z, out.size);
                         if (distSq >= bestDistSq[li]) continue;
 
+                        // Sample BEFORE updating bestDistSq. If the sampler
+                        // says "skip" (alpha-cut on a foliage texel), we leave
+                        // bestDistSq alone so a slightly-farther opaque
+                        // triangle can still claim the cell. Painting +
+                        // distance update happens together, atomically, only
+                        // on a successful sample.
+                        const ColorSample s = sampler->Sample(hit, i0, i1, i2);
+                        if (s.skip) continue;
+
                         bestDistSq[li]  = distSq;
-                        // M3: flat material color. M5 will branch here on
-                        // colorSource.mode and sample the texture using
-                        // (hit.u, hit.v, hit.w) interpolated UVs.
-                        out.indices[li] = flatIdx;
+                        out.indices[li] = s.paletteIndex;
                     }
                 }
             }

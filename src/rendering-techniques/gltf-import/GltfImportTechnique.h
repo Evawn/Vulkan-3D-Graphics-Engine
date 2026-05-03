@@ -8,6 +8,7 @@
 #include "Buffer.h"
 #include "Sampler.h"
 #include "AnimationBaker.h"
+#include "MeshIR.h"
 #include "Voxelizer.h"
 
 #include <atomic>
@@ -101,6 +102,17 @@ struct GltfImportSession {
     bool       lastSaveSucceeded    = false;
     std::string lastSavedManifestPath;          // populated on successful SaveBake
     std::string lastBakeStatusMessage;          // human-readable status for the panel (errors etc.)
+
+    // ---- Color source (M5) ----
+    //
+    // Drives both preview and full bakes. MaterialBaseColor uses the raw glTF
+    // factor (one flat color per primitive). TextureSampled barycentric-
+    // interpolates UV at the closest point on the triangle and samples the
+    // baseColorTexture bilinearly. Toggling triggers the same debounced re-
+    // bake path the voxel-size slider uses. `totalTextures` lets the panel
+    // grey out the Texture radio when the loaded asset has no textures.
+    voxel_bake::VoxColorSource colorSource{};
+    size_t                     totalTextures = 0;
 };
 
 class GltfImportTechnique : public RenderTechnique {
@@ -159,6 +171,14 @@ public:
     void  SetPreviewMode(PreviewMode mode);
     PreviewMode GetPreviewMode() const { return m_previewMode; }
 
+    // ---- Color source (M5) ----
+    //
+    // Toggling between Material and Texture flips the dirty flag so the
+    // existing debounce path picks it up — re-uses the voxel-size slider's
+    // re-bake machinery, no new submit path.
+    void  SetColorSource(voxel_bake::VoxColorSource::Mode mode);
+    voxel_bake::VoxColorSource::Mode GetColorSource() const { return m_session.colorSource.mode; }
+
     // ---- Full-bake controls (M4) ----
     //
     // StartFullBake snapshots the current voxel size + clip + range into a
@@ -213,6 +233,20 @@ private:
     // Pending load: the panel calls LoadGlb which writes here, posts a
     // ReloadTechnique event, and Reload() drains the path.
     std::string  m_pendingLoadPath;
+
+    // ---- Loaded MeshIR (M5) ----
+    //
+    // The bake worker reads from the IR directly — `m_meshIR` is the canonical
+    // source of triangles, UVs, materials, textures, and animations for the
+    // bake pipeline. The runtime mesh draw still consumes SkinnedMeshAsset (a
+    // converted view), so the IR fans out to two independent consumers
+    // instead of one feeding the other.
+    //
+    // shared_ptr<const> for natural lifetime safety: a LoadGlb mid-bake swaps
+    // `m_meshIR` to a new IR, but in-flight bake jobs hold their own copy of
+    // the shared_ptr — the old IR stays alive until those jobs finish. No
+    // mutex on the IR data; it's frozen at construction.
+    std::shared_ptr<const gltf_import::MeshIR> m_meshIR;
 
     // ---- Per-frame resources ----
     //
