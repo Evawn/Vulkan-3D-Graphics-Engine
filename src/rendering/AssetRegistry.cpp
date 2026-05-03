@@ -152,11 +152,15 @@ AssetID AssetRegistry::RegisterAnimatedVoxelAsset(std::string name, glm::uvec3 s
 	return AssetID{ static_cast<uint32_t>(m_volumes.size() - 1), AssetID::Type::VoxelVolume };
 }
 
-bool AssetRegistry::ResizeProceduralVoxelVolume(AssetID id, glm::uvec3 newSize) {
+bool AssetRegistry::ResizeProceduralVoxelVolume(AssetID id, glm::uvec3 newSize, uint32_t newFrameCount) {
 	auto* v = GetVoxelVolume(id);
 	if (!v || !v->isProcedural) return false;
-	if (v->size == newSize) return false;
-	v->size = newSize;
+	const uint32_t resolvedFrameCount = (newFrameCount == 0) ? v->frameCount : std::max<uint32_t>(newFrameCount, 1);
+	const bool sizeChanged   = (v->size       != newSize);
+	const bool framesChanged = (v->frameCount != resolvedFrameCount);
+	if (!sizeChanged && !framesChanged) return false;
+	v->size       = newSize;
+	v->frameCount = resolvedFrameCount;
 	return true;
 }
 
@@ -278,6 +282,15 @@ void AssetRegistry::DeclareMesh(MeshAsset& m, RenderGraph& graph) {
 	ib.usage    = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	ib.lifetime = Lifetime::Persistent;
 	m.indexBuffer  = graph.CreateBuffer(m.name + "_indices", ib);
+
+	// RenderGraph::Clear() bumps the gen counter and wipes m_buffers, so the
+	// VkBuffer we just declared is brand-new — even though the host-side
+	// `vertices`/`indices` arrays are unchanged. UploadPending must therefore
+	// repopulate the new buffer, regardless of whether we already uploaded into
+	// the previous (now-discarded) one. Without this, any graph rebuild
+	// (window resize, technique switch, bake-triggered volume resize) leaves
+	// the mesh's GPU buffers empty → mesh renders nothing.
+	m.needsUpload = true;
 }
 
 void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
@@ -305,6 +318,12 @@ void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
 	d.extraUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	d.lifetime   = Lifetime::Persistent;
 	v.volumeImage = graph.CreateImage(v.name + "_volume", d);
+
+	// As with DeclareMesh: the freshly-declared image is empty memory until
+	// UploadPending runs. If we have host data to push, mark for re-upload.
+	// (Procedural compute-written volumes leave v.data empty — UploadVolume
+	// short-circuits on that, so flipping the flag here is harmless.)
+	if (!v.data.empty()) v.needsUpload = true;
 }
 
 void AssetRegistry::UploadPending(RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool) {
@@ -334,6 +353,12 @@ void AssetRegistry::DeclareSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph) 
 		ib.lifetime = Lifetime::Persistent;
 		p.indexBuffer = graph.CreateBuffer(s.name + "_p" + std::to_string(i) + "_ibuf", ib);
 	}
+	// Same rebuild discipline as DeclareMesh — every rebuild gets brand-new
+	// VkBuffers, so we re-upload from the host-side arrays. Without this,
+	// switching workspaces (which triggers a graph rebuild) or completing a
+	// bake (which resizes the procedural volume → graph rebuild) blanks the
+	// SkinnedMesh's vertex buffers and the model renders as nothing.
+	if (!s.primitives.empty()) s.needsUpload = true;
 }
 
 void AssetRegistry::UploadSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph,
@@ -361,7 +386,14 @@ void AssetRegistry::UploadMesh(MeshAsset& m, RenderGraph& graph, std::shared_ptr
 
 void AssetRegistry::UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph,
                                  std::shared_ptr<VWrap::CommandPool> pool) {
-	if (!v.needsUpload || v.isProcedural || v.data.empty()) return;
+	// Upload runs whenever host data is present and the asset asks for it.
+	// Originally the procedural-volume invariant was "no host data, written by
+	// a compute pass" — but the bake pipeline (M3+) treats a procedural volume
+	// as a CPU-writable target: it computes voxels on a worker thread and
+	// stages them into the graph image via this exact path. The empty-data
+	// check below preserves the compute-only flow (those volumes never set
+	// v.data, so the upload skips them).
+	if (!v.needsUpload || v.data.empty()) return;
 	if (v.volumeImage.id == UINT32_MAX) return;
 
 	// Mirror BrickmapPaletteRenderer::UploadVolumeData — staging buffer →

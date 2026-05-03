@@ -109,18 +109,67 @@ void BakerPanel::Draw() {
     }
 
     // ============================================================
-    // Voxelization (M3 placeholder)
+    // Voxelization
     // ============================================================
-    if (ImGui::CollapsingHeader("Voxelization")) {
-        ImGui::TextColored(UIStyle::kTextDim,
-            "Live voxel preview lands in M3.");
-        ImGui::BeginDisabled();
-        static float voxelSize = 0.1f;
-        ImGui::SliderFloat("voxel size", &voxelSize, 0.01f, 1.0f, "%.3fm");
-        const char* viewModes[] = { "Mesh", "Voxels", "Overlay" };
-        static int viewMode = 0;
-        ImGui::Combo("view", &viewMode, viewModes, IM_ARRAYSIZE(viewModes));
-        ImGui::EndDisabled();
+    if (ImGui::CollapsingHeader("Voxelization", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!session.hasLoadedAsset) {
+            ImGui::TextColored(UIStyle::kTextDim,
+                "Load a .glb first — the voxel preview bakes the active pose.");
+        } else {
+            // ---- Voxel size slider (debounced re-bake on release) ----
+            //
+            // Logarithmic-ish range: 1mm to 1m. Most useful range for a 10-unit
+            // asset (the AnimatedOak scaled into the viewport) is 1cm–10cm —
+            // the slider sits there by default.
+            float voxelSize = m_technique->GetVoxelSize();
+            if (ImGui::SliderFloat("voxel size", &voxelSize, 0.005f, 1.0f, "%.4f m",
+                ImGuiSliderFlags_Logarithmic))
+            {
+                m_technique->SetVoxelSize(voxelSize);
+            }
+
+            // ---- View mode toggle ----
+            //
+            // Pure UI state; the technique selects which pass actually draws.
+            // Overlay (M6) lands when alpha-composited mesh+voxel is wired.
+            int mode = static_cast<int>(m_technique->GetPreviewMode());
+            const char* labels[] = { "Mesh", "Voxels" };
+            for (int i = 0; i < 2; ++i) {
+                if (i > 0) ImGui::SameLine();
+                bool selected = (mode == i);
+                if (selected) ImGui::PushStyleColor(ImGuiCol_Button,
+                    ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                if (ImGui::Button(labels[i])) {
+                    m_technique->SetPreviewMode(
+                        i == 0 ? GltfImportTechnique::PreviewMode::Mesh
+                               : GltfImportTechnique::PreviewMode::Voxels);
+                }
+                if (selected) ImGui::PopStyleColor();
+            }
+
+            // ---- Bake status line ----
+            //
+            // Three states: never-baked (drag the slider), in-flight (worker
+            // is voxelizing), and complete (show grid + voxel size used).
+            // budgetExceeded is sticky until the next successful bake — keeps
+            // the warning visible during slider exploration.
+            ImGui::Spacing();
+            if (m_technique->IsBakingPreview()) {
+                ImGui::TextColored(UIStyle::kTextDim, "Baking...");
+            } else if (session.lastBudgetExceeded) {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                    "Cell budget exceeded — increase voxel size.");
+            } else if (session.hasBake) {
+                ImGui::Text("Grid: %u x %u x %u  @ %.4f m",
+                    session.previewVolumeSize.x,
+                    session.previewVolumeSize.y,
+                    session.previewVolumeSize.z,
+                    session.previewVoxelSize);
+            } else {
+                ImGui::TextColored(UIStyle::kTextDim,
+                    "No bake yet — adjust voxel size to bake.");
+            }
+        }
     }
 
     // ============================================================

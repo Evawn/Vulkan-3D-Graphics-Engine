@@ -203,6 +203,11 @@ void InspectorPanel::Draw() {
 			std::string currentName = (*m_renderers)[*m_active_index]->GetDisplayName();
 			if (ImGui::BeginCombo("##technique", currentName.c_str())) {
 				for (size_t i = 0; i < m_renderers->size(); i++) {
+					// Skip workspace-scoped techniques (e.g. GLB Import & Bake).
+					// They're still in the registered list — the workspace
+					// switcher activates them by name — but they don't belong
+					// in the Scene workspace's general picker.
+					if ((*m_renderers)[i]->IsScopedToWorkspace()) continue;
 					bool selected = (i == *m_active_index);
 					std::string name = (*m_renderers)[i]->GetDisplayName();
 					if (ImGui::Selectable(name.c_str(), selected)) {

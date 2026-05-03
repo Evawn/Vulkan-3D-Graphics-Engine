@@ -5,6 +5,9 @@
 // Joints index into a global joint matrix SSBO at offset `firstJoint` (push
 // constant). Each draw can therefore reference its own contiguous range of
 // joints inside the per-frame arena that the technique uploads in one shot.
+//
+// Per-frame state (camera + sky/sun) is shared with the voxel preview pass
+// via a single GltfImportFrameUbo bound at slot 0 — see GltfImportTechnique.cpp.
 
 layout(location = 0) in vec3  inPosition;
 layout(location = 1) in vec3  inNormal;
@@ -12,10 +15,14 @@ layout(location = 2) in vec2  inUV;
 layout(location = 3) in uvec4 inJoints;
 layout(location = 4) in vec4  inWeights;
 
-layout(set = 0, binding = 0) uniform CameraUBO {
-    mat4 view;
-    mat4 proj;
-} cam;
+layout(set = 0, binding = 0) uniform FrameUbo {
+    mat4  viewProj;
+    mat4  ndcToWorld;
+    vec3  cameraWorldPos;     int   _pad0;
+    vec3  sunDirection;       float sunCosHalfAngle;
+    vec3  sunColor;           float sunIntensity;
+    vec3  skyColor;           float ambientIntensity;
+} frame;
 
 // SSBO over all joints emitted this frame. firstJoint points at the start of
 // the run for this draw; the shader reads `joints[firstJoint + idx]`.
@@ -48,7 +55,7 @@ void main() {
 
     vec4 skinnedPos = skin * vec4(inPosition, 1.0);
     vec4 worldPos   = pc.model * skinnedPos;
-    gl_Position     = cam.proj * cam.view * worldPos;
+    gl_Position     = frame.viewProj * worldPos;
 
     // Normals via the inverse-transpose of the upper 3x3 of (model * skin).
     // glTF rigs are non-uniform-scale-light in practice, so the simpler

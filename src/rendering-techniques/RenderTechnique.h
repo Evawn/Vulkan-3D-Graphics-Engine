@@ -110,6 +110,20 @@ public:
 	virtual std::vector<std::string> GetShaderPaths() const = 0;
 	virtual FrameStats GetFrameStats() const { return {}; }
 
+	// ---- Workspace scoping ----
+	//
+	// Returns true if the technique should NOT appear in the Scene workspace's
+	// general technique-picker UI (Inspector dropdown + Cycle Technique menu).
+	// The technique is still constructed and added to the rendering system —
+	// workspace-locked techniques activate only when their workspace is
+	// entered (via RenderingSystem::RequestSwitchTechniqueByName from the
+	// workspace switcher), so they need to be present in the list. This flag
+	// is purely about hiding them from the Scene workspace's interactive
+	// pickers, where they'd otherwise be confusing (the user could activate
+	// the import technique without entering the import workspace, leaving
+	// half-wired UI state).
+	virtual bool IsScopedToWorkspace() const { return false; }
+
 	// ---- Reload (event-driven; Application reposts ReloadTechnique back here) ----
 	void SetEventSink(std::function<void(AppEvent)> sink) { m_eventSink = std::move(sink); }
 	virtual void Reload(const RenderContext& ctx) { (void)ctx; }

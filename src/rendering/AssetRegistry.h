@@ -171,9 +171,16 @@ public:
 	                                   std::vector<uint8_t> framesData,
 	                                   std::array<uint8_t, 256 * 4> palette,
 	                                   std::string sourcePath = "");
-	// Resize an existing procedural volume. Returns true if size actually
-	// changed (caller should request a graph rebuild). Format stays as-is.
-	bool    ResizeProceduralVoxelVolume(AssetID id, glm::uvec3 newSize);
+	// Resize an existing procedural volume. Returns true if size or frameCount
+	// actually changed (caller should request a graph rebuild). Format stays
+	// as-is. `newFrameCount == 0` is interpreted as "keep current" so callers
+	// that only care about size don't need to know what frame count the asset
+	// was created with.
+	//
+	// The bake pipeline uses this to morph a single-frame preview volume into
+	// a multi-frame baked volume on the same AssetID — preserving downstream
+	// references (Component::asset bindings, etc.) across the resize.
+	bool    ResizeProceduralVoxelVolume(AssetID id, glm::uvec3 newSize, uint32_t newFrameCount = 0);
 
 	const VoxelVolumeAsset* GetVoxelVolume(AssetID id) const;
 	VoxelVolumeAsset*       GetVoxelVolume(AssetID id);

@@ -1,9 +1,10 @@
 #version 450
 
-// Companion to skinned_mesh.vert. v1 fragment is intentionally minimal:
-// directional Lambert with a fixed light + fixed ambient, tinted by the
-// material's base color factor. Texture sampling lands in a follow-up
-// milestone (M5 in animated-voxel-import.md).
+// Companion to skinned_mesh.vert. Lighting now consumes the scene's sun + sky
+// state via the shared GltfImportFrameUbo so the mesh and the voxel preview
+// stay visually consistent (both lit by the same scene sun, both ambient-lit
+// by the same sky color). Texture sampling lands in M5; until then we tint
+// with the material's base color factor.
 
 layout(location = 0) in vec3 vWorldNormal;
 layout(location = 1) in vec3 vBaseColor;
@@ -11,15 +12,20 @@ layout(location = 2) in vec2 vUV;
 
 layout(location = 0) out vec4 outColor;
 
+layout(set = 0, binding = 0) uniform FrameUbo {
+    mat4  viewProj;
+    mat4  ndcToWorld;
+    vec3  cameraWorldPos;     int   _pad0;
+    vec3  sunDirection;       float sunCosHalfAngle;
+    vec3  sunColor;           float sunIntensity;
+    vec3  skyColor;           float ambientIntensity;
+} frame;
+
 void main() {
     vec3 N = normalize(vWorldNormal);
-    // A fixed light coming from above and slightly to the side. Good enough
-    // to give shape to a previewed mesh; the user gets a real lighting story
-    // when the bake feeds CombinedRenderer.
-    vec3 L = normalize(vec3(0.3, 1.0, 0.2));
-    float ndotl = max(dot(N, L), 0.0);
-
-    vec3 ambient = vec3(0.25);
-    vec3 lit     = vBaseColor * (ambient + (1.0 - ambient) * ndotl);
+    float ndotl = max(dot(N, frame.sunDirection), 0.0);
+    vec3 ambient = frame.skyColor * frame.ambientIntensity;
+    vec3 direct  = frame.sunColor * frame.sunIntensity * ndotl;
+    vec3 lit     = vBaseColor * (ambient + direct);
     outColor = vec4(lit, 1.0);
 }

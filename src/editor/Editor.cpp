@@ -267,11 +267,18 @@ void Editor::ApplyWorkspaceVisibility() {
 void Editor::DrawMenuBar() {
 	auto cycle_technique = [this](int dir) {
 		if (!m_renderers || !m_active_renderer_index || m_renderers->empty()) return;
-		size_t n = m_renderers->size();
-		size_t cur = *m_active_renderer_index;
-		size_t next = (dir > 0) ? (cur + 1) % n : (cur + n - 1) % n;
-		// Inspector holds the registered switch callback; re-use it.
-		m_inspector.RequestSwitchTechnique(next);
+		const size_t n = m_renderers->size();
+		size_t next = *m_active_renderer_index;
+		// Step at most n times so we never loop forever even if every
+		// technique is workspace-scoped (in which case there's nothing valid
+		// to cycle to and we return without switching).
+		for (size_t step = 0; step < n; ++step) {
+			next = (dir > 0) ? (next + 1) % n : (next + n - 1) % n;
+			if (!(*m_renderers)[next]->IsScopedToWorkspace()) {
+				m_inspector.RequestSwitchTechnique(next);
+				return;
+			}
+		}
 	};
 
 	if (ImGui::BeginMenu("File")) {
