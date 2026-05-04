@@ -105,10 +105,44 @@ void main() {
 
     // Ray in mesh-local AABB space — both endpoints are already in that frame
     // (cameraLocalPos is the inverse-model-projected camera position, computed
-    // CPU-side per frame). Tiny step inward to avoid sitting exactly on the
-    // face plane the cube was rasterized at.
+    // CPU-side per frame).
     vec3 localDir = normalize(vLocalPos - draw.cameraLocalPos);
-    vec3 ddaOrigin = vLocalPos + localDir * 0.0001;
+
+    // Ray-AABB clip against the cube. tEntry < 0 means the camera is INSIDE
+    // the cube — in which case the rasterized fragment (vLocalPos) is the
+    // ray's *exit* point on the back face, not its entry. We must start the
+    // DDA at the camera position itself (clamped slightly forward), not at
+    // vLocalPos, otherwise the ray would step out of the volume on the very
+    // first iteration and the user sees nothing once they zoom into the
+    // bake. Computing tEntry analytically is cheaper than the
+    // `cameraLocalPos in [aabbMin, aabbMax]` axis-aligned check and also
+    // gives us tExit for free, which the back-face discard below uses.
+    vec3 invDir = 1.0 / localDir;
+    vec3 tNear  = (pc.aabbMin - draw.cameraLocalPos) * invDir;
+    vec3 tFar   = (pc.aabbMax - draw.cameraLocalPos) * invDir;
+    vec3 t1     = min(tNear, tFar);
+    vec3 t2     = max(tNear, tFar);
+    float tEntry = max(max(t1.x, t1.y), t1.z);
+    float tExit  = min(min(t2.x, t2.y), t2.z);
+
+    // NoCullFill rasterizes BOTH front and back faces of the cube. With the
+    // camera outside, that means each pixel runs main() twice — once for the
+    // front face (correct DDA entry) and once for the back face (would
+    // mis-start at the exit). In opaque mode the duplicate fragment is
+    // hidden by the depth test; in Overlay mode the alpha-over blend would
+    // compound the contributions and the voxel layer would over-darken.
+    // Discarding past-the-midpoint fragments collapses to a single hit per
+    // pixel. When the camera is INSIDE (tEntry < 0) only back faces
+    // rasterize anyway, and this discard is naturally dormant.
+    float tHere = dot(vLocalPos - draw.cameraLocalPos, localDir);
+    if (tEntry > 0.0 && tHere > 0.5 * (tEntry + tExit)) discard;
+
+    // DDA origin: snap to the cube's near-camera surface for the outside
+    // case (tOrigin = tEntry), or to the camera itself when inside
+    // (tOrigin = 0). The tiny forward bump dodges sitting exactly on a
+    // voxel boundary, same as the legacy version.
+    float tOrigin = max(tEntry, 0.0);
+    vec3 ddaOrigin = draw.cameraLocalPos + localDir * (tOrigin + 0.0001);
 
     DdaHit h = traceLocal(ddaOrigin, localDir);
     if (!h.hit) discard;
