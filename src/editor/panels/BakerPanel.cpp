@@ -160,6 +160,35 @@ void BakerPanel::Draw() {
                 ImGui::TextColored(UIStyle::kTextDim, "(no textures)");
             }
 
+            // ---- Samples per voxel (M5b supersampling) ----
+            //
+            // Trades bake speed for noise reduction. K=1 is point-sampling
+            // (the M5 v0 behavior); K=4 is the recommended default; K=16
+            // is overkill for most assets but useful when scrubbing high-
+            // frequency leaf textures. FlatColorSampler short-circuits to
+            // K=1 internally, so this is a no-op in Material mode — but
+            // we keep the dropdown enabled so the user's setting persists
+            // across mode toggles.
+            const int currentK = m_technique->GetSamplesPerVoxel();
+            const int kOptions[] = { 1, 2, 4, 8, 16 };
+            char kLabel[8];
+            std::snprintf(kLabel, sizeof(kLabel), "%d", currentK);
+            if (ImGui::BeginCombo("samples per voxel", kLabel)) {
+                for (int k : kOptions) {
+                    char label[8];
+                    std::snprintf(label, sizeof(label), "%d", k);
+                    if (ImGui::Selectable(label, k == currentK)) {
+                        m_technique->SetSamplesPerVoxel(k);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Texture samples averaged per voxel.\n"
+                                  "Higher = less noise, slower bake.\n"
+                                  "Default 4. Material mode ignores this.");
+            }
+
             // ---- View mode toggle ----
             //
             // Pure UI state; the technique selects which pass actually draws.

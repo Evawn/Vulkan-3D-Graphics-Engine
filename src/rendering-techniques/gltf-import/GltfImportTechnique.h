@@ -113,6 +113,15 @@ struct GltfImportSession {
     // grey out the Texture radio when the loaded asset has no textures.
     voxel_bake::VoxColorSource colorSource{};
     size_t                     totalTextures = 0;
+
+    // ---- Multi-sample (M5b) ----
+    //
+    // K = number of texture samples averaged per voxel. K=1 is point-
+    // sampling (the M5 v0 behavior); K=4 is the recommended default for
+    // most assets; K=16 is overkill but useful for fine bark detail. The
+    // FlatColorSampler short-circuits to K=1 internally, so this is
+    // effectively a no-op in Material color mode.
+    int samplesPerVoxel = 4;
 };
 
 class GltfImportTechnique : public RenderTechnique {
@@ -178,6 +187,14 @@ public:
     // re-bake machinery, no new submit path.
     void  SetColorSource(voxel_bake::VoxColorSource::Mode mode);
     voxel_bake::VoxColorSource::Mode GetColorSource() const { return m_session.colorSource.mode; }
+
+    // ---- Samples per voxel (M5b multi-sample) ----
+    //
+    // Toggling routes through the same voxel-size debounce path as
+    // SetColorSource — flip dirty + reset the timer; next TickBakeState
+    // submits a re-bake after ~250ms.
+    void SetSamplesPerVoxel(int n);
+    int  GetSamplesPerVoxel() const { return m_session.samplesPerVoxel; }
 
     // ---- Full-bake controls (M4) ----
     //

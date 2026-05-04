@@ -1,5 +1,4 @@
 #include "VoxelColorSampler.h"
-#include "PaletteQuantizer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -83,10 +82,7 @@ glm::vec4 SampleBilinearRepeat(const gltf_import::Texture& tex, glm::vec2 uv) {
     const float w11 =         fx  *         fy;
 
     // Alpha-weighted RGB. Each texel contributes (corner_weight × alpha) to
-    // a numerator, normalized by the sum of (corner_weight × alpha). When
-    // every alpha is 1 this collapses to plain bilinear; when every alpha
-    // is 0 the renormalization denominator is 0 and we return black (the
-    // caller's cutoff test will skip the voxel via the alpha output below).
+    // a numerator, normalized by the sum of (corner_weight × alpha).
     const float aw00 = w00 * c00.a;
     const float aw10 = w10 * c10.a;
     const float aw01 = w01 * c01.a;
@@ -112,63 +108,48 @@ namespace {
 
 // ---- FlatColorSampler ----
 //
-// MaterialBaseColor: one quantized index, computed once at sampler
-// construction. Sample() is a constant-time return — exactly the M3 behavior,
-// just routed through the sampler interface.
+// MaterialBaseColor: returns the material's RGB factor verbatim, plus its
+// alpha. No texture, no quantization at the sampler level — the voxelizer
+// quantizes the K-sample average for us.
+//
+// MayVaryAcrossTriangle() returns false → the voxelizer's K-sample loop
+// short-circuits to K=1 for this sampler, so no work is wasted re-running
+// the same lookup K times.
 
 class FlatColorSampler final : public ColorSampler {
 public:
-    FlatColorSampler(const PaletteQuantizer& q, glm::vec4 factor) {
-        const glm::vec3 rgb = glm::vec3(factor);
-        m_index = q.QuantizeF(rgb.r, rgb.g, rgb.b);
-    }
+    explicit FlatColorSampler(glm::vec4 factor)
+        : m_rgb(glm::vec3(factor)), m_alpha(factor.a) {}
+    bool MayVaryAcrossTriangle() const override { return false; }
     ColorSample Sample(const BaryHit&, uint32_t, uint32_t, uint32_t) const override {
-        return { m_index, false };
+        return { m_rgb, m_alpha };
     }
 private:
-    uint8_t m_index = 0;
+    glm::vec3 m_rgb;
+    float     m_alpha;
 };
 
 // ---- TextureColorSampler ----
 //
 // TextureSampled: bary-interpolate UV from the triangle's three vertex UVs,
-// bilinear texel fetch (REPEAT wrap), multiply by baseColorFactor, alpha
-// test, quantize. Holds the per-primitive UV/texture/factor/alpha so Sample()
-// doesn't chase pointers each call.
+// alpha-weighted bilinear texel fetch (REPEAT wrap), multiply by
+// baseColorFactor, return un-quantized RGB + alpha.
 //
-// ---- Alpha policy ----
-//
-// Voxels are integer palette indices — there's no concept of partial
-// transparency in the output, so we have to *binarize* at bake time. The
-// only sensible choice is "skip below cutoff." Originally I limited that to
-// Mask mode (per glTF spec), but the AnimatedOak surfaced a real-world case
-// the spec doesn't help with: foliage cards using Blend mode, with an alpha
-// channel separating leaf islands from a black RGB gutter. Without alpha-
-// cut on Blend, the bilinear filter blends gutter (RGB=0) and leaf RGB
-// together → mostly-black voxels with a few green leaf-center voxels
-// surviving.
-//
-// Effective policy:
-//   - Mask:   respect alphaCutoff (glTF spec)
-//   - Blend:  respect alphaCutoff too — there's no spec-correct binarization,
-//             but matching the cutoff is what runtime renderers do when
-//             forced to. Catches the foliage-card case.
-//   - Opaque: skip only when alpha is essentially zero (< 3/255). Defends
-//             against malformed assets (Opaque material + transparent
-//             gutters in the texture) without overreaching on legitimate
-//             opaque assets that happen to have alpha < 1 somewhere.
+// The alpha-cut decision lives in the voxelizer now — it has to operate on
+// the K-sample mean alpha, which the sampler can't see. Same effective-
+// cutoff rules as before (Mask/Blend respect material cutoff; Opaque uses
+// 3/255 as a malformed-asset guard); the voxelizer reads alphaMode +
+// alphaCutoff directly off the VoxelizePrimitive.
 
 class TextureColorSampler final : public ColorSampler {
 public:
-    TextureColorSampler(const PaletteQuantizer&            q,
-                        const glm::vec2*                   uvs,
-                        const gltf_import::Texture*        tex,
-                        glm::vec4                          factor,
-                        gltf_import::Material::AlphaMode   alphaMode,
-                        float                              alphaCutoff)
-        : m_q(q), m_uvs(uvs), m_tex(tex), m_factor(factor),
-          m_alphaMode(alphaMode), m_alphaCutoff(alphaCutoff)
+    TextureColorSampler(const glm::vec2*             uvs,
+                        const gltf_import::Texture*  tex,
+                        glm::vec4                    factor)
+        : m_uvs(uvs), m_tex(tex), m_factor(factor)
     {}
+
+    bool MayVaryAcrossTriangle() const override { return true; }
 
     ColorSample Sample(const BaryHit& hit,
                        uint32_t i0, uint32_t i1, uint32_t i2) const override
@@ -178,37 +159,19 @@ public:
                            + hit.w * m_uvs[i2];
         const glm::vec4 t = SampleBilinearRepeat(*m_tex, uv);
         const glm::vec4 c = t * m_factor;
-
-        // Mask + Blend → use the material's authored cutoff.
-        // Opaque → only skip explicitly-transparent texels (broken-asset guard).
-        const float effectiveCutoff =
-            (m_alphaMode == gltf_import::Material::AlphaMode::Opaque)
-                ? (3.0f / 255.0f)
-                : m_alphaCutoff;
-        if (c.a < effectiveCutoff) {
-            // Skip — leave bestDistSq[] alone so a farther opaque triangle
-            // can still claim this cell. Critical for foliage cards in front
-            // of bark; without this skip-without-distance-update, alpha-cut
-            // leaves would punch unfillable holes through the geometry behind.
-            return { 0, true };
-        }
-        return { m_q.QuantizeF(c.r, c.g, c.b), false };
+        return { glm::vec3(c), c.a };
     }
 
 private:
-    const PaletteQuantizer&             m_q;
-    const glm::vec2*                    m_uvs        = nullptr;
-    const gltf_import::Texture*         m_tex        = nullptr;
-    glm::vec4                           m_factor     = glm::vec4(1.0f);
-    gltf_import::Material::AlphaMode    m_alphaMode  = gltf_import::Material::AlphaMode::Opaque;
-    float                               m_alphaCutoff = 0.5f;
+    const glm::vec2*            m_uvs    = nullptr;
+    const gltf_import::Texture* m_tex    = nullptr;
+    glm::vec4                   m_factor = glm::vec4(1.0f);
 };
 
 } // namespace
 
 std::unique_ptr<ColorSampler> MakeSampler(const VoxelizePrimitive& prim,
-                                          const VoxColorSource&    cs,
-                                          const PaletteQuantizer&  q)
+                                          const VoxColorSource&    cs)
 {
     // TextureSampled requested but missing requirements → quietly fall back to
     // flat. Keeps the voxelizer inner loop branch-free regardless of asset
@@ -217,10 +180,9 @@ std::unique_ptr<ColorSampler> MakeSampler(const VoxelizePrimitive& prim,
     const bool canTexture  = (prim.uvs != nullptr) && (prim.baseColorTexture != nullptr);
     if (wantTexture && canTexture) {
         return std::make_unique<TextureColorSampler>(
-            q, prim.uvs, prim.baseColorTexture,
-            prim.baseColorFactor, prim.alphaMode, prim.alphaCutoff);
+            prim.uvs, prim.baseColorTexture, prim.baseColorFactor);
     }
-    return std::make_unique<FlatColorSampler>(q, prim.baseColorFactor);
+    return std::make_unique<FlatColorSampler>(prim.baseColorFactor);
 }
 
 } // namespace voxel_bake

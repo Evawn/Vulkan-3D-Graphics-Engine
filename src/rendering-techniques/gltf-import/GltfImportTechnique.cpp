@@ -49,8 +49,14 @@ struct GltfImportFrameUbo {
     glm::vec3   sunDirection;       float   sunCosHalfAngle;      // 16
     glm::vec3   sunColor;           float   sunIntensity;         // 16
     glm::vec3   skyColor;           float   ambientIntensity;     // 16
+    // Direct-lighting controls — mirror SceneLighting's aoStrength /
+    // shadowsEnabled so the import preview shades to the same lighting model
+    // as InstancedVoxel / BrickmapPalette. shadowsEnabled is an int because
+    // GLSL's std140 has no native bool.
+    float       aoStrength;         int32_t shadowsEnabled;
+    int32_t     _pad1;              int32_t _pad2;                // 16
 };
-static_assert(sizeof(GltfImportFrameUbo) == 192,
+static_assert(sizeof(GltfImportFrameUbo) == 208,
     "GltfImportFrameUbo std140 layout drift — update skinned_mesh.{vert,frag}, voxel_preview.{vert,frag}, voxel_preview_sky.frag to match");
 
 // Joint-arena upper bound. The biggest skin in a typical asset (the oak's
@@ -981,6 +987,16 @@ void GltfImportTechnique::SetColorSource(voxel_bake::VoxColorSource::Mode mode) 
     m_voxelSizeChangeAt = std::chrono::steady_clock::now();
 }
 
+void GltfImportTechnique::SetSamplesPerVoxel(int n) {
+    n = std::clamp(n, 1, voxel_bake::kMaxSamplesPerVoxel);
+    if (n == m_session.samplesPerVoxel) return;
+    m_session.samplesPerVoxel = n;
+    // Same debounce trick as SetColorSource — fold into the existing
+    // dirty-flag path so the panel doesn't need a parallel submit pipeline.
+    m_voxelSizeDirty    = true;
+    m_voxelSizeChangeAt = std::chrono::steady_clock::now();
+}
+
 void GltfImportTechnique::EnsureBakerStarted() {
     if (m_bakerStarted) return;
     m_baker.Start();
@@ -1173,12 +1189,16 @@ void GltfImportTechnique::WriteFrameUbo(uint32_t frameIndex) {
                                         m_lighting->sunColor[2]);
         ubo.sunIntensity    = m_lighting->sunIntensity;
         ubo.ambientIntensity = m_lighting->ambientIntensity;
+        ubo.aoStrength      = m_lighting->aoStrength;
+        ubo.shadowsEnabled  = m_lighting->shadowsEnabled ? 1 : 0;
     } else {
         ubo.sunDirection    = glm::normalize(glm::vec3(0.3f, 0.2f, 1.0f));
         ubo.sunCosHalfAngle = std::cos(glm::radians(0.75f));
         ubo.sunColor        = glm::vec3(1.0f, 0.98f, 0.92f);
         ubo.sunIntensity    = 1.0f;
         ubo.ambientIntensity = 0.35f;
+        ubo.aoStrength      = 1.0f;
+        ubo.shadowsEnabled  = 1;
     }
     ubo.skyColor = m_sky ? m_sky->color : kFallbackSkyColor;
     std::memcpy(m_frame_ubos_mapped[frameIndex], &ubo, sizeof(ubo));
@@ -1197,6 +1217,7 @@ void GltfImportTechnique::SubmitPreviewBake() {
     job.time                 = GetTime();
     job.voxelSizeWorld       = m_voxelSizeRequested;
     job.colorSource          = m_session.colorSource;
+    job.samplesPerVoxel      = m_session.samplesPerVoxel;
     job.maxGridCellsPerFrame = m_maxGridCells;
 
     m_baker.SubmitPreview(std::move(job));
@@ -1240,6 +1261,7 @@ void GltfImportTechnique::StartFullBake(float startTime, float endTime, float fp
     job.fps                 = fps;
     job.voxelSizeWorld      = m_voxelSizeRequested;
     job.colorSource         = m_session.colorSource;
+    job.samplesPerVoxel     = m_session.samplesPerVoxel;
     job.maxGridCellsPerFrame = m_maxGridCells;
     // Total-bytes budget — defaults to 1 GB across all frames (R8_UINT == 1
     // byte/voxel). Prevents a "high-res long bake" from quietly allocating

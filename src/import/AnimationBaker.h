@@ -63,6 +63,7 @@ struct PreviewBakeJob {
     float              time                 = 0.0f;
     float              voxelSizeWorld       = 0.05f;
     VoxColorSource     colorSource{};
+    int                samplesPerVoxel      = 4;       // K-sample supersampling, see Voxelizer.h
     uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u;
     uint64_t           generation           = 0;
 };
@@ -101,6 +102,7 @@ struct FullBakeJob {
     float              fps                 = 24.0f;
     float              voxelSizeWorld      = 0.05f;
     VoxColorSource     colorSource{};
+    int                samplesPerVoxel     = 4;
     uint32_t           maxGridCellsPerFrame = 512u * 512u * 512u;
     uint64_t           maxTotalBytes        = 1ull * 1024 * 1024 * 1024;
     uint32_t           aabbSampleCount      = 32;

@@ -226,6 +226,43 @@ inline size_t LinearIndex(uint32_t x, uint32_t y, uint32_t z, const glm::uvec3& 
          + static_cast<size_t>(x);
 }
 
+// ---- kJitterOffsets ----
+//
+// Halton(2, 3, 5) low-discrepancy sequence in [0,1]^3, indices 1..15, each
+// component shifted by -0.5 to land in [-0.5, 0.5]^3 (so multiplying by
+// voxelSize gives an offset that stays inside the voxel cube around the
+// cell center).
+//
+// 15 entries — enough for K up to kMaxSamplesPerVoxel = 16, since sample 0
+// is the closest-point hit (no jitter, computed for the distance gate
+// regardless), and we use kJitterOffsets[0..K-2] for the remaining K-1.
+//
+// Halton is deterministic, so re-bakes are byte-identical given the same
+// inputs. Precomputed offline; do not regenerate at runtime.
+//
+// Three-base Halton (2, 3, 5) is co-prime in all three dimensions, which
+// gives well-distributed projections onto every face of the voxel cube —
+// important because the triangle within the cube can intersect any face,
+// and we want samples to spread along whichever direction matters most.
+
+constexpr glm::vec3 kJitterOffsets[15] = {
+    glm::vec3( 0.0000f, -0.1667f, -0.3000f),  // i=1: H2=0.5000, H3=0.3333, H5=0.2000
+    glm::vec3(-0.2500f,  0.1667f, -0.1000f),  // i=2: H2=0.2500, H3=0.6667, H5=0.4000
+    glm::vec3( 0.2500f, -0.3889f,  0.1000f),  // i=3: H2=0.7500, H3=0.1111, H5=0.6000
+    glm::vec3(-0.3750f, -0.0556f,  0.3000f),  // i=4: H2=0.1250, H3=0.4444, H5=0.8000
+    glm::vec3( 0.1250f,  0.2778f, -0.4600f),  // i=5: H2=0.6250, H3=0.7778, H5=0.0400
+    glm::vec3(-0.1250f, -0.2778f, -0.2600f),  // i=6: H2=0.3750, H3=0.2222, H5=0.2400
+    glm::vec3( 0.3750f,  0.0556f, -0.0600f),  // i=7: H2=0.8750, H3=0.5556, H5=0.4400
+    glm::vec3(-0.4375f,  0.3889f,  0.1400f),  // i=8: H2=0.0625, H3=0.8889, H5=0.6400
+    glm::vec3( 0.0625f, -0.4630f,  0.3400f),  // i=9: H2=0.5625, H3=0.0370, H5=0.8400
+    glm::vec3(-0.1875f, -0.1296f, -0.4200f),  // i=10: H2=0.3125, H3=0.3704, H5=0.0800
+    glm::vec3( 0.3125f,  0.2037f, -0.2200f),  // i=11: H2=0.8125, H3=0.7037, H5=0.2800
+    glm::vec3(-0.3125f, -0.3519f, -0.0200f),  // i=12: H2=0.1875, H3=0.1481, H5=0.4800
+    glm::vec3( 0.1875f, -0.0185f,  0.1800f),  // i=13: H2=0.6875, H3=0.4815, H5=0.6800
+    glm::vec3(-0.0625f,  0.3148f,  0.3800f),  // i=14: H2=0.4375, H3=0.8148, H5=0.8800
+    glm::vec3( 0.4375f, -0.2407f, -0.3800f),  // i=15: H2=0.9375, H3=0.2593, H5=0.1200
+};
+
 } // namespace
 
 AabbSample ComputePosedAabb(const VoxelizePrimitive* prims, size_t primCount) {
@@ -269,6 +306,12 @@ VoxFrame Voxelize(const VoxelizeInput& in,
     const glm::vec3 origin = in.worldOriginMin;
     const glm::vec3 invVoxelSize(1.0f / voxelSize);
 
+    // K-sample supersampling. Clamped to [1, kMaxSamplesPerVoxel]; the lower
+    // bound preserves K=1 = current behavior (regression-safe), the upper
+    // bound matches our hardcoded 15-entry jitter table (sample 0 is the
+    // closest-point hit, samples 1..K-1 use kJitterOffsets[0..K-2]).
+    const int requestedK = std::clamp(in.samplesPerVoxel, 1, kMaxSamplesPerVoxel);
+
     for (size_t pi = 0; pi < in.primitiveCount; ++pi) {
         const auto& prim = in.primitives[pi];
         if (prim.indexCount < 3 || !prim.positions || !prim.indices) continue;
@@ -276,9 +319,23 @@ VoxFrame Voxelize(const VoxelizeInput& in,
         // Build the per-primitive sampler once. MaterialBaseColor + missing-
         // UV/missing-texture cases collapse to FlatColorSampler so the inner
         // loop is branch-free. The unique_ptr holds for the lifetime of this
-        // primitive's triangle loop — quantization is O(1) inside Sample().
-        std::unique_ptr<ColorSampler> sampler =
-            MakeSampler(prim, in.colorSource, quantizer);
+        // primitive's triangle loop.
+        std::unique_ptr<ColorSampler> sampler = MakeSampler(prim, in.colorSource);
+
+        // Short-circuit K=1 for samplers whose output doesn't vary across
+        // the triangle (FlatColorSampler) — saves K-1 redundant
+        // ClosestPointOnTriangle calls per cell hit.
+        const int K = sampler->MayVaryAcrossTriangle() ? requestedK : 1;
+
+        // Effective alpha-cut policy, hoisted outside the inner loop:
+        //   - Mask/Blend: respect the material's authored cutoff
+        //   - Opaque:    near-zero floor (3/255) — guards against malformed
+        //                assets where the material says Opaque but the
+        //                texture has explicit transparent gutters
+        const float effectiveCutoff =
+            (prim.alphaMode == gltf_import::Material::AlphaMode::Opaque)
+                ? (3.0f / 255.0f)
+                : prim.alphaCutoff;
 
         const size_t triCount = prim.indexCount / 3;
         for (size_t tri = 0; tri < triCount; ++tri) {
@@ -324,17 +381,46 @@ VoxFrame Voxelize(const VoxelizeInput& in,
                         const size_t li = LinearIndex(x, y, z, out.size);
                         if (distSq >= bestDistSq[li]) continue;
 
-                        // Sample BEFORE updating bestDistSq. If the sampler
-                        // says "skip" (alpha-cut on a foliage texel), we leave
-                        // bestDistSq alone so a slightly-farther opaque
-                        // triangle can still claim the cell. Painting +
-                        // distance update happens together, atomically, only
-                        // on a successful sample.
-                        const ColorSample s = sampler->Sample(hit, i0, i1, i2);
-                        if (s.skip) continue;
+                        // ---- K-sample supersampling ----
+                        //
+                        // Sample 0 is the closest-point hit (free; we
+                        // already computed it for the distance gate).
+                        // Samples 1..K-1 jitter the query position inside
+                        // the voxel cube; for each we recompute the
+                        // closest-point on the triangle and bary-sample
+                        // the texture there. RGB is alpha-weighted; the
+                        // final voxel color is the alpha-weighted mean
+                        // (texels with α=0 contribute nothing to RGB but
+                        // still count in the alpha denominator).
+                        //
+                        // Critical invariant: bestDistSq[li] is updated
+                        // ONLY when the alpha-cut passes. Skipping must
+                        // leave the cell available for a farther opaque
+                        // triangle to claim — same nearest-tri/alpha-cut
+                        // interaction we already had pre-multisample.
+                        const ColorSample s0 = sampler->Sample(hit, i0, i1, i2);
+
+                        glm::vec3 sumRgbA = s0.rgb * s0.alpha;
+                        float     sumA    = s0.alpha;
+
+                        for (int k = 1; k < K; ++k) {
+                            const glm::vec3 jPos = cellCenter
+                                + kJitterOffsets[k - 1] * voxelSize;
+                            const BaryHit   jh   = ClosestPointOnTriangle(jPos, v0, v1, v2);
+                            const ColorSample s  = sampler->Sample(jh, i0, i1, i2);
+                            sumRgbA += s.rgb * s.alpha;
+                            sumA    += s.alpha;
+                        }
+
+                        const float avgAlpha = sumA / static_cast<float>(K);
+                        if (avgAlpha < effectiveCutoff) continue;
+
+                        const glm::vec3 avgRgb = (sumA > 1e-6f)
+                            ? (sumRgbA / sumA)
+                            : glm::vec3(0.0f);
 
                         bestDistSq[li]  = distSq;
-                        out.indices[li] = s.paletteIndex;
+                        out.indices[li] = quantizer.QuantizeF(avgRgb.r, avgRgb.g, avgRgb.b);
                     }
                 }
             }

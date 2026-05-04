@@ -3,9 +3,19 @@
 // Voxel-volume preview fragment. Companion to voxel_preview.vert.
 //
 // DDAs from the cube-entry point along the camera→fragment ray. On hit:
-// palette-sample → Lambert against the scene sun → ambient-lit by the scene
-// sky color → write per-fragment hit depth so the volume integrates correctly
-// with the rest of the scene's depth buffer.
+// palette-sample → Lambert against the scene sun → corner AO from the volume's
+// own occupancy → secondary DDA shadow ray toward the sun → ambient-lit by
+// the scene sky color → write per-fragment hit depth so the volume integrates
+// correctly with the rest of the scene's depth buffer.
+//
+// Direct lighting (NdotL × sun × shadow) and AO match the model used by
+// instanced_voxel.frag and brickmap_palette_trace.frag, so toggling Mesh ↔
+// Voxels modes in the import workspace doesn't visually re-light the asset
+// and bakes shade the same way they will once promoted into a Scene.
+//
+// The shadow ray is traced in mesh-local space (the same frame the primary
+// DDA marches), so we rotate the world-space sun direction into local space
+// once at hit time.
 //
 // Frame addressing: the volume image packs frames as 2D-array layers (one
 // frame per layer). Within a layer voxel (x, y, z) lives at
@@ -27,6 +37,8 @@ layout(set = 0, binding = 0) uniform FrameUbo {
     vec3  sunDirection;       float sunCosHalfAngle;
     vec3  sunColor;           float sunIntensity;
     vec3  skyColor;           float ambientIntensity;
+    float aoStrength;         int   shadowsEnabled;
+    int   _pad1;              int   _pad2;
 } frame;
 
 // Slot 1 — voxel-preview-only per-volume meta.
@@ -63,6 +75,11 @@ int  uMaxIterations;
 
 vec3 localToVoxel(vec3 p) { return (p - g_local_origin) / g_voxel_local; }
 
+// voxel_ao.glsl is shared with the world-space shaders and asks the includer
+// for `worldToVoxel`. The preview's "world" is mesh-local AABB space, so
+// alias it.
+vec3 worldToVoxel(vec3 p) { return localToVoxel(p); }
+
 uint sampleMaterial(ivec3 voxelCoord) {
     if (any(lessThan(voxelCoord, ivec3(0))) ||
         any(greaterThanEqual(voxelCoord, meta.size))) return 0u;
@@ -74,6 +91,7 @@ uint sampleMaterial(ivec3 voxelCoord) {
 
 bool isSolidAt(ivec3 voxelCoord) { return sampleMaterial(voxelCoord) != 0u; }
 
+#include "voxel_ao.glsl"
 #include "instanced_voxel_dda.glsl"
 
 void main() {
@@ -102,17 +120,52 @@ void main() {
     vec3 localNormal = -vec3(h.step_sign) * vec3(h.face);
     vec3 worldNormal = normalize(mat3(pc.model) * localNormal);
 
-    // Lambert with scene sun + sky-color ambient. Same lighting model as
-    // skinned_mesh.frag so toggling Mesh/Voxels modes doesn't visually
-    // re-light the asset.
-    float ndotl = max(dot(worldNormal, frame.sunDirection), 0.0);
-    vec3 ambient = frame.skyColor * frame.ambientIntensity;
-    vec3 direct  = frame.sunColor * frame.sunIntensity * ndotl;
+    // Continuous hit point on the entry face (not the voxel center). Both AO
+    // and the shadow ray want this — AO uses it for bilinear interpolation
+    // across the face, the shadow ray uses it as the origin so silhouettes
+    // project diagonally instead of snapping to the receiver-voxel boundary.
+    // Same approach as instanced_voxel.frag and brickmap_palette_trace.frag.
+    vec3 hitLocal = ddaOrigin + localDir * h.entryT;
+
+    // Corner AO sampled against the volume's own occupancy — the same
+    // `isSolidAt` the primary trace already uses. `worldToVoxel` is aliased
+    // to `localToVoxel` above so the helper resolves against mesh-local
+    // coords.
+    float ao = 1.0;
+    if (frame.aoStrength > 0.0) {
+        float raw = cornerAO(h.voxel, h.face, h.step_sign, hitLocal);
+        ao = mix(1.0, raw, frame.aoStrength);
+    }
+
+    // Self-shadow ray: re-use traceLocal in the same mesh-local frame the
+    // primary ray marched. Rotate the world-space sun direction into local
+    // space — `mat3(pc.model)` carries the SceneNode's rotation+scale, so its
+    // transpose serves as the inverse rotation for a unit direction vector.
+    // (Per-axis non-uniform scale would warp this slightly; in practice the
+    // import pipeline produces uniform-scale model matrices.) NdotL stays in
+    // world space so it agrees with the skinned-mesh lighting.
+    float ndotl  = max(dot(worldNormal, frame.sunDirection), 0.0);
+    float shadow = 1.0;
+    if (frame.shadowsEnabled != 0 && ndotl > 0.0) {
+        vec3 localSunDir = normalize(transpose(mat3(pc.model)) * frame.sunDirection);
+        // Bias along the surface normal by a small fraction of a voxel to
+        // avoid the shadow ray re-hitting the receiver's own face.
+        float bias = 0.01 * length(g_voxel_local);
+        vec3 shadowOrigin = hitLocal + localNormal * bias;
+        DdaHit sh = traceLocal(shadowOrigin, localSunDir);
+        shadow = sh.hit ? 0.0 : 1.0;
+    }
+
+    // Same shading equation as instanced_voxel.frag / brickmap_palette_trace.frag:
+    // ambient is sky-tinted and AO-modulated, direct is sun-tinted and
+    // shadow-gated. Caller-side aoStrength + shadowsEnabled toggles let the
+    // panel disable either term without rebuilding the pipeline.
+    vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
+    vec3 direct  = frame.sunColor * frame.sunIntensity * ndotl * shadow;
     vec3 lit     = albedo.rgb * (ambient + direct);
 
     // Per-fragment hit depth — the cube was just rasterization scaffolding;
     // the actual depth boundary is where the ray first hit a solid voxel.
-    vec3 hitLocal = ddaOrigin + localDir * h.entryT;
     vec4 hitClip  = frame.viewProj * pc.model * vec4(hitLocal, 1.0);
     gl_FragDepth  = hitClip.z / hitClip.w;
     outColor = vec4(lit, 1.0);

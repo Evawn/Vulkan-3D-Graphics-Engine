@@ -568,6 +568,7 @@ PreviewBakeResult AnimationBaker::RunPreview(PreviewBakeJob& job, std::atomic<bo
     in.worldOriginMax = box.max;
     in.voxelSizeWorld = job.voxelSizeWorld;
     in.colorSource    = job.colorSource;
+    in.samplesPerVoxel = job.samplesPerVoxel;
 
     result.frame = Voxelize(in, *m_quantizer, &cancel);
     return result;
@@ -660,6 +661,7 @@ FullBakeResult AnimationBaker::RunFullBake(FullBakeJob& job, std::atomic<bool>& 
         in.worldOriginMax = box.max;
         in.voxelSizeWorld = job.voxelSizeWorld;
         in.colorSource    = job.colorSource;
+        in.samplesPerVoxel = job.samplesPerVoxel;
 
         result.frames[f] = Voxelize(in, *m_quantizer, &cancel);
 

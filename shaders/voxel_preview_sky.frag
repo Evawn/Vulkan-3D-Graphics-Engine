@@ -24,6 +24,8 @@ layout(set = 0, binding = 0) uniform FrameUbo {
     vec3  sunDirection;       float sunCosHalfAngle;
     vec3  sunColor;           float sunIntensity;
     vec3  skyColor;           float ambientIntensity;
+    float aoStrength;         int   shadowsEnabled;
+    int   _pad1;              int   _pad2;
 } pc;
 
 #include "sky.glsl"

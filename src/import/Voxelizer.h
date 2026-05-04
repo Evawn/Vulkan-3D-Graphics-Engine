@@ -95,6 +95,10 @@ struct VoxelizePrimitive {
 // inclusive on the min side, exclusive on the max side per the usual half-
 // open AABB convention.
 
+// Hard ceiling on supersampling, in case anyone's tempted to set it higher
+// than the jitter table can serve. Bake cost scales linearly with K.
+constexpr int kMaxSamplesPerVoxel = 16;
+
 struct VoxelizeInput {
     const VoxelizePrimitive* primitives;
     size_t                   primitiveCount;
@@ -103,6 +107,13 @@ struct VoxelizeInput {
     glm::vec3       worldOriginMax = glm::vec3(0.0f);
     float           voxelSizeWorld = 0.05f;
     VoxColorSource  colorSource{};
+
+    // K-sample supersampling per voxel paint event. K=1 is point-sampling
+    // (the pre-multisample behavior); higher K averages K closest-point /
+    // bilinear samples taken at jittered positions inside the voxel cube,
+    // which suppresses spatial noise from high-frequency texture detail.
+    // Clamped to [1, kMaxSamplesPerVoxel] inside Voxelize().
+    int             samplesPerVoxel = 1;
 };
 
 // ---- Voxelize ----
