@@ -7,6 +7,7 @@
 #include "PaletteResource.h"
 #include "DefaultVoxPalette.h"
 #include "VoxAnimFormat.h"
+#include "DescriptorSetLayout.h"
 #include "config.h"
 
 #include <glm/gtc/quaternion.hpp>
@@ -19,18 +20,22 @@
 
 namespace {
 
-// std140 push constant. 4 uint pad slots round up to 16-byte alignment so the
-// SPIR-V layout matches the GLSL struct exactly. Total = 96 bytes — well under
-// the Vulkan-guaranteed 128-byte push-constant minimum.
+// std140 push constant. M6 grew this by 16 bytes (alphaCutoff + alphaMode +
+// pad) to support per-primitive alpha-test in the fragment shader. Total =
+// 112 bytes — still well under the 128-byte push-constant minimum.
 struct SkinnedMeshPC {
     glm::mat4  model;            // 64
     glm::vec4  baseColorFactor;  // 16
     uint32_t   firstJoint;       //  4
     uint32_t   jointCount;       //  4
+    float      alphaCutoff;      //  4
+    uint32_t   alphaMode;        //  4   (0=Opaque, 1=Mask, 2=Blend)
     uint32_t   _pad0;            //  4
     uint32_t   _pad1;            //  4
+    uint32_t   _pad2;            //  4
+    uint32_t   _pad3;            //  4
 };
-static_assert(sizeof(SkinnedMeshPC) == 96, "SkinnedMeshPC must stay 96 bytes (std140)");
+static_assert(sizeof(SkinnedMeshPC) == 112, "SkinnedMeshPC must stay 112 bytes (std140)");
 
 // ---- Per-frame UBO ----
 //
@@ -168,6 +173,36 @@ void GltfImportTechnique::RegisterPasses(
         // in voxel_preview.frag would fail with a linear sampler regardless.
         m_volume_sampler = VWrap::Sampler::CreateNearestClamp(m_device);
     }
+    if (!m_base_color_sampler) {
+        // M6: shared linear-repeat sampler for every skinned-mesh primitive's
+        // base-color texture (set 1, binding 0). REPEAT matches the glTF
+        // default sampler convention; LINEAR is what almost every glTF asset
+        // expects for color textures. Future per-texture sampler config (per
+        // glTF sampler) would need a small cache keyed on (filter × wrap).
+        m_base_color_sampler = VWrap::Sampler::CreateLinearRepeat(m_device);
+    }
+    if (!m_material_set_layout) {
+        // Build the descriptor-set layout for set 1 (per-primitive material).
+        // Only one binding for v1: the base-color combined image+sampler. The
+        // asset registry uses this exact layout when constructing each
+        // primitive's BindingTable, so the layouts match at descriptor-set
+        // bind time. Future PBR work adds more bindings here in lockstep
+        // with the registry's per-primitive table builder.
+        VkDescriptorSetLayoutBinding b{};
+        b.binding         = 0;
+        b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b.descriptorCount = 1;
+        b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        m_material_set_layout = VWrap::DescriptorSetLayout::Create(m_device, { b });
+    }
+    // Register the material context with the registry so its texture-upload
+    // pass can build per-primitive material BindingTables. Idempotent — same
+    // sampler / framesInFlight is a no-op; new values flip every skinned
+    // mesh's needsTextureUpload to true so they re-bind on the next
+    // UploadPending tick.
+    if (m_assets) {
+        m_assets->SetSkinnedMeshMaterialContext(m_base_color_sampler, ctx.maxFramesInFlight);
+    }
 
     EnsureBakerStarted();
     EnsurePreviewVolumeRegistered();
@@ -218,9 +253,13 @@ void GltfImportTechnique::RegisterPasses(
         })
         .SetBindings(m_sky_bindings);
 
-    // Binding table for the skinned-mesh pipeline:
+    // Binding table for the skinned-mesh pipeline (set 0):
     //   binding 0: shared per-frame UBO (camera + sky + sun)
     //   binding 1: joint matrix SSBO
+    //
+    // M6 split set 1 out into per-primitive material BindingTables (owned by
+    // each SkinnedMeshAsset::Primitive in the registry) — sampled per-pixel
+    // for the base-color texture. Set 0 stays per-pass.
     m_bindings = std::make_shared<BindingTable>(m_device, ctx.maxFramesInFlight);
     m_bindings->AddBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
@@ -229,96 +268,107 @@ void GltfImportTechnique::RegisterPasses(
               .BindStorageBufferPerFrame(1, m_joint_ssbos, m_joint_ssbo_size);
     m_bindings->Build();
 
-    auto& meshPass = graph.AddGraphicsPass("GLB Import Skinned Mesh");
-    meshPass.AcceptsItemTypes({ RenderItemType::SkinnedMesh });
-    meshPass
-        // Color load — sky pass already painted. Depth clear since the sky
-        // pass had no depth attachment.
-        .SetColorAttachment(targets.color, LoadOp::Load, StoreOp::Store, 0, 0, 0, 1)
-        .SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::DontCare)
-        .SetResolveTarget(targets.resolve)
-        .SetPipeline([this]() {
-            GraphicsPipelineDesc d{};
-            d.vertSpvPath = std::string(config::SHADER_DIR) + "/skinned_mesh.vert.spv";
-            d.fragSpvPath = std::string(config::SHADER_DIR) + "/skinned_mesh.frag.spv";
-            d.descriptorSetLayout = m_bindings->GetLayout();
+    // ---- Skinned-mesh draw is split into two passes: cull / no-cull ----
+    //
+    // Foliage cards are intrinsically double-sided (a single quad seen from
+    // either side), and bark is single-sided (interior is hidden by the
+    // outside). glTF marks this per-material as `doubleSided`. We honor it
+    // by routing each primitive's draw through one of two pipelines that
+    // differ only in cullMode — same shaders, same descriptor layouts, same
+    // push-constants.
+    //
+    // Splitting into two passes (instead of one pass with two pipelines)
+    // matches the graph's "one pass = one pipeline" idiom. Both passes
+    // accept SkinnedMesh items; each filters by item.doubleSided in its
+    // record callback. The cull pass runs first and is responsible for the
+    // depth clear + per-frame joint upload + bake tick (which were folded
+    // into the old single skinned-mesh pass's record callback). The no-cull
+    // pass loads depth so foliage and bark interleave correctly on Z.
+    //
+    // The pipeline factory is shared: same SPIR-V, same layouts, same vertex
+    // input. Only the rasterizer state differs.
+    auto buildSkinnedMeshPipelineDesc = [this](bool doubleSided) {
+        GraphicsPipelineDesc d{};
+        d.vertSpvPath = std::string(config::SHADER_DIR) + "/skinned_mesh.vert.spv";
+        d.fragSpvPath = std::string(config::SHADER_DIR) + "/skinned_mesh.frag.spv";
+        // Multi-set descriptor layout: set 0 = frame UBO + joint SSBO,
+        // set 1 = per-primitive material (base-color texture). Index in
+        // the vector matches the shader's `layout(set = N, ...)`.
+        d.descriptorSetLayouts = { m_bindings->GetLayout(), m_material_set_layout };
 
-            // Vertex layout — must match gltf_import::SkinnedVertex exactly.
-            VkVertexInputBindingDescription binding{};
-            binding.binding   = 0;
-            binding.stride    = sizeof(gltf_import::SkinnedVertex);
-            binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-            d.vertexBindings  = { binding };
+        VkVertexInputBindingDescription binding{};
+        binding.binding   = 0;
+        binding.stride    = sizeof(gltf_import::SkinnedVertex);
+        binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        d.vertexBindings  = { binding };
 
-            std::vector<VkVertexInputAttributeDescription> attrs(5);
-            attrs[0].location = 0;
-            attrs[0].binding  = 0;
-            attrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
-            attrs[0].offset   = offsetof(gltf_import::SkinnedVertex, position);
-            attrs[1].location = 1;
-            attrs[1].binding  = 0;
-            attrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
-            attrs[1].offset   = offsetof(gltf_import::SkinnedVertex, normal);
-            attrs[2].location = 2;
-            attrs[2].binding  = 0;
-            attrs[2].format   = VK_FORMAT_R32G32_SFLOAT;
-            attrs[2].offset   = offsetof(gltf_import::SkinnedVertex, uv);
-            attrs[3].location = 3;
-            attrs[3].binding  = 0;
-            attrs[3].format   = VK_FORMAT_R32G32B32A32_UINT;
-            attrs[3].offset   = offsetof(gltf_import::SkinnedVertex, joints);
-            attrs[4].location = 4;
-            attrs[4].binding  = 0;
-            attrs[4].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
-            attrs[4].offset   = offsetof(gltf_import::SkinnedVertex, weights);
-            d.vertexAttributes = std::move(attrs);
+        std::vector<VkVertexInputAttributeDescription> attrs(5);
+        attrs[0].location = 0;
+        attrs[0].binding  = 0;
+        attrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;
+        attrs[0].offset   = offsetof(gltf_import::SkinnedVertex, position);
+        attrs[1].location = 1;
+        attrs[1].binding  = 0;
+        attrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
+        attrs[1].offset   = offsetof(gltf_import::SkinnedVertex, normal);
+        attrs[2].location = 2;
+        attrs[2].binding  = 0;
+        attrs[2].format   = VK_FORMAT_R32G32_SFLOAT;
+        attrs[2].offset   = offsetof(gltf_import::SkinnedVertex, uv);
+        attrs[3].location = 3;
+        attrs[3].binding  = 0;
+        attrs[3].format   = VK_FORMAT_R32G32B32A32_UINT;
+        attrs[3].offset   = offsetof(gltf_import::SkinnedVertex, joints);
+        attrs[4].location = 4;
+        attrs[4].binding  = 0;
+        attrs[4].format   = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attrs[4].offset   = offsetof(gltf_import::SkinnedVertex, weights);
+        d.vertexAttributes = std::move(attrs);
 
-            d.inputAssembly = PipelineDefaults::TriangleList();
-            // No back-face culling — the AnimatedOak's foliage is single-
-            // sided alpha-cut planes; rendering them double-sided keeps the
-            // preview honest. CombinedRenderer's foliage uses the same
-            // discipline. Refine in M5 when per-material state lands.
-            d.rasterizer = PipelineDefaults::NoCullFill();
-            d.depthStencil = PipelineDefaults::DepthTestWrite();
-            d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        d.inputAssembly = PipelineDefaults::TriangleList();
+        d.rasterizer    = doubleSided
+            ? PipelineDefaults::NoCullFill()
+            : PipelineDefaults::BackCullFill();
+        d.depthStencil  = PipelineDefaults::DepthTestWrite();
+        d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 
-            VkPushConstantRange r{};
-            r.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-            r.offset     = 0;
-            r.size       = sizeof(SkinnedMeshPC);
-            d.pushConstantRanges = { r };
+        // Push constant covers vertex (model + factor + joints) AND fragment
+        // (alphaCutoff + alphaMode + factor.a). We declare the range over
+        // both stages — it's still the same memory, just visible from both.
+        VkPushConstantRange r{};
+        r.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        r.offset     = 0;
+        r.size       = sizeof(SkinnedMeshPC);
+        d.pushConstantRanges = { r };
+        return d;
+    };
 
-            return d;
-        })
-        .SetRecord([this](PassContext& pctx) {
-            // Idempotent re-write of the per-frame UBO. Sky pass already
-            // wrote it earlier this frame; the duplicate keeps correctness
-            // independent of pass execution order.
-            WriteFrameUbo(pctx.frameIndex);
+    // The shared per-pass record callback — parameterized on which subset of
+    // SkinnedMesh items this pass owns. `wantDoubleSided=false` is the cull
+    // pass (also handles the per-frame joint upload + bake tick).
+    auto recordSkinnedMeshPass = [this](PassContext& pctx, bool wantDoubleSided) {
+        WriteFrameUbo(pctx.frameIndex);
 
-            auto vk_cmd = pctx.cmd->Get();
-            vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pctx.graphicsPipeline->Get());
+        auto vk_cmd = pctx.cmd->Get();
+        vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pctx.graphicsPipeline->Get());
 
-            VkDescriptorSet ds = m_bindings->GetSet(pctx.frameIndex)->Get();
-            vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
+        VkDescriptorSet ds = m_bindings->GetSet(pctx.frameIndex)->Get();
+        vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
-            if (!pctx.scene) return;
+        if (!pctx.scene) return;
 
-            // Per-frame bake bookkeeping — debounced re-bakes get fired here
-            // and any completed preview gets applied to the registry. Pinned
-            // to the SkinnedMesh pass record (runs every frame, regardless of
-            // PreviewMode) so the cadence is independent of UI state.
+        if (!wantDoubleSided) {
+            // The cull pass owns the once-per-frame bookkeeping. The no-cull
+            // pass runs after; by then joints are already in the SSBO.
             TickBakeState();
+        }
 
-            // Skip the skinned-mesh draws when the user has flipped to
-            // Voxels mode. The pass still runs (the clear it's responsible
-            // for is what gives the voxel pass a clean depth buffer), it
-            // just emits no draws.
-            if (m_previewMode != PreviewMode::Mesh) return;
+        if (m_previewMode != PreviewMode::Mesh) return;
 
-            // Push the entire joint arena to this frame's SSBO in one shot.
-            // Per-draw firstJoint slices into the buffer.
+        if (!wantDoubleSided) {
+            // Joint arena upload — same once-per-frame placement.
             const auto joints = pctx.scene->GetAllJoints();
             const VkDeviceSize jointBytes = joints.size() * sizeof(glm::mat4);
             if (jointBytes > m_joint_ssbo_size) {
@@ -330,22 +380,75 @@ void GltfImportTechnique::RegisterPasses(
             if (jointBytes > 0) {
                 std::memcpy(m_joint_ssbos_mapped[pctx.frameIndex], joints.data(), jointBytes);
             }
-
-            // Sync the playback state from the asset session into the scene's
-            // Component (paused, playbackSpeed, currentTime). This is a
-            // one-frame-lag pattern matching MeshRasterizer's rotation update.
             UpdateNodeComponent();
+        }
 
-            for (const auto& item : pctx.scene->Get(RenderItemType::SkinnedMesh)) {
-                SkinnedMeshPC pc{};
-                pc.model           = item.transform;
-                pc.baseColorFactor = item.baseColorFactor;
-                pc.firstJoint      = item.firstJoint;
-                pc.jointCount      = item.jointCount;
-                vkCmdPushConstants(vk_cmd, pctx.graphicsPipeline->GetLayout(),
-                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-                DrawSkinnedMeshItem(pctx, item, *m_graph);
-            }
+        for (const auto& item : pctx.scene->Get(RenderItemType::SkinnedMesh)) {
+            // Route each item to the matching pass — items destined for the
+            // other pipeline are skipped here and picked up by the sibling
+            // pass on the same frame.
+            if (item.doubleSided != wantDoubleSided) continue;
+
+            // ---- Bind set 1 (per-primitive material) ----
+            //
+            // The asset's per-primitive BindingTable has setCount =
+            // ctx.maxFramesInFlight, so picking GetSet(frameIndex) gives a
+            // valid descriptor for the current frame. If the primitive
+            // somehow lacks a material (no texture and no fallback got
+            // built — shouldn't happen post-upload, but defensive), skip
+            // the draw to avoid a NULL descriptor binding.
+            if (!item.materialBindings) continue;
+            VkDescriptorSet matDs = item.materialBindings->GetSet(pctx.frameIndex)->Get();
+            vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pctx.graphicsPipeline->GetLayout(), /*firstSet=*/1, 1, &matDs, 0, nullptr);
+
+            SkinnedMeshPC pc{};
+            pc.model           = item.transform;
+            pc.baseColorFactor = item.baseColorFactor;
+            pc.firstJoint      = item.firstJoint;
+            pc.jointCount      = item.jointCount;
+            pc.alphaCutoff     = item.alphaCutoff;
+            pc.alphaMode       = static_cast<uint32_t>(item.alphaMode);
+            vkCmdPushConstants(vk_cmd, pctx.graphicsPipeline->GetLayout(),
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(pc), &pc);
+            DrawSkinnedMeshItem(pctx, item, *m_graph);
+        }
+    };
+
+    // ---- Pass 1: cull (single-sided primitives, e.g. bark) ----
+    auto& meshPassCull = graph.AddGraphicsPass("GLB Import Skinned Mesh (Cull)");
+    meshPassCull.AcceptsItemTypes({ RenderItemType::SkinnedMesh });
+    meshPassCull
+        .SetColorAttachment(targets.color, LoadOp::Load, StoreOp::Store, 0, 0, 0, 1)
+        .SetDepthAttachment(targets.depth, LoadOp::Clear, StoreOp::Store)
+        .SetResolveTarget(targets.resolve)
+        .SetPipeline([buildSkinnedMeshPipelineDesc]() {
+            return buildSkinnedMeshPipelineDesc(/*doubleSided=*/false);
+        })
+        .SetRecord([this, recordSkinnedMeshPass](PassContext& pctx) {
+            recordSkinnedMeshPass(const_cast<PassContext&>(pctx), /*wantDoubleSided=*/false);
+        })
+        .SetBindings(m_bindings);
+
+    // ---- Pass 2: no-cull (double-sided primitives, e.g. foliage cards) ----
+    //
+    // Loads the depth from the cull pass so foliage and bark interleave
+    // correctly on Z. Color is also Load (the cull pass already wrote the
+    // bark fragments). Both write to the same color attachment — alpha-test
+    // discards mean foliage cards punch through to whatever bark is behind
+    // them in the depth buffer.
+    auto& meshPassNoCull = graph.AddGraphicsPass("GLB Import Skinned Mesh (NoCull)");
+    meshPassNoCull.AcceptsItemTypes({ RenderItemType::SkinnedMesh });
+    meshPassNoCull
+        .SetColorAttachment(targets.color, LoadOp::Load, StoreOp::Store, 0, 0, 0, 1)
+        .SetDepthAttachment(targets.depth, LoadOp::Load, StoreOp::DontCare)
+        .SetResolveTarget(targets.resolve)
+        .SetPipeline([buildSkinnedMeshPipelineDesc]() {
+            return buildSkinnedMeshPipelineDesc(/*doubleSided=*/true);
+        })
+        .SetRecord([this, recordSkinnedMeshPass](PassContext& pctx) {
+            recordSkinnedMeshPass(const_cast<PassContext&>(pctx), /*wantDoubleSided=*/true);
         })
         .SetBindings(m_bindings);
 
@@ -729,41 +832,14 @@ void GltfImportTechnique::PerformPendingLoad() {
     glm::vec3 amin( std::numeric_limits<float>::max());
     glm::vec3 amax(-std::numeric_limits<float>::max());
 
-    // Texture-average helper: when a primitive's material has a baseColorTexture,
-    // sample a few representative texels and average them into a flat RGB tint.
-    // This is the v1 stand-in for true per-fragment texture sampling — the
-    // bark texture averages to a brown, the foliage to a green, so the user
-    // sees the asset's intended palette even though the shader still does
-    // flat shading. Sampled texels skip transparent ones (alpha < 32) so
-    // alpha-cut foliage doesn't average toward the background gutters.
-    auto averageBaseColor = [&](int texIndex, glm::vec4 factor) -> glm::vec4 {
-        if (texIndex < 0 || texIndex >= static_cast<int>(ir.textures.size())) return factor;
-        const auto& tex = ir.textures[texIndex];
-        if (tex.rgba8.empty() || tex.width == 0 || tex.height == 0) return factor;
-
-        // 8×8 stratified grid of samples — cheap (64 texels) and dodges any
-        // single-texel bias from a corner pixel.
-        constexpr int N = 8;
-        double r = 0, g = 0, b = 0;
-        int counted = 0;
-        for (int y = 0; y < N; ++y) {
-            for (int x = 0; x < N; ++x) {
-                uint32_t px = (static_cast<uint32_t>(x) * tex.width)  / N;
-                uint32_t py = (static_cast<uint32_t>(y) * tex.height) / N;
-                size_t idx = (size_t)(py * tex.width + px) * 4;
-                uint8_t a = tex.rgba8[idx + 3];
-                if (a < 32) continue;
-                r += tex.rgba8[idx + 0];
-                g += tex.rgba8[idx + 1];
-                b += tex.rgba8[idx + 2];
-                ++counted;
-            }
-        }
-        if (counted == 0) return factor;
-        glm::vec3 avg(r / counted, g / counted, b / counted);
-        avg /= 255.0f;
-        return glm::vec4(avg * glm::vec3(factor), factor.a);
-    };
+    // ---- M6: drop the averageBaseColor hack ----
+    //
+    // Pre-M6 the runtime mesh shader was textureless, so we needed a flat
+    // tint per primitive — sampling 8×8 texels and folding the average into
+    // baseColorFactor was the stand-in. With set 1 wired (per-primitive
+    // baseColorTexture sampled per-pixel), the shader does `sample × factor`
+    // and the average is no longer needed. Asset's baseColorFactor now
+    // carries the literal glTF factor.
 
     for (const auto& irPrim : ir.primitives) {
         // Only the first skin's primitives in v1.
@@ -774,14 +850,44 @@ void GltfImportTechnique::PerformPendingLoad() {
         p.indices        = irPrim.indices;
         p.skinIndex      = activeSkinIdx;
         p.ownerNodeIndex = irPrim.ownerNodeIndex;
-        if (irPrim.materialIndex >= 0 && irPrim.materialIndex < static_cast<int>(ir.materials.size())) {
+
+        // RAW glTF material data — fragment shader handles the sample × factor
+        // multiplication and the alpha-cut. A primitive without a material
+        // (rare; usually only test assets) keeps the defaults: white factor,
+        // no texture, opaque, single-sided.
+        if (irPrim.materialIndex >= 0
+         && irPrim.materialIndex < static_cast<int>(ir.materials.size())) {
             const auto& mat = ir.materials[irPrim.materialIndex];
-            p.baseColorFactor = averageBaseColor(mat.baseColorTextureIndex, mat.baseColorFactor);
+            p.baseColorFactor       = mat.baseColorFactor;
+            p.baseColorTextureIndex = mat.baseColorTextureIndex;
+            p.alphaMode             = mat.alphaMode;
+            p.alphaCutoff           = mat.alphaCutoff;
+            p.doubleSided           = mat.doubleSided;
         }
+
         amin = glm::min(amin, irPrim.aabbMin);
         amax = glm::max(amax, irPrim.aabbMax);
         asset.primitives.push_back(std::move(p));
     }
+
+    // ---- Stage IR textures into the asset's pendingTextures[] ----
+    //
+    // The asset stores its own copy of the texel bytes so the registry's
+    // texture-upload pass (`UploadSkinnedMeshTextures`) can run independently
+    // of whether the technique is still holding the IR. The registry walks
+    // pendingTextures[] → GpuTexture[] (Vulkan images + views) and frees
+    // pendingTextures only as part of the asset's lifecycle.
+    asset.pendingTextures.reserve(ir.textures.size());
+    for (const auto& tex : ir.textures) {
+        SkinnedMeshAsset::PendingTexture pt;
+        pt.width  = tex.width;
+        pt.height = tex.height;
+        pt.rgba8  = tex.rgba8;     // copy; the IR survives anyway, but the
+                                    // asset's pending storage outlives any
+                                    // re-import that swaps the IR pointer.
+        asset.pendingTextures.push_back(std::move(pt));
+    }
+    asset.needsTextureUpload = !asset.pendingTextures.empty();
     asset.aabbMin = (asset.primitives.empty() ? glm::vec3(0.0f) : amin);
     asset.aabbMax = (asset.primitives.empty() ? glm::vec3(0.0f) : amax);
 

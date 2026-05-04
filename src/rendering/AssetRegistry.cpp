@@ -2,6 +2,9 @@
 #include "RenderGraph.h"
 #include "CommandBuffer.h"
 #include "Buffer.h"
+#include "BindingTable.h"
+#include "Image.h"
+#include "ImageView.h"
 
 #include <spdlog/spdlog.h>
 #include <cstring>
@@ -250,6 +253,30 @@ AnimationClipAsset* AssetRegistry::GetAnimationClip(AssetID id) {
 	return &m_clips[id.id];
 }
 
+// ---- Skinned-mesh material context ----
+
+void AssetRegistry::SetSkinnedMeshMaterialContext(
+	std::shared_ptr<VWrap::Sampler> baseColorSampler,
+	uint32_t framesInFlight)
+{
+	const bool same =
+		(m_baseColorSampler == baseColorSampler) &&
+		(m_framesInFlight == framesInFlight);
+	if (same) return;
+
+	m_baseColorSampler = std::move(baseColorSampler);
+	m_framesInFlight   = framesInFlight;
+
+	// Context change → invalidate every skinned mesh's texture upload state so
+	// the next UploadPending tick rebuilds GpuTextures + per-primitive
+	// BindingTables against the new sampler / framesInFlight. The pendingTextures
+	// arrays still hold the source bytes (they're populated at register time
+	// and never freed until ClearSkinnedMesh), so re-upload is cheap.
+	for (auto& s : m_skinnedMeshes) {
+		if (!s.pendingTextures.empty()) s.needsTextureUpload = true;
+	}
+}
+
 // ---- Lifecycle ----
 
 void AssetRegistry::DeclareGraphResources(RenderGraph& graph) {
@@ -355,7 +382,15 @@ void AssetRegistry::DeclareVolume(VoxelVolumeAsset& v, RenderGraph& graph) {
 void AssetRegistry::UploadPending(RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool) {
 	for (auto& m : m_meshes) UploadMesh(m, graph, pool);
 	for (auto& v : m_volumes) UploadVolume(v, graph, pool);
-	for (auto& s : m_skinnedMeshes) UploadSkinnedMesh(s, graph, pool);
+	for (auto& s : m_skinnedMeshes) {
+		UploadSkinnedMesh(s, graph, pool);
+		// Texture upload is independent of vertex/index upload — skinned-mesh
+		// vertex/index buffers live inside the graph and re-upload every
+		// rebuild; textures live outside the graph and only re-upload when
+		// the source asset's pendingTextures change (LoadGlb / Replace) or
+		// the material context (sampler / framesInFlight) changes.
+		UploadSkinnedMeshTextures(s, graph, pool);
+	}
 	m_currentGraph = nullptr;
 }
 
@@ -452,4 +487,152 @@ void AssetRegistry::UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph,
 	cmd->EndAndSubmit();
 
 	v.needsUpload = false;
+}
+
+void AssetRegistry::UploadSkinnedMeshTextures(SkinnedMeshAsset& s, RenderGraph& graph,
+                                              std::shared_ptr<VWrap::CommandPool> pool)
+{
+	if (!s.needsTextureUpload) return;
+	// Material context not yet wired: we'll retry on the next UploadPending tick
+	// once a technique calls SetSkinnedMeshMaterialContext. Don't bail loudly —
+	// it's normal during the first frame of a fresh import (Reload runs before
+	// the technique's RegisterPasses populates the context).
+	if (!m_baseColorSampler || m_framesInFlight == 0) return;
+	if (s.pendingTextures.empty() && s.primitives.empty()) {
+		s.needsTextureUpload = false;
+		return;
+	}
+
+	auto allocator = graph.GetAllocator();
+	auto device    = graph.GetDevice();
+	auto logger    = spdlog::get("Render");
+
+	// ---- Phase 1: upload every pendingTexture into a GpuTexture ----
+	//
+	// VK_FORMAT_R8G8B8A8_SRGB is required for correct color-space handling:
+	// glTF base-color textures are sRGB-encoded; sampling at sRGB format
+	// automatically linearizes per the Vulkan spec. Single mip level for v1
+	// (mipmap generation is future work).
+	s.textures.clear();
+	s.textures.reserve(s.pendingTextures.size() + 1);
+	for (size_t i = 0; i < s.pendingTextures.size(); ++i) {
+		const auto& src = s.pendingTextures[i];
+		SkinnedMeshAsset::GpuTexture g{};
+		if (src.width == 0 || src.height == 0 || src.rgba8.empty()) {
+			// Defensive: corrupt source → blank entry; the primitive that
+			// references it will fall back to whiteFallbackIndex below.
+			s.textures.push_back(std::move(g));
+			continue;
+		}
+		const VkDeviceSize bytes = static_cast<VkDeviceSize>(src.width) * src.height * 4;
+
+		auto staging = VWrap::Buffer::CreateStaging(allocator, bytes);
+		void* mapped = staging->Map();
+		std::memcpy(mapped, src.rgba8.data(), bytes);
+		staging->Unmap();
+
+		VWrap::ImageCreateInfo info{};
+		info.width       = src.width;
+		info.height      = src.height;
+		info.depth       = 1;
+		info.format      = VK_FORMAT_R8G8B8A8_SRGB;
+		info.tiling      = VK_IMAGE_TILING_OPTIMAL;
+		info.usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		info.properties  = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		info.mip_levels  = 1;
+		info.samples     = VK_SAMPLE_COUNT_1_BIT;
+		info.image_type  = VK_IMAGE_TYPE_2D;
+		g.image = VWrap::Image::Create(allocator, info);
+		g.width = src.width;
+		g.height = src.height;
+
+		auto cmd = VWrap::CommandBuffer::Create(pool);
+		cmd->BeginSingle();
+		cmd->CmdTransitionImageLayout(g.image, VK_FORMAT_R8G8B8A8_SRGB,
+			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		cmd->CmdCopyBufferToImage(staging, g.image, src.width, src.height, 1);
+		cmd->CmdTransitionImageLayout(g.image, VK_FORMAT_R8G8B8A8_SRGB,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		cmd->EndAndSubmit();
+
+		g.view = VWrap::ImageView::Create(device, g.image);
+		s.textures.push_back(std::move(g));
+	}
+
+	// ---- Phase 2: append a 1×1 white fallback ----
+	//
+	// Untextured primitives bind this so the shader is unconditional —
+	// `sample × factor` works whether or not the primitive has a real
+	// texture (white = 1.0, so factor passes through as the flat color).
+	{
+		const uint8_t whitePx[4] = { 255, 255, 255, 255 };
+		auto staging = VWrap::Buffer::CreateStaging(allocator, sizeof(whitePx));
+		void* mapped = staging->Map();
+		std::memcpy(mapped, whitePx, sizeof(whitePx));
+		staging->Unmap();
+
+		VWrap::ImageCreateInfo info{};
+		info.width = 1; info.height = 1; info.depth = 1;
+		info.format = VK_FORMAT_R8G8B8A8_SRGB;
+		info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		info.usage  = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		info.properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		info.mip_levels = 1; info.samples = VK_SAMPLE_COUNT_1_BIT;
+		info.image_type = VK_IMAGE_TYPE_2D;
+
+		SkinnedMeshAsset::GpuTexture g{};
+		g.image = VWrap::Image::Create(allocator, info);
+		g.width = 1; g.height = 1;
+
+		auto cmd = VWrap::CommandBuffer::Create(pool);
+		cmd->BeginSingle();
+		cmd->CmdTransitionImageLayout(g.image, VK_FORMAT_R8G8B8A8_SRGB,
+			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		cmd->CmdCopyBufferToImage(staging, g.image, 1, 1, 1);
+		cmd->CmdTransitionImageLayout(g.image, VK_FORMAT_R8G8B8A8_SRGB,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		cmd->EndAndSubmit();
+
+		g.view = VWrap::ImageView::Create(device, g.image);
+		s.whiteFallbackIndex = static_cast<int>(s.textures.size());
+		s.textures.push_back(std::move(g));
+	}
+
+	// ---- Phase 3: per-primitive material BindingTable ----
+	//
+	// One BindingTable per primitive, set 0 (the material set in shader
+	// terms — but it'll be bound at descriptor set index 1 because set 0
+	// is the per-frame UBO + joint SSBO). The table holds a
+	// COMBINED_IMAGE_SAMPLER at binding 0; pointed at the primitive's
+	// resolved texture (real or fallback).
+	for (auto& p : s.primitives) {
+		int texIdx = p.baseColorTextureIndex;
+		if (texIdx < 0 || texIdx >= static_cast<int>(s.textures.size())
+		 || !s.textures[texIdx].view) {
+			texIdx = s.whiteFallbackIndex;
+		}
+		if (texIdx < 0 || !s.textures[texIdx].view) {
+			// Truly nothing to bind — leave the table null and let the
+			// technique skip this primitive at draw time. Shouldn't happen
+			// post-fallback, but defensive.
+			p.materialBindings.reset();
+			continue;
+		}
+		auto table = std::make_shared<BindingTable>(device, m_framesInFlight);
+		table->AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		                  VK_SHADER_STAGE_FRAGMENT_BIT)
+		     .BindExternalSampledImage(0, s.textures[texIdx].view, m_baseColorSampler,
+		                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		table->Build();
+		// Update once at upload time; views/samplers are stable, no per-frame
+		// re-issue needed.
+		table->Update(graph);
+		p.materialBindings = std::move(table);
+	}
+
+	if (logger) {
+		logger->info("AssetRegistry: skinned-mesh '{}' uploaded {} textures (+1 white fallback)",
+			s.name, s.pendingTextures.size());
+	}
+	s.needsTextureUpload = false;
 }

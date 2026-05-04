@@ -630,7 +630,7 @@ void RenderGraph::BuildGraphicsPipeline(GraphicsPassBuilder& pass) {
 	VWrap::PipelineCreateInfo info{};
 	info.extent = extent;
 	info.render_pass = pass.m_renderPass;
-	info.descriptor_set_layout = desc.descriptorSetLayout;
+	info.descriptor_set_layout = desc.descriptorSetLayout;     // single-set fallback path
 	info.vertex_input_info = vi;
 	info.input_assembly = desc.inputAssembly;
 	info.dynamic_state = ds;
@@ -640,7 +640,18 @@ void RenderGraph::BuildGraphicsPipeline(GraphicsPassBuilder& pass) {
 	info.subpass = 0;
 	info.colorAttachmentCount = static_cast<uint32_t>(pass.m_colorAttachments.size());
 
-	pass.m_pipeline = VWrap::Pipeline::Create(m_device, info, vertCode, fragCode);
+	if (!desc.descriptorSetLayouts.empty()) {
+		// Multi-set path: pre-build a PipelineLayout from the layout vector and
+		// use the layout-overload of Pipeline::Create. This keeps set ordering
+		// identical to the shader's `layout(set = N, ...)` declarations —
+		// vector index = set index. Used by the skinned-mesh path's
+		// per-primitive material set 1.
+		auto layout = VWrap::PipelineLayout::Create(
+			m_device, desc.descriptorSetLayouts, desc.pushConstantRanges);
+		pass.m_pipeline = VWrap::Pipeline::Create(m_device, layout, info, vertCode, fragCode);
+	} else {
+		pass.m_pipeline = VWrap::Pipeline::Create(m_device, info, vertCode, fragCode);
+	}
 }
 
 void RenderGraph::BuildComputePipeline(ComputePassBuilder& pass) {

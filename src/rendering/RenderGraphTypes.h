@@ -126,7 +126,19 @@ struct GraphicsPipelineDesc {
 	std::string vertSpvPath;
 	std::string fragSpvPath;
 
+	// Single-layout convenience field. If `descriptorSetLayouts` (below) is
+	// populated, that takes precedence and this field is ignored. Most
+	// pipelines use this; pipelines that need per-primitive descriptors
+	// (set 1, e.g. material textures on the skinned-mesh path) populate the
+	// vector instead.
 	std::shared_ptr<VWrap::DescriptorSetLayout> descriptorSetLayout;
+
+	// Multi-set descriptor layout. Index in the vector is the set index in
+	// the shader (`layout(set = N, binding = M)`). When non-empty, the graph
+	// pre-builds a PipelineLayout from these and the `descriptorSetLayout`
+	// field above is ignored. Empty → single-set fallback path.
+	std::vector<std::shared_ptr<VWrap::DescriptorSetLayout>> descriptorSetLayouts;
+
 	std::vector<VkPushConstantRange> pushConstantRanges;
 
 	// Owned vertex-input storage. The graph builds VkPipelineVertexInputStateCreateInfo

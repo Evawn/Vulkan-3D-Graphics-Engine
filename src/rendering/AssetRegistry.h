@@ -4,6 +4,7 @@
 #include "VoxLoader.h"
 #include "Utils.h"          // VWrap::Vertex
 #include "CommandPool.h"
+#include "Sampler.h"
 #include "SkinnedMeshAsset.h"
 
 #include <glm/glm.hpp>
@@ -216,6 +217,24 @@ public:
 	const AnimationClipAsset* GetAnimationClip(AssetID id) const;
 	AnimationClipAsset*       GetAnimationClip(AssetID id);
 
+	// ---- Skinned mesh material context ----
+	//
+	// Set by techniques that consume skinned meshes (e.g. GltfImportTechnique)
+	// before any UploadPending-driven texture upload runs. Stored values:
+	//
+	//   - baseColorSampler: shared linear-repeat sampler used by every
+	//     primitive's material set 1.
+	//   - framesInFlight: descriptor-set count for per-primitive
+	//     material BindingTables. Matches the technique's
+	//     ctx.maxFramesInFlight so set-1 lookups by frameIndex work.
+	//
+	// Idempotent: calling again with the same values is a no-op; calling
+	// with new values triggers a re-upload (every skinned mesh's
+	// needsTextureUpload flips to true).
+	void SetSkinnedMeshMaterialContext(
+		std::shared_ptr<VWrap::Sampler> baseColorSampler,
+		uint32_t framesInFlight);
+
 	// ---- Lifecycle hooks (called by RenderingSystem) ----
 	// Re-declare every owned asset's persistent graph resources. Must run
 	// before techniques' RegisterPasses so handles are valid when techniques
@@ -242,6 +261,12 @@ private:
 	std::vector<SkinnedMeshAsset>   m_skinnedMeshes;
 	std::vector<AnimationClipAsset> m_clips;
 
+	// Skinned-mesh material context. Set by SetSkinnedMeshMaterialContext;
+	// consumed by UploadSkinnedMeshTextures during UploadPending. See header
+	// comment on SetSkinnedMeshMaterialContext.
+	std::shared_ptr<VWrap::Sampler> m_baseColorSampler;
+	uint32_t                        m_framesInFlight = 0;
+
 	// Set by DeclareGraphResources, cleared by UploadPending. While non-null
 	// any new asset registered via the public Register*/Create* APIs has its
 	// graph resource declared on the spot — letting techniques create assets
@@ -254,4 +279,13 @@ private:
 	void UploadMesh(MeshAsset& m, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
 	void UploadVolume(VoxelVolumeAsset& v, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
 	void UploadSkinnedMesh(SkinnedMeshAsset& s, RenderGraph& graph, std::shared_ptr<VWrap::CommandPool> pool);
+
+	// Texture-upload pass: walks pendingTextures[] → GpuTexture[], builds
+	// per-primitive material BindingTables. Idempotent; flips
+	// `needsTextureUpload` to false on success. Skips silently if the
+	// material context (sampler / framesInFlight) hasn't been set yet —
+	// the texture upload will retry on the next UploadPending tick once
+	// the technique calls SetSkinnedMeshMaterialContext.
+	void UploadSkinnedMeshTextures(SkinnedMeshAsset& s, RenderGraph& graph,
+	                               std::shared_ptr<VWrap::CommandPool> pool);
 };

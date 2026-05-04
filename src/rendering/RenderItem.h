@@ -8,6 +8,8 @@
 
 #include <cstdint>
 
+class BindingTable;
+
 // ---- RenderItem ----
 //
 // A drawable atom. The split between scene (producer) and technique (consumer)
@@ -74,6 +76,22 @@ struct RenderItem {
 	uint32_t      firstJoint       = 0;
 	uint32_t      jointCount       = 0;
 	glm::vec4     baseColorFactor  = glm::vec4(1.0f);
+
+	// Per-primitive material binding (set 1: combined image+sampler for the
+	// base-color texture). Borrowed from the asset's primitive — RenderItem
+	// does NOT own the BindingTable. Valid for the duration of the frame
+	// the item was emitted in (the asset lives at least that long, and the
+	// per-frame descriptor set inside the BindingTable is selected at draw
+	// time via GetSet(frameIndex)).
+	BindingTable* materialBindings = nullptr;
+
+	// Alpha policy lifted from the source material. The shader uses these
+	// to gate `discard` (Mask + Blend honor cutoff; Opaque skips the test).
+	// Encoded as raw uint8 because RenderItem stays POD; the shader maps
+	// 0=Opaque, 1=Mask, 2=Blend. doubleSided selects the no-cull pipeline.
+	float         alphaCutoff      = 0.5f;
+	uint8_t       alphaMode        = 0;     // 0=Opaque, 1=Mask, 2=Blend
+	bool          doubleSided      = false;
 };
 
 // ---- Draw helpers ----

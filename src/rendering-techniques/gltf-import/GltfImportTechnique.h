@@ -287,6 +287,17 @@ private:
     std::shared_ptr<BindingTable>       m_voxel_bindings;
     std::shared_ptr<BindingTable>       m_sky_bindings;
 
+    // Shared sampler for skinned-mesh base-color textures. Linear filter +
+    // REPEAT wrap matches glTF's default sampler convention. One sampler
+    // shared across every imported asset's per-primitive material set 1;
+    // future per-texture sampler config (CLAMP, NEAREST, MIRROR) would need
+    // a small sampler cache keyed on (filter × wrap).
+    std::shared_ptr<VWrap::Sampler>     m_base_color_sampler;
+    // The per-primitive material descriptor-set layout, shared across both
+    // cull-mode pipelines. Built once when m_base_color_sampler is created;
+    // every primitive's BindingTable in the registry uses this layout.
+    std::shared_ptr<VWrap::DescriptorSetLayout> m_material_set_layout;
+
     // Pulled from RenderContext on every RegisterPasses. Borrowed pointers —
     // owned by the Scene. Used to populate the per-frame UBO with sun/sky
     // state so the import technique reflects whatever the inspector edited

@@ -194,6 +194,15 @@ void SceneExtractor::EmitSkinnedMesh(Component& comp, const glm::mat4& world,
 		item.firstJoint      = firstJoint;
 		item.jointCount      = jointCount;
 		item.baseColorFactor = prim.baseColorFactor;
+		// Material binding (set 1) + alpha state — borrowed pointers /
+		// per-frame descriptor set lives inside the BindingTable. The asset
+		// outlives the RenderItem (the item is per-frame ephemeral; the
+		// asset persists across frames), so the raw pointer is safe within
+		// the frame it's emitted in.
+		item.materialBindings = prim.materialBindings.get();
+		item.alphaCutoff      = prim.alphaCutoff;
+		item.alphaMode        = static_cast<uint8_t>(prim.alphaMode);
+		item.doubleSided      = prim.doubleSided;
 		out.Add(item);
 	}
 }

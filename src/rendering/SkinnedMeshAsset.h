@@ -2,12 +2,17 @@
 
 #include "RenderGraphTypes.h"
 #include "MeshIR.h"
+#include "Image.h"
+#include "ImageView.h"
 
 #include <glm/glm.hpp>
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+class BindingTable;
 
 // ---- SkinnedMeshAsset ----
 //
@@ -29,16 +34,68 @@ struct SkinnedMeshAsset {
     std::string name;
     std::string sourcePath;
 
+    // ---- GpuTexture ----
+    //
+    // Decoded texel data uploaded to a GPU image, with its accompanying
+    // image view. One per `gltf_import::Texture` in the source IR plus a
+    // 1×1 white fallback at the END of the vector (so primitives with no
+    // texture point at a known index without special-casing the shader).
+    //
+    // Format is `VK_FORMAT_R8G8B8A8_SRGB` — sampling automatically
+    // linearizes per the Vulkan spec, matching the glTF base-color
+    // convention. Single mip level for v1 (mipmap generation is future
+    // work).
+    //
+    // Lifetime: created at registry-time (UploadSkinnedMesh's texture
+    // pass), persists across graph rebuilds (textures are static GPU
+    // resources, unlike the per-primitive vertex/index buffers which live
+    // inside the graph and need to be re-declared on each rebuild).
+    struct GpuTexture {
+        std::shared_ptr<VWrap::Image>     image;
+        std::shared_ptr<VWrap::ImageView> view;
+        uint32_t width  = 0;
+        uint32_t height = 0;
+    };
+    std::vector<GpuTexture> textures;
+    int whiteFallbackIndex = -1;          // index into textures[]; -1 until upload runs
+
     // ---- Per-primitive draw unit ----
     struct Primitive {
         std::vector<gltf_import::SkinnedVertex> vertices;
         std::vector<uint32_t>                   indices;
 
-        // Material color tint applied per fragment. Texture sampling lands in
-        // a later milestone — for v1 we paint the primitive in its base color
-        // factor (which is exactly what cgltf hands us when there's no
-        // baseColorTexture).
+        // RAW glTF base-color factor (M6 runtime-texture path: no longer
+        // pre-multiplied by the texture's averaged tint — the shader does
+        // `sample × factor` per pixel). For untextured primitives the
+        // shader still does `sample × factor`, but `sample` is the 1×1
+        // white fallback, so factor passes through as the flat color.
         glm::vec4 baseColorFactor = glm::vec4(1.0f);
+
+        // Index into the parent asset's textures[]. -1 → use whiteFallbackIndex
+        // (or, equivalently, the runtime can substitute the fallback at bind
+        // time). The bake worker still consults `m_meshIR->textures[]`
+        // directly; this field is for the runtime mesh path only.
+        int baseColorTextureIndex = -1;
+
+        // glTF alpha-mode metadata. Mask + Blend honor `alphaCutoff` (the
+        // shader does `if (sample.a < cutoff) discard`); Opaque skips the
+        // test entirely. doubleSided selects the no-cull pipeline at draw
+        // time — almost universally true for foliage cards.
+        gltf_import::Material::AlphaMode alphaMode = gltf_import::Material::AlphaMode::Opaque;
+        float alphaCutoff   = 0.5f;
+        bool  doubleSided   = false;
+
+        // Per-primitive descriptor table for set 1 (the material set: a
+        // combined image+sampler binding for the base-color texture).
+        // Built at registry-upload time, stable across graph rebuilds, and
+        // borrowed by the SceneExtractor when emitting RenderItems. The
+        // pointer flow is:
+        //   asset.primitives[i].materialBindings  ←  registry uploads textures + builds this
+        //                          ↓
+        //   RenderItem::materialBindings         ←  SceneExtractor stamps the raw pointer
+        //                          ↓
+        //   technique draw         binds GetSet(frameIdx) to slot 1
+        std::shared_ptr<BindingTable> materialBindings;
 
         // Which skin in the parent asset drives this primitive (-1 = static).
         // Today the SceneExtractor uses Component::skinIndex for the whole
@@ -91,6 +148,25 @@ struct SkinnedMeshAsset {
 
     // True after first register; cleared by UploadPending.
     bool needsUpload = true;
+
+    // Texture upload is independent of vertex/index upload because textures
+    // are technique-side resources (created outside the render graph,
+    // persisted across rebuilds), while vertex/index buffers live INSIDE
+    // the graph and need re-uploading on every rebuild. Textures only
+    // re-upload when the IR's texture array has actually changed (i.e. on
+    // LoadGlb / ReplaceSkinnedMesh).
+    bool needsTextureUpload = true;
+
+    // The IR's source textures, copied here at registry time. The registry
+    // walks this on UploadPending to populate the `textures[]` GpuImages.
+    // Held as raw decoded RGBA8 + dims; one entry per IR texture, plus
+    // the 1×1 white fallback the registry appends.
+    struct PendingTexture {
+        std::vector<uint8_t> rgba8;
+        uint32_t             width  = 0;
+        uint32_t             height = 0;
+    };
+    std::vector<PendingTexture> pendingTextures;
 };
 
 // ---- AnimationClipAsset ----

@@ -123,7 +123,8 @@ public:
 	// ---- Internal access for builders ----
 	const ImageResource& GetImageResource(ImageHandle handle) const;
 	const BufferResource& GetBufferResource(BufferHandle handle) const;
-	std::shared_ptr<VWrap::Device> GetDevice() const { return m_device; }
+	std::shared_ptr<VWrap::Device>    GetDevice()    const { return m_device; }
+	std::shared_ptr<VWrap::Allocator> GetAllocator() const { return m_allocator; }
 
 private:
 	std::shared_ptr<VWrap::Device> m_device;
