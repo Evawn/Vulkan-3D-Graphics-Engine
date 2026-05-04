@@ -46,7 +46,7 @@ layout(push_constant) uniform PC {
     uint  jointCount;       //  4
     float alphaCutoff;      //  4
     uint  alphaMode;        //  4    0=Opaque, 1=Mask, 2=Blend
-    uint  _pad0;            //  4
+    float meshAlpha;        //  4    Overlay-mode per-pass alpha; 1 otherwise
     uint  _pad1;            //  4
     uint  _pad2;            //  4
     uint  _pad3;            //  4

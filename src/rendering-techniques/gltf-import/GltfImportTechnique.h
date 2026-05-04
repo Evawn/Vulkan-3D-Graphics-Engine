@@ -127,9 +127,10 @@ struct GltfImportSession {
 class GltfImportTechnique : public RenderTechnique {
 public:
     // Which view the user is staring at right now. Mesh = skinned-mesh
-    // pipeline; Voxels = baked-volume DDA preview. Overlay (M6) will
-    // composite both on top of each other.
-    enum class PreviewMode : uint8_t { Mesh, Voxels };
+    // pipeline; Voxels = baked-volume DDA preview. Overlay = both passes
+    // run alpha-blended and crossfade per `m_overlayBlend` (0 = pure mesh,
+    // 1 = pure voxels, 0.5 = both ghosted at equal weight).
+    enum class PreviewMode : uint8_t { Mesh, Voxels, Overlay };
 
     GltfImportTechnique();
     ~GltfImportTechnique() override;
@@ -179,6 +180,15 @@ public:
 
     void  SetPreviewMode(PreviewMode mode);
     PreviewMode GetPreviewMode() const { return m_previewMode; }
+
+    // ---- Overlay crossfade (M6) ----
+    //
+    // Single-slider crossfade applied when `m_previewMode == Overlay`. 0 =
+    // pure mesh, 1 = pure voxels. Driven from BakerPanel's overlay slider;
+    // the technique passes derived per-pass alphas down through push
+    // constants on the next record callback.
+    void  SetOverlayBlend(float t);
+    float GetOverlayBlend() const { return m_overlayBlend; }
 
     // ---- Color source (M5) ----
     //
@@ -307,6 +317,11 @@ private:
     const SkyDescription* m_sky      = nullptr;
 
     PreviewMode  m_previewMode = PreviewMode::Mesh;
+
+    // Overlay-mode crossfade. 0 = pure mesh, 1 = pure voxels, default 0.5.
+    // Read at record time; both pipelines read derived per-pass alphas from
+    // their push constants. Ignored unless m_previewMode == Overlay.
+    float m_overlayBlend = 0.5f;
 
     // Debounce: SetVoxelSize records the new value + the wall-clock time the
     // slider last moved. Each frame's record callback checks

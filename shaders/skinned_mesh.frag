@@ -42,7 +42,10 @@ layout(push_constant) uniform PC {
     uint  jointCount;
     float alphaCutoff;
     uint  alphaMode;          // 0=Opaque, 1=Mask, 2=Blend
-    uint  _pad0;
+    // Per-pass alpha multiplier driving the Overlay crossfade. 1.0 in
+    // Mesh-only (alpha-blend degrades to a pure overwrite); (1 - blend)
+    // in Overlay where the mesh ghosts on top of the voxel layer.
+    float meshAlpha;
     uint  _pad1;
     uint  _pad2;
     uint  _pad3;
@@ -70,5 +73,10 @@ void main() {
     vec3 direct  = frame.sunColor * frame.sunIntensity * ndotl;
     vec3 lit     = c.rgb * (ambient + direct);
 
-    outColor = vec4(lit, pc.alphaMode == 0u ? 1.0 : c.a);
+    // Per-fragment alpha is the existing Opaque/Mask/Blend logic multiplied
+    // by the per-pass meshAlpha. In Mesh-only meshAlpha == 1 and this is a
+    // no-op; in Overlay it crossfades the whole asset against the voxel
+    // layer regardless of per-fragment opacity.
+    float fragAlpha = (pc.alphaMode == 0u ? 1.0 : c.a) * pc.meshAlpha;
+    outColor = vec4(lit, fragAlpha);
 }

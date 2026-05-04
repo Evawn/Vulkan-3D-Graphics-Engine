@@ -62,19 +62,25 @@ namespace VWrap {
         multisampling.alphaToCoverageEnable = VK_FALSE;
         multisampling.alphaToOneEnable = VK_FALSE;
 
-        VkPipelineColorBlendAttachmentState defaultBlendAttachment{};
-        defaultBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-            | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        defaultBlendAttachment.blendEnable = VK_FALSE;
-        defaultBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        defaultBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-        defaultBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        defaultBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        defaultBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        defaultBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        if (create_info.color_blend_attachment.has_value()) {
+            // Caller supplied a custom blend state (e.g. alpha-over for the
+            // GLB Import overlay crossfade). Honor it across every attachment.
+            blendAttachment = *create_info.color_blend_attachment;
+        } else {
+            blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            blendAttachment.blendEnable = VK_FALSE;
+            blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        }
 
         std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments(
-            create_info.colorAttachmentCount, defaultBlendAttachment);
+            create_info.colorAttachmentCount, blendAttachment);
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;

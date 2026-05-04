@@ -15,7 +15,9 @@
 layout(push_constant) uniform PC {
     mat4 model;          // SceneNode world transform
     vec3 aabbMin;  float _pad0;
-    vec3 aabbMax;  float _pad1;
+    // The .w of aabbMax holds the per-pass alpha for the Overlay
+    // crossfade. The vertex pipeline doesn't need it; the fragment does.
+    vec3 aabbMax;  float voxelAlpha;
 } pc;
 
 // Slot 0 — shared per-frame UBO (matches skinned_mesh.{vert,frag}).

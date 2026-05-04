@@ -192,20 +192,40 @@ void BakerPanel::Draw() {
             // ---- View mode toggle ----
             //
             // Pure UI state; the technique selects which pass actually draws.
-            // Overlay (M6) lands when alpha-composited mesh+voxel is wired.
+            // Overlay registers BOTH passes with alpha-blending and exposes
+            // a single crossfade slider — see the Overlay-only row below.
             int mode = static_cast<int>(m_technique->GetPreviewMode());
-            const char* labels[] = { "Mesh", "Voxels" };
-            for (int i = 0; i < 2; ++i) {
+            const GltfImportTechnique::PreviewMode modeValues[] = {
+                GltfImportTechnique::PreviewMode::Mesh,
+                GltfImportTechnique::PreviewMode::Voxels,
+                GltfImportTechnique::PreviewMode::Overlay,
+            };
+            const char* labels[] = { "Mesh", "Voxels", "Overlay" };
+            for (int i = 0; i < 3; ++i) {
                 if (i > 0) ImGui::SameLine();
                 bool selected = (mode == i);
                 if (selected) ImGui::PushStyleColor(ImGuiCol_Button,
                     ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
                 if (ImGui::Button(labels[i])) {
-                    m_technique->SetPreviewMode(
-                        i == 0 ? GltfImportTechnique::PreviewMode::Mesh
-                               : GltfImportTechnique::PreviewMode::Voxels);
+                    m_technique->SetPreviewMode(modeValues[i]);
                 }
                 if (selected) ImGui::PopStyleColor();
+            }
+
+            // Overlay-only: crossfade slider. 0 = pure mesh, 1 = pure
+            // voxels. The slider's value is read by the technique on the
+            // next record callback — no graph rebuild on slider movement,
+            // only on Overlay enter/leave.
+            if (m_technique->GetPreviewMode() ==
+                GltfImportTechnique::PreviewMode::Overlay)
+            {
+                float blend = m_technique->GetOverlayBlend();
+                ImGui::PushItemWidth(-1);
+                if (ImGui::SliderFloat("##overlay_blend", &blend, 0.0f, 1.0f,
+                                       "Mesh  <--  %.2f  -->  Voxels")) {
+                    m_technique->SetOverlayBlend(blend);
+                }
+                ImGui::PopItemWidth();
             }
 
             // ---- Bake status line ----

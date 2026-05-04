@@ -95,6 +95,25 @@ inline VkPipelineDepthStencilStateCreateInfo DepthTestWrite() {
 	return info;
 }
 
+// Standard "alpha over" blend: src*srcA + dst*(1-srcA). Output alpha is
+// src.a + dst.a*(1-src.a) so iterated passes don't double-attenuate the
+// alpha channel. Used by passes that want to ghost their fragments over
+// what previous passes wrote — the GLB Import overlay crossfade is the
+// motivating case.
+inline VkPipelineColorBlendAttachmentState AlphaOverBlend() {
+	VkPipelineColorBlendAttachmentState info{};
+	info.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+	                    | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	info.blendEnable = VK_TRUE;
+	info.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	info.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	info.colorBlendOp = VK_BLEND_OP_ADD;
+	info.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	info.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	info.alphaBlendOp = VK_BLEND_OP_ADD;
+	return info;
+}
+
 // Pre-configured PipelineCreateInfo for a fullscreen quad pass
 inline VWrap::PipelineCreateInfo FullscreenQuad(
 	std::shared_ptr<VWrap::RenderPass> renderPass,

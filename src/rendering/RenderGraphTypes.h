@@ -152,6 +152,12 @@ struct GraphicsPipelineDesc {
 
 	// Owned dynamic-state storage. Empty == no dynamic state.
 	std::vector<VkDynamicState> dynamicStates;
+
+	// Per-attachment blend state. Defaults to opaque (blendEnable=false,
+	// src=ONE, dst=ZERO) when unset — matches the legacy behavior. Set this
+	// for passes that want alpha blending, e.g. the GLB Import overlay
+	// crossfade (PipelineDefaults::AlphaOverBlend()).
+	std::optional<VkPipelineColorBlendAttachmentState> colorBlendAttachment;
 };
 
 struct ComputePipelineDesc {

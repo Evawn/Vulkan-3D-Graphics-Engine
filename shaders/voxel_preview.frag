@@ -26,7 +26,10 @@
 layout(push_constant) uniform PC {
     mat4 model;
     vec3 aabbMin;  float _pad0;
-    vec3 aabbMax;  float _pad1;
+    // The .w of aabbMax carries the per-pass alpha for the Overlay
+    // crossfade. 1.0 in Voxels-only mode (alpha-blend degrades to a pure
+    // overwrite); m_overlayBlend in Overlay.
+    vec3 aabbMax;  float voxelAlpha;
 } pc;
 
 // Slot 0 — shared per-frame UBO (matches skinned_mesh.{vert,frag}).
@@ -166,7 +169,13 @@ void main() {
 
     // Per-fragment hit depth — the cube was just rasterization scaffolding;
     // the actual depth boundary is where the ray first hit a solid voxel.
+    // (In Overlay mode the pipeline disables depth-test/write so this is a
+    // no-op there; harmless to compute and write either way.)
     vec4 hitClip  = frame.viewProj * pc.model * vec4(hitLocal, 1.0);
     gl_FragDepth  = hitClip.z / hitClip.w;
-    outColor = vec4(lit, 1.0);
+
+    // Output alpha drives the Overlay crossfade. In Voxels-only mode
+    // pc.voxelAlpha == 1.0 and the alpha-blend math degrades to a pure
+    // overwrite, identical to the legacy opaque path.
+    outColor = vec4(lit, pc.voxelAlpha);
 }

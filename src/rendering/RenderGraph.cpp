@@ -639,6 +639,7 @@ void RenderGraph::BuildGraphicsPipeline(GraphicsPassBuilder& pass) {
 	info.push_constant_ranges = desc.pushConstantRanges;
 	info.subpass = 0;
 	info.colorAttachmentCount = static_cast<uint32_t>(pass.m_colorAttachments.size());
+	info.color_blend_attachment = desc.colorBlendAttachment;
 
 	if (!desc.descriptorSetLayouts.empty()) {
 		// Multi-set path: pre-build a PipelineLayout from the layout vector and

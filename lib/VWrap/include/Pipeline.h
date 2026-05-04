@@ -1,6 +1,7 @@
 #pragma once
 #include "vulkan/vulkan.h"
 #include <memory>
+#include <optional>
 #include "Device.h"
 #include "RenderPass.h"
 #include "DescriptorSetLayout.h"
@@ -23,6 +24,13 @@ namespace VWrap {
 		std::vector<VkPushConstantRange> push_constant_ranges;
 		uint32_t subpass;
 		uint32_t colorAttachmentCount = 1;
+
+		// When set, every color attachment uses this blend state. When unset
+		// (default), Pipeline::Create installs an opaque attachment (alpha
+		// blending disabled, srcA=ONE, dstA=ZERO). Single override for all
+		// attachments is enough for v1 — no current pass writes to multiple
+		// color attachments with differing blend modes.
+		std::optional<VkPipelineColorBlendAttachmentState> color_blend_attachment;
 	};
 
 	/// <summary>

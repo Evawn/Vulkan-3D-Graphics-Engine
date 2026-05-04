@@ -20,9 +20,10 @@
 
 namespace {
 
-// std140 push constant. M6 grew this by 16 bytes (alphaCutoff + alphaMode +
-// pad) to support per-primitive alpha-test in the fragment shader. Total =
-// 112 bytes — still well under the 128-byte push-constant minimum.
+// std140 push constant. M6 grew this twice — first by 16 bytes for alpha-test
+// (alphaCutoff + alphaMode + pad), then it absorbed `meshAlpha` into the
+// trailing pad word for the Overlay crossfade (no size change). Total = 112
+// bytes — still well under the 128-byte push-constant minimum.
 struct SkinnedMeshPC {
     glm::mat4  model;            // 64
     glm::vec4  baseColorFactor;  // 16
@@ -30,7 +31,11 @@ struct SkinnedMeshPC {
     uint32_t   jointCount;       //  4
     float      alphaCutoff;      //  4
     uint32_t   alphaMode;        //  4   (0=Opaque, 1=Mask, 2=Blend)
-    uint32_t   _pad0;            //  4
+    // Overlay crossfade weight: 1 in Mesh-only, (1 - overlayBlend) in
+    // Overlay. The shader multiplies its existing per-fragment alpha by
+    // this so opaque parts of the mesh get ghosted alongside any
+    // alpha-tested foliage.
+    float      meshAlpha;        //  4
     uint32_t   _pad1;            //  4
     uint32_t   _pad2;            //  4
     uint32_t   _pad3;            //  4
@@ -88,8 +93,12 @@ static_assert(sizeof(VoxelPreviewDrawUbo) == 48,
 
 struct VoxelPreviewDrawPC {
     glm::mat4 model;                                              // 64
+    // Trailing pad of each vec3 row repurposed: the second pad now carries
+    // `voxelAlpha` for the Overlay crossfade (1 in Voxels-only,
+    // overlayBlend in Overlay). The first stays a pad — keeping the row
+    // shape so std140 in GLSL still parses cleanly.
     glm::vec3 aabbMin;  float _pad0;                              // 16
-    glm::vec3 aabbMax;  float _pad1;                              // 16
+    glm::vec3 aabbMax;  float voxelAlpha;                         // 16
 };
 static_assert(sizeof(VoxelPreviewDrawPC) == 96,
     "VoxelPreviewDrawPC must stay <= 128 B push-constant minimum");
@@ -332,9 +341,18 @@ void GltfImportTechnique::RegisterPasses(
         d.depthStencil  = PipelineDefaults::DepthTestWrite();
         d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 
+        // Overlay mode flips the blend state to alpha-over so the mesh ghosts
+        // over whatever the previous pass painted. In Mesh-only mode the
+        // shader emits alpha=1 anyway, so leaving blending opaque saves a
+        // vector blend op per fragment.
+        if (m_previewMode == PreviewMode::Overlay) {
+            d.colorBlendAttachment = PipelineDefaults::AlphaOverBlend();
+        }
+
         // Push constant covers vertex (model + factor + joints) AND fragment
-        // (alphaCutoff + alphaMode + factor.a). We declare the range over
-        // both stages — it's still the same memory, just visible from both.
+        // (alphaCutoff + alphaMode + factor.a + overlay alpha). We declare
+        // the range over both stages — it's still the same memory, just
+        // visible from both.
         VkPushConstantRange r{};
         r.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         r.offset     = 0;
@@ -365,7 +383,16 @@ void GltfImportTechnique::RegisterPasses(
             TickBakeState();
         }
 
-        if (m_previewMode != PreviewMode::Mesh) return;
+        // Skip the mesh draw only in pure Voxels mode. Overlay mode keeps
+        // the mesh on so it can be crossfaded with the voxel layer.
+        if (m_previewMode == PreviewMode::Voxels) return;
+
+        // Per-pass alpha for the Overlay crossfade. In non-Overlay modes
+        // meshAlpha = 1 and the alpha-over blend equation degrades to a
+        // pure overwrite.
+        const float meshAlpha = (m_previewMode == PreviewMode::Overlay)
+                              ? (1.0f - m_overlayBlend)
+                              : 1.0f;
 
         if (!wantDoubleSided) {
             // Joint arena upload — same once-per-frame placement.
@@ -409,6 +436,7 @@ void GltfImportTechnique::RegisterPasses(
             pc.jointCount      = item.jointCount;
             pc.alphaCutoff     = item.alphaCutoff;
             pc.alphaMode       = static_cast<uint32_t>(item.alphaMode);
+            pc.meshAlpha       = meshAlpha;
             vkCmdPushConstants(vk_cmd, pctx.graphicsPipeline->GetLayout(),
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(pc), &pc);
@@ -521,7 +549,20 @@ void GltfImportTechnique::RegisterPasses(
                 // start the DDA. NoCullFill renders both; the DDA discards
                 // misses so the redundancy is invisible.
                 d.rasterizer    = PipelineDefaults::NoCullFill();
-                d.depthStencil  = PipelineDefaults::DepthTestWrite();
+                // Overlay mode disables depth-test so the voxel layer always
+                // contributes regardless of where the mesh pass wrote depth.
+                // Without this the crossfade goes patchy at t=0.5 because
+                // half the asset's pixels mesh-occlude the voxel layer and
+                // half don't, depending on which surface happened to be
+                // closer at that fragment. Voxels-only mode keeps the
+                // standard depth-test+write so gl_FragDepth from
+                // voxel_preview.frag still integrates with anything later.
+                d.depthStencil  = (m_previewMode == PreviewMode::Overlay)
+                                ? PipelineDefaults::NoDepthTest()
+                                : PipelineDefaults::DepthTestWrite();
+                if (m_previewMode == PreviewMode::Overlay) {
+                    d.colorBlendAttachment = PipelineDefaults::AlphaOverBlend();
+                }
                 d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
                 VkPushConstantRange r{};
                 r.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -537,7 +578,9 @@ void GltfImportTechnique::RegisterPasses(
                 // mode is Mesh (so flipping back to Voxels shows the latest
                 // bake immediately).
                 TickBakeState();
-                if (m_previewMode != PreviewMode::Voxels) return;
+                // Skip the voxel draw only in pure Mesh mode. Overlay keeps
+                // the voxel layer on so it can be crossfaded with the mesh.
+                if (m_previewMode == PreviewMode::Mesh) return;
                 if (!m_session.hasBake) return;
                 if (!m_node) return;
 
@@ -586,10 +629,18 @@ void GltfImportTechnique::RegisterPasses(
                 vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pctx.graphicsPipeline->GetLayout(), 0, 1, &ds, 0, nullptr);
 
+                // Per-pass alpha for the Overlay crossfade. In Voxels-only
+                // mode voxelAlpha = 1 and the alpha-over blend equation
+                // (when present) degrades to a pure overwrite.
+                const float voxelAlpha = (m_previewMode == PreviewMode::Overlay)
+                                       ? m_overlayBlend
+                                       : 1.0f;
+
                 VoxelPreviewDrawPC pc{};
                 pc.model   = model;
                 pc.aabbMin = m_session.previewAabbMin;
                 pc.aabbMax = m_session.previewAabbMax;
+                pc.voxelAlpha = voxelAlpha;
                 vkCmdPushConstants(vk_cmd, pctx.graphicsPipeline->GetLayout(),
                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0, sizeof(pc), &pc);
@@ -1080,7 +1131,28 @@ void GltfImportTechnique::SetVoxelSize(float worldUnits) {
 }
 
 void GltfImportTechnique::SetPreviewMode(PreviewMode mode) {
+    if (mode == m_previewMode) return;
+
+    // Crossing the Overlay boundary changes pipeline state (alpha-over blend
+    // for both passes; depth-test off for the voxel pass so it always
+    // contributes regardless of mesh depth). Pipeline state is baked at
+    // graph-build time, so trigger a graph rebuild on enter/leave.
+    //
+    // Posting RebuildGraph directly (not ReloadTechnique) — Reload() is a
+    // no-op when there's no pending GLB load, so a ReloadTechnique event
+    // would silently do nothing here and the new pipeline state would never
+    // be picked up. RebuildGraph runs the technique's RegisterPasses again,
+    // and the pipeline factory closures read m_previewMode at that time.
+    const bool wasOverlay = (m_previewMode == PreviewMode::Overlay);
+    const bool willOverlay = (mode == PreviewMode::Overlay);
     m_previewMode = mode;
+    if (wasOverlay != willOverlay && m_eventSink) {
+        m_eventSink({AppEventType::RebuildGraph});
+    }
+}
+
+void GltfImportTechnique::SetOverlayBlend(float t) {
+    m_overlayBlend = std::clamp(t, 0.0f, 1.0f);
 }
 
 void GltfImportTechnique::SetColorSource(voxel_bake::VoxColorSource::Mode mode) {
