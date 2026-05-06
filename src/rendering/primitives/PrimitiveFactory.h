@@ -20,6 +20,18 @@
 // Engine convention reminder: Z is up. gridSize is (X, Y) horizontal voxels;
 // maxHeight is the Z extent.
 
+// Terrain material palette indices. Reserved low-numbered slots; the rest of
+// the 256-entry palette is populated by BuildIslandPalette / BuildDefault
+// Palette so foliage indices (5+) remain available. Surface-aware foliage
+// placement consumes these to gate "is this column inland grass?" without
+// re-deriving the threshold from elevation alone.
+namespace TerrainMaterials {
+	constexpr uint8_t Stone = 1;
+	constexpr uint8_t Dirt  = 2;
+	constexpr uint8_t Grass = 3;
+	constexpr uint8_t Sand  = 4;
+}
+
 struct IslandTerrainConfig {
 	glm::uvec2 gridSize       = glm::uvec2(1024, 1024);   // horizontal extent (X, Y) in voxels
 	uint32_t   maxHeight      = 128;                      // vertical (Z) extent in voxels
@@ -37,6 +49,14 @@ struct IslandTerrainConfig {
 	// range [islandRadius, islandRadius + islandFalloff] it decays to zero.
 	float      islandRadius   = 0.42f;
 	float      islandFalloff  = 0.28f;
+
+	// Domain warp — the radial distance fed into the falloff smoothstep is
+	// perturbed by two decorrelated noise samples (one per axis) so the coast
+	// becomes irregular: bays, peninsulas, no detached islets. Amp is in units
+	// of the normalized half-extent (so 0.25 = up to a quarter of the radius
+	// of distortion). Set amp=0 to recover a perfect circle.
+	float      domainWarpFreq = 0.005f;
+	float      domainWarpAmp  = 0.25f;
 
 	// Sea level — Y voxels below seaLevel * maxHeight are empty (no water for v1).
 	// Beach width is the band above sea level rendered as sand instead of grass.

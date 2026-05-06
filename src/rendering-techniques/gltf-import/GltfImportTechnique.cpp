@@ -1,4 +1,5 @@
 #include "GltfImportTechnique.h"
+#include "EnginePaths.h"
 #include "RenderItem.h"
 #include "RenderScene.h"
 #include "PipelineDefaults.h"
@@ -1568,5 +1569,39 @@ bool GltfImportTechnique::LoadBakeFromDisk(const std::string& vxaPath) {
     m_previewMode = PreviewMode::Voxels;
 
     if (m_eventSink) m_eventSink({AppEventType::RebuildGraph});
+    return true;
+}
+
+bool GltfImportTechnique::PromoteBakeToScene() {
+    auto logger = spdlog::get("Render");
+    if (!m_session.hasFullBake) {
+        m_session.lastBakeStatusMessage = "No full bake to promote — bake first.";
+        if (logger) logger->warn("PromoteBakeToScene: no full bake available");
+        return false;
+    }
+
+    // Save the bake to the engine's convention cache path. The .vxa file
+    // IS the contract with CombinedRenderer — it doesn't matter that this
+    // technique and the renderer don't know about each other; they only
+    // share a path.
+    auto cachePath = engine_paths::GetPromotedFoliagePath();
+    const std::string directory = cachePath.parent_path().string();
+    const std::string name      = cachePath.stem().string();
+    if (!SaveBake(directory, name)) {
+        m_session.lastBakeStatusMessage = "Promote failed — could not save .vxa.";
+        if (logger) logger->error("PromoteBakeToScene: save failed to {}", cachePath.string());
+        return false;
+    }
+
+    // Switch workspace + technique. The renderer's "Foliage VXA Path" param
+    // defaults to the same convention path, and its first RegisterPasses
+    // will detect the file (or detect a newer mtime if it was already
+    // loaded) and pull the asset in. No direct hand-off required.
+    if (m_workspaceSwitchCallback) m_workspaceSwitchCallback();
+    if (m_techniqueSwitchCallback) m_techniqueSwitchCallback("Combined Renderer");
+
+    m_session.lastBakeStatusMessage = "Promoted to scene.";
+    if (logger) logger->info("PromoteBakeToScene: wrote {} and requested workspace+technique switch",
+                             cachePath.string());
     return true;
 }

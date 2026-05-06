@@ -225,6 +225,29 @@ public:
     bool SaveBake(const std::string& directory, const std::string& name);
     bool LoadBakeFromDisk(const std::string& vxaPath);
 
+    // ---- Promote-to-scene (M6) ----
+    //
+    // Writes the current full bake to the convention cache path
+    // (engine_paths::GetPromotedFoliagePath) as a .vxa, then asks the host
+    // (via callbacks) to switch the workspace to Scene and activate the
+    // CombinedRenderer technique. The renderer auto-loads the file via its
+    // "Foliage VXA Path" parameter — this technique does NOT touch the
+    // renderer directly. The .vxa file is the only contract between them.
+    //
+    // No-op if no full bake exists. Safe to call repeatedly.
+    bool PromoteBakeToScene();
+
+    // Application wires these so the technique can drive cross-system
+    // transitions during Promote without taking dependencies on the editor
+    // or rendering system. Either callback may be null — Promote will
+    // simply skip the corresponding transition.
+    void SetWorkspaceSwitchCallback(std::function<void()> cb) {
+        m_workspaceSwitchCallback = std::move(cb);
+    }
+    void SetTechniqueSwitchCallback(std::function<void(const std::string&)> cb) {
+        m_techniqueSwitchCallback = std::move(cb);
+    }
+
     // Status hints for BakerPanel — all relaxed reads.
     bool  IsBakingPreview() const { return m_baker.IsPreviewBaking(); }
     bool  IsBakingFull()    const { return m_baker.IsFullBaking(); }
@@ -350,6 +373,11 @@ private:
     // primary UI surface). Kept so RenderTechnique::GetParameters() returns a
     // non-empty list when the user selects this technique in the inspector.
     std::vector<TechniqueParameter> m_parameters;
+
+    // ---- Promote-to-scene callbacks (M6) ----
+    // Set by Application during startup; invoked from PromoteBakeToScene.
+    std::function<void()>                          m_workspaceSwitchCallback;
+    std::function<void(const std::string&)>        m_techniqueSwitchCallback;
 
     // Internal helpers
     void   CreatePerFrameBuffers(uint32_t frames);

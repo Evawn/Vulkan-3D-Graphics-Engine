@@ -1,6 +1,8 @@
 #include "CombinedRenderer.h"
 #include "BrickGrid.h"
+#include "EnginePaths.h"
 #include "PipelineDefaults.h"
+#include "VoxAnimFormat.h"
 #include "config.h"
 
 #include <spdlog/spdlog.h>
@@ -10,7 +12,10 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <filesystem>
+#include <optional>
 #include <random>
+#include <system_error>
 
 namespace {
 
@@ -21,6 +26,7 @@ constexpr const char* kFoliageInstancesName    = "combined_foliage_instances";
 constexpr const char* kShadowBrickmapName      = "combined_shadow_brickmap";
 constexpr const char* kInstanceBricksName      = "combined_instance_bricks";
 constexpr const char* kFoliageGenPassName      = "Combined Foliage Generate";
+constexpr const char* kFoliageBitmaskPassName  = "Combined Foliage Bitmask Fill";
 constexpr const char* kShadowWritePassName     = "Combined Shadow Foliage Write";
 constexpr const char* kSkyPassName             = "Combined Sky";
 constexpr const char* kTerrainPassName         = "Combined Terrain Trace";
@@ -117,11 +123,16 @@ inline uint32_t BitmaskWordCount(glm::uvec3 size, uint32_t frameCount) {
 // shader does (matches src/rendering/voxel/Brickmap.h). `v` is in terrain-
 // local voxel coords (NOT world voxels); the caller subtracts the terrain
 // origin before passing.
-bool BrickmapVoxelSolid(const BrickmapData& bm, glm::ivec3 v) {
-	if (v.x < 0 || v.y < 0 || v.z < 0) return false;
+//
+// Returns 0 (empty) for any out-of-range query OR for an unallocated brick.
+// Otherwise returns the palette index byte at v — 0 still means "no voxel
+// here" by palette convention. The bool form is just a non-zero check on
+// the same lookup.
+uint8_t BrickmapVoxelMaterial(const BrickmapData& bm, glm::ivec3 v) {
+	if (v.x < 0 || v.y < 0 || v.z < 0) return 0;
 	if (v.x >= int(bm.volumeSize.x) ||
 	    v.y >= int(bm.volumeSize.y) ||
-	    v.z >= int(bm.volumeSize.z)) return false;
+	    v.z >= int(bm.volumeSize.z)) return 0;
 
 	const int bs = static_cast<int>(bm.brickSize);
 	const glm::ivec3 brickCell(v.x / bs, v.y / bs, v.z / bs);
@@ -132,15 +143,18 @@ bool BrickmapVoxelSolid(const BrickmapData& bm, glm::ivec3 v) {
 	                  + brickCell.y * static_cast<int>(bm.gridDim.x)
 	                  + brickCell.z * static_cast<int>(bm.gridDim.x * bm.gridDim.y);
 	const uint32_t brickIndex = bm.data[8 + gridIdx];
-	if (brickIndex == 0xFFFFFFFFu) return false;
+	if (brickIndex == 0xFFFFFFFFu) return 0;
 
 	const int linear   = local.z * 64 + local.y * 8 + local.x;
 	const int wordIdx  = linear / 4;
 	const int byteLane = linear % 4;
 	const uint32_t topCells = bm.gridDim.x * bm.gridDim.y * bm.gridDim.z;
 	const uint32_t word = bm.data[8u + topCells + brickIndex * 128u + uint32_t(wordIdx)];
-	const uint32_t mat = (word >> (byteLane * 8)) & 0xFFu;
-	return mat != 0u;
+	return static_cast<uint8_t>((word >> (byteLane * 8)) & 0xFFu);
+}
+
+bool BrickmapVoxelSolid(const BrickmapData& bm, glm::ivec3 v) {
+	return BrickmapVoxelMaterial(bm, v) != 0u;
 }
 
 // Find the topmost solid voxel of the column at terrain-local (x, y).
@@ -156,6 +170,33 @@ int FindTopSolidZ(const BrickmapData& bm, int tx, int ty) {
 }
 
 }  // namespace
+
+CombinedRenderer::CombinedRenderer() {
+	// Default the foliage VXA path to the convention cache location so the
+	// Promote-to-scene workflow auto-loads with no further configuration.
+	// Users can clear / reroute this via the inspector's File parameter.
+	m_foliage_vxa_path = engine_paths::GetPromotedFoliagePath().string();
+
+	// Seed the derived grid params from defaults so the inspector readouts
+	// are populated before the first bake/load.
+	RecomputeFoliageGrid();
+}
+
+void CombinedRenderer::RecomputeFoliageGrid() {
+	// Grid Size and Density are independent user inputs; this just refreshes
+	// the derived values shown in the inspector readout. Pitch is informative
+	// only — placement uses m_foliage_grid_dim directly.
+	m_asset_footprint_voxels = std::max<uint32_t>(m_foliage_size.x, m_foliage_size.y);
+	const int gridDim = std::max(1, m_foliage_grid_dim);
+	const uint32_t islandSize = static_cast<uint32_t>(std::max(1, m_terrain_size));
+	const uint32_t pitch = std::max<uint32_t>(1u, islandSize / static_cast<uint32_t>(gridDim));
+	m_foliage_pitch_voxels = static_cast<int>(pitch);
+
+	char buf[160];
+	std::snprintf(buf, sizeof(buf),
+		"pitch=%u vx, footprint=%u vx", pitch, m_asset_footprint_voxels);
+	m_foliage_grid_status = buf;
+}
 
 RenderTargetDesc CombinedRenderer::DescribeTargets(const RendererCaps& caps) const {
 	RenderTargetDesc desc{};
@@ -196,12 +237,56 @@ void CombinedRenderer::RegisterPasses(
 		RebuildFoliagePlacement();
 	}
 
-	// First-time setup of the foliage asset slot. The volume image gets re-
-	// allocated by the registry on every graph rebuild; we re-resolve the
-	// ImageHandle each pass.
+	// First-time foliage asset setup, with optional .vxa auto-load. If the
+	// "Foliage VXA Path" param points at a real file, we parse it BEFORE
+	// creating the procedural slot so the slot is declared at the file's
+	// size — that single declaration is what the graph builds the image
+	// against. (Resizing after CreateProceduralAnimatedVoxelVolume would
+	// leave the just-declared image at the wrong size for one rebuild.)
 	if (!m_foliage_asset.valid()) {
+		std::optional<voxel_bake::LoadedVxa> firstLoad;
+		if (!m_foliage_vxa_path.empty()) {
+			std::error_code ec;
+			if (std::filesystem::exists(m_foliage_vxa_path, ec) && !ec) {
+				firstLoad = voxel_bake::LoadVxa(m_foliage_vxa_path);
+			}
+		}
+		if (firstLoad) {
+			m_foliage_size        = firstLoad->manifest.size;
+			m_foliage_frame_count = firstLoad->manifest.frameCount;
+			m_use_baked_foliage   = true;
+			std::error_code ec;
+			auto t = std::filesystem::last_write_time(m_foliage_vxa_path, ec);
+			if (!ec) m_foliage_vxa_loaded_mtime = t;
+			// First-time auto-load matches the Promote-on-demand UX: refresh
+			// the readout from the new size and drop a single instance at
+			// island center until the user dials density up.
+			RecomputeFoliageGrid();
+			m_foliage_grid_dim = 1;
+		}
 		m_foliage_asset = m_assets->CreateProceduralAnimatedVoxelVolume(
 			kFoliageAssetName, m_foliage_size, m_foliage_frame_count, VK_FORMAT_R8_UINT);
+		if (firstLoad) {
+			if (auto* slot = m_assets->GetVoxelVolume(m_foliage_asset)) {
+				slot->data        = std::move(firstLoad->framesData);
+				slot->palette     = firstLoad->palette;
+				slot->needsUpload = true;
+			}
+			m_pending_grid_rebuild = true;
+		}
+	} else if (m_use_baked_foliage && !m_foliage_vxa_path.empty()) {
+		// Subsequent rebuilds: detect external file changes (re-promote, hand-
+		// edit). The actual resize/reload is deferred to Reload() — mutating
+		// asset size inside RegisterPasses would race with the in-flight
+		// graph build's already-completed DeclareGraphResources.
+		std::error_code ec;
+		if (std::filesystem::exists(m_foliage_vxa_path, ec) && !ec) {
+			auto t = std::filesystem::last_write_time(m_foliage_vxa_path, ec);
+			if (!ec && t != m_foliage_vxa_loaded_mtime) {
+				m_pending_foliage_load = true;
+				if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
+			}
+		}
 	}
 	const auto* vol = m_assets->GetVoxelVolume(m_foliage_asset);
 	m_foliage_volume = vol ? vol->volumeImage : ImageHandle{};
@@ -307,12 +392,39 @@ void CombinedRenderer::RegisterPasses(
 		 .BindGraphStorageBuffer(1, m_foliage_bitmask_buffer);
 	m_compute_bindings->Build();
 
-	graph.AddComputePass(kFoliageGenPassName)
-		.Write(m_foliage_volume,         ResourceUsage::StorageWrite)
-		.Write(m_foliage_bitmask_buffer, ResourceUsage::StorageWrite)
-		.SetPipeline([this]() {
+	// Foliage volume + bitmask population. Two mutually-exclusive paths share
+	// the same dispatch shape (32 voxels-along-X per thread, sizeY/4 by
+	// (sizeZ*frameCount)/4) and the same descriptor layout — what differs is
+	// the shader and the volume's read/write usage:
+	//   - Procedural: foliage-gen writes BOTH volume + bitmask in one pass
+	//     (free side-effect of knowing which voxels it generated).
+	//   - Baked from .vxa: the volume bytes were CPU-uploaded; bitmask-fill
+	//     reads the volume and derives the bitmask. The foliage-gen pass
+	//     would clobber the loaded volume and is gated off.
+	const bool useBakedFoliage = m_use_baked_foliage;
+	const char* foliageComputeShader = useBakedFoliage
+		? "/voxel_bitmask_fill.comp.spv"
+		: "/instanced_voxel_generate.comp.spv";
+	const char* foliageComputePassName = useBakedFoliage
+		? kFoliageBitmaskPassName
+		: kFoliageGenPassName;
+
+	auto& foliageComputePass = graph.AddComputePass(foliageComputePassName);
+	if (useBakedFoliage) {
+		// Baked path: read volume, write bitmask only.
+		foliageComputePass
+			.Read (m_foliage_volume,         ResourceUsage::StorageRead)
+			.Write(m_foliage_bitmask_buffer, ResourceUsage::StorageWrite);
+	} else {
+		// Procedural path: write both.
+		foliageComputePass
+			.Write(m_foliage_volume,         ResourceUsage::StorageWrite)
+			.Write(m_foliage_bitmask_buffer, ResourceUsage::StorageWrite);
+	}
+	foliageComputePass
+		.SetPipeline([this, foliageComputeShader]() {
 			ComputePipelineDesc d;
-			d.compSpvPath = std::string(config::SHADER_DIR) + "/instanced_voxel_generate.comp.spv";
+			d.compSpvPath = std::string(config::SHADER_DIR) + foliageComputeShader;
 			d.descriptorSetLayout = m_compute_bindings->GetLayout();
 			VkPushConstantRange r{};
 			r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -691,6 +803,46 @@ void CombinedRenderer::OnPostCompile(RenderGraph& graph) {
 
 void CombinedRenderer::Reload(const RenderContext& ctx) {
 	(void)ctx;
+
+	// Foliage .vxa load (defer-from-onFileChanged or mtime detection in
+	// RegisterPasses). Apply the file before bake/grid rebuilds so foliage
+	// placement uses the new asset footprint.
+	if (m_pending_foliage_load) {
+		m_pending_foliage_load = false;
+		auto logger = spdlog::get("Render");
+		auto loaded = voxel_bake::LoadVxa(m_foliage_vxa_path);
+		if (loaded && m_assets && m_foliage_asset.valid()) {
+			m_foliage_size        = loaded->manifest.size;
+			m_foliage_frame_count = loaded->manifest.frameCount;
+			m_use_baked_foliage   = true;
+			std::error_code ec;
+			auto t = std::filesystem::last_write_time(m_foliage_vxa_path, ec);
+			if (!ec) m_foliage_vxa_loaded_mtime = t;
+
+			m_assets->ResizeProceduralVoxelVolume(m_foliage_asset,
+				m_foliage_size, m_foliage_frame_count);
+			if (auto* slot = m_assets->GetVoxelVolume(m_foliage_asset)) {
+				slot->data        = std::move(loaded->framesData);
+				slot->palette     = loaded->palette;
+				slot->needsUpload = true;
+			}
+			// Refresh the inspector readout off the new asset size, but
+			// then force grid_dim = 1 so Promote-to-scene drops a single
+			// instance at island center (per island-scene.md §4.5/§5.3).
+			// User dragging Density will repopulate.
+			RecomputeFoliageGrid();
+			m_foliage_grid_dim = 1;
+			m_pending_grid_rebuild = true;
+
+			if (logger) logger->info(
+				"CombinedRenderer: loaded foliage .vxa: {}×{}×{} ({} frames) from {}",
+				m_foliage_size.x, m_foliage_size.y, m_foliage_size.z,
+				m_foliage_frame_count, m_foliage_vxa_path);
+		} else if (logger) {
+			logger->warn("CombinedRenderer: failed to load .vxa: {}", m_foliage_vxa_path);
+		}
+	}
+
 	if (m_pending_bake) {
 		m_pending_bake = false;
 		BakeIslandNow();
@@ -730,6 +882,9 @@ void CombinedRenderer::BakeIslandNow() {
 	m_terrain_pending_upload = true;
 	m_terrain_baked_ever     = true;
 
+	// Island size feeds into the foliage pitch divisor — refresh derived grid.
+	RecomputeFoliageGrid();
+
 	logger->info(
 		"CombinedRenderer: baked island {}×{}×{} ({} bricks, {:.2f} MB) in {:.1f} ms; anchor=({}, {}, {})",
 		m_terrain_brickmap.volumeSize.x, m_terrain_brickmap.volumeSize.y, m_terrain_brickmap.volumeSize.z,
@@ -760,12 +915,88 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 		return;
 	}
 
+	const int islandX = static_cast<int>(m_terrain_brickmap.volumeSize.x);
+	const int islandY = static_cast<int>(m_terrain_brickmap.volumeSize.y);
+	const glm::ivec3 origin = m_terrain_brickmap.originVoxel;
+	const int seaLevelZ = static_cast<int>(m_terrain_cfg.seaLevel *
+	                       static_cast<float>(m_terrain_brickmap.volumeSize.z)) + 2;
+
+	// ---- Single-instance placement (Promote-to-scene drop) ----
+	//
+	// When the foliage grid is 1×1 we explicitly want the asset centered
+	// on the island, sunk into the ground a few voxels so a tree's trunk
+	// reads as planted instead of hovering. Falls back to the highest
+	// passing column if dead-center is below sea level (extreme falloff
+	// settings).
+	if (m_foliage_grid_dim == 1) {
+		constexpr int kPromotedSinkVoxels = 3;
+
+		int cx = islandX / 2;
+		int cy = islandY / 2;
+		int topZ = FindTopSolidZ(m_terrain_brickmap, cx, cy);
+		if (topZ < 0 || topZ < seaLevelZ) {
+			// Fallback — scan all columns for the highest one above sea level.
+			int bestZ = -1, bestX = cx, bestY = cy;
+			for (int y = 0; y < islandY; ++y)
+			for (int x = 0; x < islandX; ++x) {
+				int z = FindTopSolidZ(m_terrain_brickmap, x, y);
+				if (z > bestZ) { bestZ = z; bestX = x; bestY = y; }
+			}
+			cx = bestX; cy = bestY; topZ = bestZ;
+			if (logger) logger->warn(
+				"CombinedRenderer: island center below sea — promoted asset placed at "
+				"highest column ({}, {}, z={})", cx, cy, topZ);
+		}
+
+		std::vector<GpuInstance> instances;
+		if (topZ >= seaLevelZ) {
+			// Baked .vxa files store voxels in glTF Y-up convention (the bake
+			// only rotates the rendered mesh via the SceneNode transform; the
+			// volume bytes are mesh-local). The foliage trace shader treats
+			// the volume as Z-up, so we apply the same Y-up→Z-up correction
+			// per-instance — the fragment shader already inverts vInstRot
+			// when DDA-ing the camera ray back into volume-local space, so
+			// this rotates the rendered asset in world without skewing the
+			// volume sampling. Procedural assets are already Z-up; identity.
+			const glm::quat baseRot = m_use_baked_foliage
+				? glm::angleAxis(glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f))
+				: glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
+			GpuInstance gi{};
+			gi.position = glm::vec3(
+				static_cast<float>(cx + origin.x),
+				static_cast<float>(cy + origin.y),
+				static_cast<float>(topZ + 1 + origin.z - kPromotedSinkVoxels));
+			gi.scale     = std::max(0.05f, m_density);
+			gi.rotation  = glm::vec4(baseRot.x, baseRot.y, baseRot.z, baseRot.w);
+			gi.yawIdx    = 0;
+			gi.animOffset = 0.0f;
+			instances.push_back(gi);
+		}
+
+		m_foliage_instance_count = static_cast<uint32_t>(instances.size());
+		if (m_foliage_instance_count > 0) {
+			m_pending_instance_bytes.resize(instances.size() * sizeof(GpuInstance));
+			std::memcpy(m_pending_instance_bytes.data(), instances.data(),
+			            m_pending_instance_bytes.size());
+		} else {
+			m_pending_instance_bytes.clear();
+		}
+		m_foliage_pitch_voxels = islandX;  // single instance — pitch is meaningless; report island size
+		m_foliage_pending_upload = true;
+		RebuildShadowBrickmap();
+		if (logger) logger->info("CombinedRenderer: placed {} promoted foliage instance "
+		                         "at island center ({}, {}, {})",
+		                         m_foliage_instance_count, cx, cy, topZ);
+		return;
+	}
+
+	// ---- Grid placement (default) ----
+	//
 	// Auto-fit the foliage grid to the island footprint. Pitch (in world
 	// voxels) = floor(island_x / grid_dim). Square footprint matches today's
 	// island bake (gridSize.x == gridSize.y).
 	const int gridDim = std::max(1, m_foliage_grid_dim);
-	const int islandX = static_cast<int>(m_terrain_brickmap.volumeSize.x);
-	const int islandY = static_cast<int>(m_terrain_brickmap.volumeSize.y);
 	const int pitch   = std::max(1, std::min(islandX, islandY) / gridDim);
 	m_foliage_pitch_voxels = pitch;
 
@@ -777,11 +1008,16 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 	std::vector<GpuInstance> instances;
 	instances.reserve(static_cast<size_t>(gridDim) * gridDim);
 
-	const glm::ivec3 origin = m_terrain_brickmap.originVoxel;
-	// Sea level + small margin in voxels. Below this z, foliage is skipped
-	// (no underwater grass for v1).
-	const int seaLevelZ = static_cast<int>(m_terrain_cfg.seaLevel *
-	                       static_cast<float>(m_terrain_brickmap.volumeSize.z)) + 2;
+	// Surface-aware placement guards (island-scene.md §5.2). Together they
+	// keep instances on inland plateau-ish terrain instead of the beach band
+	// or cliff edges. Thresholds are conservative defaults; they could be
+	// promoted to inspector params later if the user wants to tune.
+	constexpr int kInlandMarginVoxels = 4;
+	constexpr int kMaxSlopeVoxels     = 6;
+	const int inlandThresholdZ = static_cast<int>(
+		(m_terrain_cfg.seaLevel + m_terrain_cfg.beachWidth) *
+		static_cast<float>(m_terrain_brickmap.volumeSize.z))
+		+ kInlandMarginVoxels;
 
 	for (int gy = 0; gy < gridDim; ++gy)
 	for (int gx = 0; gx < gridDim; ++gx) {
@@ -793,7 +1029,31 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 		wantTy = std::clamp(wantTy, 0, islandY - 1);
 
 		const int topZ = FindTopSolidZ(m_terrain_brickmap, wantTx, wantTy);
-		if (topZ < 0 || topZ < seaLevelZ) continue;
+		// (1) Beach exclusion — column must be firmly above the beach band.
+		if (topZ < 0 || topZ < inlandThresholdZ) continue;
+
+		// (2) Slope guard — reject cliff edges where a cubic asset would
+		// visibly hover over the gradient. OOB neighbors contribute zero
+		// delta so map edges aren't doubly penalized by criterion (1).
+		auto neighborDelta = [&](int nx, int ny) {
+			int nz = FindTopSolidZ(m_terrain_brickmap, nx, ny);
+			return (nz < 0) ? 0 : std::abs(nz - topZ);
+		};
+		const int maxDelta = std::max({
+			neighborDelta(wantTx,     wantTy + 1),
+			neighborDelta(wantTx,     wantTy - 1),
+			neighborDelta(wantTx + 1, wantTy),
+			neighborDelta(wantTx - 1, wantTy),
+		});
+		if (maxDelta > kMaxSlopeVoxels) continue;
+
+		// (3) Material check — the surface voxel must be grass. Cheap re-
+		// confirmation that we're on inland terrain (after the beach color-
+		// gradient lands in §6.2 this becomes load-bearing — the elevation
+		// threshold alone isn't a perfect proxy for "is grass band").
+		if (BrickmapVoxelMaterial(m_terrain_brickmap,
+		                          glm::ivec3(wantTx, wantTy, topZ))
+		    != TerrainMaterials::Grass) continue;
 
 		// World voxel coords. Cloud is at world origin so cloud-local voxel
 		// position = world voxel position.
@@ -805,10 +1065,19 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 		gi.position = glm::vec3(static_cast<float>(worldVx.x),
 		                        static_cast<float>(worldVx.y),
 		                        static_cast<float>(worldVx.z));
-		gi.scale    = 1.0f;
+		gi.scale    = std::max(0.05f, m_density);
 		const int yawIdx = yawIdxDist(rng);
 		const float yaw  = static_cast<float>(yawIdx) * 1.57079632679f;
-		const glm::quat q = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f));
+		// Compose: Y-up→Z-up base (only for baked foliage; procedural is
+		// already Z-up) followed by per-instance yaw around world Z.
+		// Order matters — yaw applied AFTER the up-axis correction operates
+		// in world coords, which is what we want for "rotate the upright
+		// tree around its vertical axis."
+		const glm::quat yawQ = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f));
+		const glm::quat baseRot = m_use_baked_foliage
+			? glm::angleAxis(glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f))
+			: glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+		const glm::quat q = yawQ * baseRot;
 		gi.rotation  = glm::vec4(q.x, q.y, q.z, q.w);
 		gi.yawIdx    = yawIdx;
 		gi.animOffset = phaseDist(rng);
@@ -890,6 +1159,48 @@ void CombinedRenderer::RebuildShadowBrickmap() {
 	}
 }
 
+void CombinedRenderer::LoadFoliageFromVxa(const std::string& path) {
+	auto logger = spdlog::get("Render");
+
+	// Empty path → revert to procedural mode. Resize the slot back to the
+	// procedural defaults so the next graph rebuild reallocates the volume
+	// image at that size; clear data so UploadVolume short-circuits and the
+	// foliage-gen compute pass takes over filling it.
+	if (path.empty()) {
+		m_foliage_vxa_path.clear();
+		m_foliage_vxa_loaded_mtime = std::filesystem::file_time_type{};
+		m_use_baked_foliage = false;
+		m_foliage_size = glm::uvec3(16, 32, 16);
+		m_foliage_frame_count = 8;
+		if (m_assets && m_foliage_asset.valid()) {
+			m_assets->ResizeProceduralVoxelVolume(m_foliage_asset,
+				m_foliage_size, m_foliage_frame_count);
+			if (auto* slot = m_assets->GetVoxelVolume(m_foliage_asset)) {
+				slot->data.clear();
+				slot->needsUpload = false;
+			}
+		}
+		m_foliage_vxa_path = path;  // canonicalize empty
+		// Procedural mode: re-derive grid from density so the user's last
+		// density setting governs the layout instead of "1" leftover from
+		// the previous baked-mode promote.
+		RecomputeFoliageGrid();
+		m_pending_grid_rebuild = true;
+		if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
+		return;
+	}
+
+	// Defer the actual file work to Reload(). Mutating asset size inline
+	// would race with the in-flight rebuild's already-completed
+	// DeclareGraphResources; routing through Reload's pending flag puts the
+	// resize in a clean "between rebuilds" slot, and Reload posts
+	// RebuildGraph to make the new size visible.
+	m_foliage_vxa_path = path;
+	m_pending_foliage_load = true;
+	if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
+	if (logger) logger->info("CombinedRenderer: queued foliage .vxa load: {}", path);
+}
+
 void CombinedRenderer::WriteFrameUbo(uint32_t frameIndex) {
 	if (frameIndex >= m_frame_ubo_mapped.size() || !m_frame_ubo_mapped[frameIndex]) return;
 
@@ -935,6 +1246,7 @@ void CombinedRenderer::WriteFrameUbo(uint32_t frameIndex) {
 std::vector<std::string> CombinedRenderer::GetShaderPaths() const {
 	return {
 		std::string(config::SHADER_DIR) + "/instanced_voxel_generate.comp.spv",
+		std::string(config::SHADER_DIR) + "/voxel_bitmask_fill.comp.spv",
 		std::string(config::SHADER_DIR) + "/shadow_foliage_write.comp.spv",
 		std::string(config::SHADER_DIR) + "/instanced_voxel.vert.spv",
 		std::string(config::SHADER_DIR) + "/combined_foliage_trace.frag.spv",
@@ -955,17 +1267,59 @@ std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 		m_parameters.push_back({ "Enable Shadows",         TechniqueParameter::Bool,  &m_shadows_enabled });
 
 		m_parameters.push_back({ "Foliage", TechniqueParameter::Header });
+
+		// Foliage VXA Path — the file-based contract with
+		// GltfImportTechnique's Promote-to-scene workflow. Defaults to the
+		// convention cache path so first-time promote auto-loads. Empty
+		// path or onFileChanged with empty input reverts to procedural.
+		TechniqueParameter vxaPath;
+		vxaPath.label          = "Foliage VXA Path";
+		vxaPath.type           = TechniqueParameter::File;
+		vxaPath.filePath       = &m_foliage_vxa_path;
+		vxaPath.fileFilters    = { "vxa" };
+		vxaPath.fileFilterDesc = "Animated voxel asset";
+		vxaPath.onFileChanged  = [this](const std::string& p) {
+			LoadFoliageFromVxa(p);
+		};
+		m_parameters.push_back(std::move(vxaPath));
+
+		// Grid Size: per-axis instance count. Promote-to-scene resets this
+		// to 1 (single asset at island center); user drags up to populate.
 		TechniqueParameter gridDim;
-		gridDim.label = "Grid Side";
+		gridDim.label = "Grid Size";
 		gridDim.type  = TechniqueParameter::Int;
 		gridDim.data  = &m_foliage_grid_dim;
 		gridDim.min   = 1.0f;
 		gridDim.max   = 128.0f;
 		gridDim.onChanged = [this]() {
+			RecomputeFoliageGrid();
 			m_pending_grid_rebuild = true;
 			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
 		};
 		m_parameters.push_back(std::move(gridDim));
+
+		// Density: per-instance render scale multiplier (gi.scale = m_density).
+		// Independent of grid size — tunes how visually filled the grid feels
+		// without changing the instance count.
+		TechniqueParameter density;
+		density.label  = "Density";
+		density.type   = TechniqueParameter::Float;
+		density.data   = &m_density;
+		density.min    = 0.05f;
+		density.max    = 4.0f;
+		density.format = "%.2f";
+		density.onChanged = [this]() {
+			m_pending_grid_rebuild = true;
+			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
+		};
+		m_parameters.push_back(std::move(density));
+
+		// Read-only display row: derived pitch + asset footprint.
+		TechniqueParameter gridStatus;
+		gridStatus.label     = "Layout";
+		gridStatus.type      = TechniqueParameter::Text;
+		gridStatus.textValue = &m_foliage_grid_status;
+		m_parameters.push_back(std::move(gridStatus));
 
 		m_parameters.push_back({ "Island Terrain", TechniqueParameter::Header });
 		m_parameters.push_back({ "Size",         TechniqueParameter::Int,   &m_terrain_size,       8.0f, 8192.0f });

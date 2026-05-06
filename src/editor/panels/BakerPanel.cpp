@@ -396,6 +396,24 @@ void BakerPanel::Draw() {
             }
             ImGui::EndDisabled();
 
+            // ---- Promote to scene ----
+            //
+            // Writes the current full bake to the engine's convention cache
+            // path and switches the workspace to Scene + activates the
+            // CombinedRenderer technique. The renderer auto-loads the file
+            // through its "Foliage VXA Path" parameter — no inter-technique
+            // hand-off; the file IS the contract.
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!session.hasFullBake || baking);
+            if (ImGui::Button("Promote to scene")) {
+                m_technique->PromoteBakeToScene();
+            }
+            ImGui::EndDisabled();
+            if (!session.hasFullBake && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Bake animation first, then promote to drop the\n"
+                                  "asset into the Scene workspace as foliage.");
+            }
+
             // ---- Status line ----
             //
             // Surfaces the latest message from the technique (save/load

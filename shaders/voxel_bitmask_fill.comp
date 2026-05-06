@@ -1,0 +1,61 @@
+#version 450
+
+// voxel_bitmask_fill.comp
+//
+// Derives a per-voxel occupancy bitmask from an animated voxel volume image.
+// Used when the volume's bytes were written outside this shader (e.g. CPU-
+// uploaded from a .vxa file) and a sibling bitmask buffer still needs to
+// be populated for downstream consumers like shadow_foliage_write.comp.
+//
+// Companion to instanced_voxel_generate.comp, which already writes a
+// bitmask as a free side-effect of generating its volume contents — that
+// path doesn't need this shader because the procedural generator knows
+// the per-voxel material at write time. This shader is the "I only have
+// the volume image" path; one thread reads 32 voxels along X (matching
+// the existing 32-voxel-along-X bitmask packing) and emits one mask word.
+//
+// Layout convention (must match instanced_voxel_generate.comp's bitmask
+// layout exactly so the bitmask buffer is interchangeable):
+//   bits[ frame * (numXWords * sizeY * sizeZ)
+//       + zInFrame * (numXWords * sizeY)
+//       + y        *  numXWords
+//       + xWord ]
+
+layout(local_size_x = 1, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, r8ui) uniform readonly uimage2DArray volume;
+layout(std430, set = 0, binding = 1) writeonly buffer BitmaskBuffer {
+	uint bits[];
+} bitmask;
+
+layout(push_constant) uniform PC {
+	int sizeX, sizeY, sizeZ;
+	int frameCount;
+	int numXWords;
+} pc;
+
+void main() {
+	int xWord = int(gl_GlobalInvocationID.x);
+	int y     = int(gl_GlobalInvocationID.y);
+	int zf    = int(gl_GlobalInvocationID.z);   // frame * sizeZ + zInFrame
+
+	if (xWord >= pc.numXWords || y >= pc.sizeY || zf >= pc.sizeZ * pc.frameCount) return;
+
+	int frame    = zf / pc.sizeZ;
+	int zInFrame = zf - frame * pc.sizeZ;
+
+	uint maskBits = 0u;
+	for (int bit = 0; bit < 32; ++bit) {
+		int x = xWord * 32 + bit;
+		if (x >= pc.sizeX) break;
+		// Frame-as-layer: layer = frame; voxel (x, y, z) lives at (x, y + z*sizeY, frame).
+		uint mat = imageLoad(volume, ivec3(x, y + zInFrame * pc.sizeY, frame)).r;
+		if (mat != 0u) maskBits |= (1u << uint(bit));
+	}
+
+	int idx = frame    * (pc.numXWords * pc.sizeY * pc.sizeZ)
+	        + zInFrame * (pc.numXWords * pc.sizeY)
+	        + y        *  pc.numXWords
+	        + xWord;
+	bitmask.bits[idx] = maskBits;
+}

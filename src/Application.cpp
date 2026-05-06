@@ -135,6 +135,18 @@ void Application::Init() {
 		m_rendering.RequestSwitchTechniqueByName(name);
 	});
 
+	// Promote-to-scene callbacks. The technique handles the .vxa write itself
+	// (and the renderer auto-detects the file); these callbacks only drive
+	// the workspace + technique transitions.
+	if (gltfImportPtr) {
+		gltfImportPtr->SetWorkspaceSwitchCallback([this] {
+			m_editor.SetWorkspace(Workspace::Scene);
+		});
+		gltfImportPtr->SetTechniqueSwitchCallback([this](const std::string& name) {
+			m_rendering.RequestSwitchTechniqueByName(name);
+		});
+	}
+
 	m_state = AppState::Running;
 }
 

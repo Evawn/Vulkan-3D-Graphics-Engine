@@ -12,7 +12,9 @@
 #include "SceneLighting.h"
 #include "SkyDescription.h"
 #include <chrono>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <glm/glm.hpp>
 
 class RenderGraph;
@@ -62,12 +64,30 @@ private:
 	bool         m_terrain_baked_ever     = false;
 
 	// ---- Foliage asset ----
-	// Same shape as InstancedVoxelTechnique's foliage asset: 16×32×16 voxels,
-	// 8 frames. Reused procedural generate compute shader.
+	// The foliage slot can be filled two ways:
+	//   - Procedural (default): instanced_voxel_generate.comp writes the volume
+	//     image AND the bitmask buffer each frame. m_use_baked_foliage = false.
+	//   - Baked from .vxa file: the volume bytes are CPU-uploaded once
+	//     (AssetRegistry::UploadVolume → CmdCopyBufferToImage); the per-frame
+	//     bitmask is derived by voxel_bitmask_fill.comp from the volume image.
+	//     m_use_baked_foliage = true.
+	// In both cases the asset slot is the same procedural AssetID — what
+	// changes is who fills its bytes. The trace shaders + shadow pipeline are
+	// identical across modes; only the upstream compute pass differs.
 	AssetID      m_foliage_asset;
 	ImageHandle  m_foliage_volume;
 	glm::uvec3   m_foliage_size = glm::uvec3(16, 32, 16);
 	uint32_t     m_foliage_frame_count = 8;
+
+	// ---- Baked foliage (.vxa file) state ----
+	// The path is the parameter contract between Promote-to-scene (writer)
+	// and CombinedRenderer (reader). Defaults to the convention cache path
+	// so first-time promote auto-loads with no manual configuration. Empty
+	// path → procedural mode.
+	bool        m_use_baked_foliage = false;
+	std::string m_foliage_vxa_path;
+	std::filesystem::file_time_type m_foliage_vxa_loaded_mtime{};
+	bool        m_pending_foliage_load = false;
 
 	// Per-asset, per-frame occupancy bitmask consumed by the substrate's
 	// shadow query. Sibling to the volume image.
@@ -87,10 +107,21 @@ private:
 	std::vector<uint32_t> m_pending_substrate_data;
 	bool                  m_foliage_pending_upload = false;
 
-	// Per-axis instance count. Auto-fits to the island footprint when the
-	// terrain bake completes — `m_foliage_grid_dim` is a tunable cap.
-	int  m_foliage_grid_dim = 64;    // 64×64 = 4096 instances
-	int  m_foliage_pitch_voxels = 0; // computed from terrain size / grid dim
+	// Foliage placement model — two independent user knobs:
+	//   - m_foliage_grid_dim ("Grid Size", Int slider): per-axis instance
+	//     count. island_size / grid_dim = pitch in voxels. Promote-to-scene
+	//     drops this to 1 (single asset at island center); the user dials
+	//     it back up to populate.
+	//   - m_density ("Density", Float slider): per-instance render-scale
+	//     multiplier (gi.scale = m_density). 1.0 = native voxel size; >1
+	//     visually fills space (overlap); <1 leaves visible gaps.
+	// pitch + status text are derived for the inspector readout, updated by
+	// RecomputeFoliageGrid().
+	int   m_foliage_grid_dim = 64;
+	float m_density          = 1.0f;
+	int   m_foliage_pitch_voxels = 0;
+	uint32_t m_asset_footprint_voxels = 32;
+	std::string m_foliage_grid_status;       // "pitch=16 vx, footprint=32 vx"
 
 	// ---- Shadow occupancy brickmap ----
 	// One acceleration structure for ALL shadow queries (terrain + foliage).
@@ -165,6 +196,12 @@ private:
 	// Triggers a shadow brickmap topology rebuild via RebuildShadowBrickmap.
 	void RebuildFoliagePlacement();
 
+	// Recompute m_foliage_grid_dim and m_foliage_pitch_voxels from
+	// m_density and the current asset/terrain sizes. Caller is responsible
+	// for triggering a placement rebuild + graph rebuild if the result
+	// changes.
+	void RecomputeFoliageGrid();
+
 	// Rebuild the shadow brickmap from the current terrain + foliage instance
 	// set. Called when either input changes — terrain bake, instance edit.
 	// Stashes the pending buffer bytes; OnPostCompile uploads them.
@@ -173,8 +210,17 @@ private:
 	void WriteFrameUbo(uint32_t frameIndex);
 
 public:
+	CombinedRenderer();
+
 	std::string      GetDisplayName() const override { return "Combined Renderer"; }
 	RenderTargetDesc DescribeTargets(const RendererCaps& caps) const override;
+
+	// Apply the .vxa file at `path` to the foliage slot, switching the
+	// renderer into "baked foliage" mode. Empty path → revert to procedural
+	// foliage (default). Triggers a graph rebuild via the event sink. Cheap
+	// to call repeatedly; mtime-watched in RegisterPasses so external file
+	// changes are auto-detected.
+	void LoadFoliageFromVxa(const std::string& path);
 
 	void RegisterPasses(RenderGraph& graph, const RenderContext& ctx,
 	                    const TechniqueTargets& targets) override;

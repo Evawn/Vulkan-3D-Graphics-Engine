@@ -10,11 +10,13 @@
 
 namespace {
 
-	// Material indices used by the island palette. Index 0 is reserved (empty).
-	constexpr uint8_t MAT_STONE = 1;
-	constexpr uint8_t MAT_DIRT  = 2;
-	constexpr uint8_t MAT_GRASS = 3;
-	constexpr uint8_t MAT_SAND  = 4;
+	// Local aliases for the shared terrain palette indices defined in
+	// PrimitiveFactory.h. Same values; the header surface lets foliage-
+	// placement code consult them without duplicating the constants.
+	constexpr uint8_t MAT_STONE = TerrainMaterials::Stone;
+	constexpr uint8_t MAT_DIRT  = TerrainMaterials::Dirt;
+	constexpr uint8_t MAT_GRASS = TerrainMaterials::Grass;
+	constexpr uint8_t MAT_SAND  = TerrainMaterials::Sand;
 
 	inline uint32_t RoundUpTo8(uint32_t v) {
 		return (v + 7u) & ~7u;
@@ -162,7 +164,22 @@ BrickmapData PrimitiveFactory::BakeIslandTerrainBrickmap(const IslandTerrainConf
 
 			const float dx = (static_cast<float>(x) + 0.5f - halfX) / halfMin;
 			const float dy = (static_cast<float>(y) + 0.5f - halfY) / halfMin;
-			const float dist = std::sqrt(dx * dx + dy * dy);
+
+			// Domain-warped distance: two decorrelated noise samples push the
+			// (dx, dy) lookup point around in halfMin units before we measure
+			// radial distance, deforming the level set into bays/peninsulas
+			// without breaking the island into multiple blobs.
+			const float wnx = ValueNoise2D(static_cast<float>(x) * cfg.domainWarpFreq,
+			                               static_cast<float>(y) * cfg.domainWarpFreq,
+			                               cfg.seed + 17u);
+			const float wny = ValueNoise2D(static_cast<float>(x) * cfg.domainWarpFreq,
+			                               static_cast<float>(y) * cfg.domainWarpFreq,
+			                               cfg.seed + 31u);
+			const float wx = (wnx - 0.5f) * 2.0f * cfg.domainWarpAmp;
+			const float wy = (wny - 0.5f) * 2.0f * cfg.domainWarpAmp;
+			const float wdx = dx + wx;
+			const float wdy = dy + wy;
+			const float dist = std::sqrt(wdx * wdx + wdy * wdy);
 			const float mask = 1.0f - Smoothstep(cfg.islandRadius, cfg.islandRadius + cfg.islandFalloff, dist);
 
 			const float baseline = (cfg.seaLevel + 0.05f) + 0.55f * mask;
