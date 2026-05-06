@@ -99,11 +99,16 @@ static_assert(sizeof(ShadowWritePC) == 32,
 // Terrain trace pass push constant — primary-trace geometry only. Shading
 // state lives in the FrameUbo. The new shadow brickmap subsumes the old
 // per-draw `terrainOriginVoxel` plumbing — shadow lookups read the brickmap
-// header directly.
+// header directly. waterParams carries the v1 water-plane state inline:
+// (seaLevelWorldZ, shallowDepthVoxels, enabled-as-0-or-1, pad). Placeholder
+// for the future dynamic-pillar WaterTechnique (see docs/VISION.md §2.3) —
+// keeps the surface area minimal so extraction is local to this struct +
+// the trace shader's water composite block.
 struct TerrainTracePC {
 	glm::mat4 ndcToWorld;            // 64
+	glm::vec4 waterParams;           // 16 — x=seaLevelWorldZ, y=shallowDepthVoxels, z=enabled, w=pad
 };
-static_assert(sizeof(TerrainTracePC) == 64,
+static_assert(sizeof(TerrainTracePC) == 80,
 	"TerrainTracePC must stay <= 128 B (portable PC limit)");
 
 // Foliage trace pass push constant — same shape as InstancedVoxelTechnique's.
@@ -117,6 +122,43 @@ static_assert(sizeof(FoliageTracePC) == 96, "FoliageTracePC must stay <= 128 B")
 inline uint32_t BitmaskXWords(uint32_t sizeX) { return (sizeX + 31u) / 32u; }
 inline uint32_t BitmaskWordCount(glm::uvec3 size, uint32_t frameCount) {
 	return BitmaskXWords(size.x) * size.y * size.z * frameCount;
+}
+
+// Permute a Y-up animated voxel volume into Z-up (engine canonical, see
+// VISION.md §1.1). The bake's voxelizer emits in glTF's mesh-local Y-up
+// frame and the .vxa stores those bytes verbatim — the Import workspace
+// gets upright rendering by rotating its scene node, but CombinedRenderer
+// has no per-asset transform to lean on (foliage trace + shadow compute
+// both walk the volume in cloud-local voxel coords with Z up). Doing the
+// permutation once at load time makes downstream consumers axis-agnostic;
+// the alternative (per-instance rotation) would have to thread a baseRot
+// through trace AND shadow_foliage_write, and would block the unified
+// substrate (§3) since substrate queries assume integer-voxel alignment.
+//
+// Mapping: a +90° rotation around X takes asset_+Y → world_+Z. Inverting
+// that for the bytes: new(x, oldSizeZ - 1 - z, y) = old(x, y, z). The
+// volume's dimensions therefore swap Y and Z. Frame layer stride changes
+// accordingly. Output is move-replacement of the input vector + size.
+void PermuteVxaToZUp(std::vector<uint8_t>& bytes, glm::uvec3& size, uint32_t frameCount) {
+	const glm::uvec3 oldSize = size;
+	const glm::uvec3 newSize(oldSize.x, oldSize.z, oldSize.y);
+	const size_t bytesPerFrame = static_cast<size_t>(newSize.x) * newSize.y * newSize.z;
+	std::vector<uint8_t> out(bytesPerFrame * frameCount, 0);
+	for (uint32_t f = 0; f < frameCount; ++f) {
+		const size_t srcFrame = static_cast<size_t>(f) * oldSize.x * oldSize.y * oldSize.z;
+		const size_t dstFrame = static_cast<size_t>(f) * bytesPerFrame;
+		for (uint32_t z = 0; z < oldSize.z; ++z) {
+			const uint32_t newY = oldSize.z - 1 - z;
+			for (uint32_t y = 0; y < oldSize.y; ++y) {
+				const uint32_t newZ = y;
+				const size_t srcRow = srcFrame + z * (oldSize.x * oldSize.y) + y * oldSize.x;
+				const size_t dstRow = dstFrame + newZ * (newSize.x * newSize.y) + newY * newSize.x;
+				std::memcpy(out.data() + dstRow, bytes.data() + srcRow, oldSize.x);
+			}
+		}
+	}
+	bytes = std::move(out);
+	size = newSize;
 }
 
 // CPU-side brickmap occupancy probe. Walks the same buffer layout the GPU
@@ -183,18 +225,26 @@ CombinedRenderer::CombinedRenderer() {
 }
 
 void CombinedRenderer::RecomputeFoliageGrid() {
-	// Grid Size and Density are independent user inputs; this just refreshes
-	// the derived values shown in the inspector readout. Pitch is informative
-	// only — placement uses m_foliage_grid_dim directly.
+	// Effective horizontal pitch = (island / grid_dim) / density. The cluster
+	// has total extent = grid_dim * effective_pitch = island / density and
+	// is centered on the island. Density > 1 tightens spacing (cluster
+	// shrinks inward); density < 1 spreads it (instances at the edges may
+	// fall off the island and get rejected by the surface-aware placement
+	// guards). Per-instance scale stays 1.0 — VISION.md §1.1 / §3.5 require
+	// asset voxels = world voxels for the substrate's world-grid alignment.
 	m_asset_footprint_voxels = std::max<uint32_t>(m_foliage_size.x, m_foliage_size.y);
 	const int gridDim = std::max(1, m_foliage_grid_dim);
 	const uint32_t islandSize = static_cast<uint32_t>(std::max(1, m_terrain_size));
-	const uint32_t pitch = std::max<uint32_t>(1u, islandSize / static_cast<uint32_t>(gridDim));
-	m_foliage_pitch_voxels = static_cast<int>(pitch);
+	const float density = std::max(0.05f, m_density);
+	const uint32_t naturalPitch = std::max<uint32_t>(1u,
+		islandSize / static_cast<uint32_t>(gridDim));
+	const uint32_t effectivePitch = std::max<uint32_t>(1u,
+		static_cast<uint32_t>(std::round(static_cast<float>(naturalPitch) / density)));
+	m_foliage_pitch_voxels = static_cast<int>(effectivePitch);
 
 	char buf[160];
 	std::snprintf(buf, sizeof(buf),
-		"pitch=%u vx, footprint=%u vx", pitch, m_asset_footprint_voxels);
+		"spacing=%u vx, footprint=%u vx", effectivePitch, m_asset_footprint_voxels);
 	m_foliage_grid_status = buf;
 }
 
@@ -252,6 +302,11 @@ void CombinedRenderer::RegisterPasses(
 			}
 		}
 		if (firstLoad) {
+			// Permute Y-up bake bytes → Z-up; matches the Reload-path conversion
+			// so this asset slot is canonical Z-up regardless of which load
+			// site populated it.
+			PermuteVxaToZUp(firstLoad->framesData, firstLoad->manifest.size,
+			                firstLoad->manifest.frameCount);
 			m_foliage_size        = firstLoad->manifest.size;
 			m_foliage_frame_count = firstLoad->manifest.frameCount;
 			m_use_baked_foliage   = true;
@@ -378,6 +433,13 @@ void CombinedRenderer::RegisterPasses(
 	if (!m_palette) {
 		m_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
 		m_palette->Create();
+	}
+	if (!m_foliage_palette) {
+		// Foliage palette starts as the engine default (which is what the
+		// procedural grass-blade indices 5/64..95 expect). OnPostCompile
+		// re-uploads with the .vxa palette when m_use_baked_foliage flips on.
+		m_foliage_palette = std::make_unique<PaletteResource>(m_device, m_allocator, m_graphics_pool);
+		m_foliage_palette->Create();
 	}
 	if (!m_volume_sampler) {
 		m_volume_sampler = VWrap::Sampler::CreateNearestClamp(m_device);
@@ -644,6 +706,19 @@ void CombinedRenderer::RegisterPasses(
 
 			TerrainTracePC pc{};
 			pc.ndcToWorld = m_camera->GetNDCtoWorldMatrix();
+			// Water plane sits at z = (seaLevel - 0.5) * sz * voxelWorldSize
+			// because the volume is centered at world origin (g_half_extents
+			// in the trace shader). Convert seaLevel ∈ [0,1] → world Z once
+			// per frame and pack into the push constant.
+			{
+				const float sz_f = static_cast<float>(m_terrain_brickmap.volumeSize.z);
+				const float seaY_voxel  = m_terrain_cfg.seaLevel * sz_f;
+				const float seaZ_world  = (seaY_voxel - sz_f * 0.5f) * kWorldVoxelSize;
+				pc.waterParams = glm::vec4(seaZ_world,
+				                           m_water_shallow_depth_voxels,
+				                           m_water_enabled ? 1.0f : 0.0f,
+				                           0.0f);
+			}
 			vkCmdPushConstants(vk_cmd, pctx.graphicsPipeline->GetLayout(),
 				VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
@@ -669,7 +744,9 @@ void CombinedRenderer::RegisterPasses(
 		 .AddBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT)
 		 .BindGraphStorageBuffer(0, m_foliage_instance_buffer)
 		 .BindGraphSampledImage(1, m_foliage_volume, m_volume_sampler)
-		 .BindExternalSampledImage(2, m_palette->GetImageView(), m_palette->GetSampler(),
+		 // Foliage uses its own palette texture so .vxa-imported assets aren't
+		 // forced to share index space with terrain materials.
+		 .BindExternalSampledImage(2, m_foliage_palette->GetImageView(), m_foliage_palette->GetSampler(),
 		                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 		 .BindUniformBufferPerFrame(3, m_meta_ubo_buffers, sizeof(VolumeMetaUbo))
 		 .BindUniformBufferPerFrame(4, m_frame_ubo_buffers, sizeof(CombinedFrameUbo))
@@ -695,7 +772,13 @@ void CombinedRenderer::RegisterPasses(
 			r.size = sizeof(FoliageTracePC);
 			d.pushConstantRanges = { r };
 			d.inputAssembly = PipelineDefaults::TriangleList();
-			d.rasterizer    = PipelineDefaults::BackCullFill(false);
+			// NoCullFill so the bounding cube still rasterizes when the
+			// camera is inside an instance (every face is back-facing from
+			// inside; back-face culling would drop them all). The fragment
+			// shader's past-midpoint discard collapses outside-camera
+			// duplicates back to one fragment per pixel — see the comment
+			// next to that discard in combined_foliage_trace.frag.
+			d.rasterizer    = PipelineDefaults::NoCullFill();
 			d.depthStencil  = PipelineDefaults::DepthTestWrite();
 			d.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 			return d;
@@ -756,6 +839,25 @@ void CombinedRenderer::OnPostCompile(RenderGraph& graph) {
 	// failure mode this avoids.
 	if (m_palette) m_palette->Upload(m_terrain_brickmap.palette.data());
 
+	// Foliage palette — independent of terrain. In baked mode the .vxa
+	// brought its own quantized palette; in procedural mode the engine
+	// default holds the indices the grass-blade compute shader writes to
+	// (5 = sod orange, 64..95 = HSV green band). Re-upload every post-
+	// compile so workspace switches / asset reloads always land the right
+	// table on the GPU.
+	if (m_foliage_palette) {
+		bool uploadedFoliage = false;
+		if (m_use_baked_foliage && m_assets && m_foliage_asset.valid()) {
+			if (const auto* slot = m_assets->GetVoxelVolume(m_foliage_asset)) {
+				m_foliage_palette->Upload(slot->palette.data());
+				uploadedFoliage = true;
+			}
+		}
+		if (!uploadedFoliage) {
+			m_foliage_palette->RestoreDefault();
+		}
+	}
+
 	if (m_terrain_pending_upload && m_graphics_pool && !m_terrain_brickmap.data.empty()) {
 		graph.UploadBufferData(m_terrain_buffer,
 		                       m_terrain_brickmap.data.data(),
@@ -812,6 +914,11 @@ void CombinedRenderer::Reload(const RenderContext& ctx) {
 		auto logger = spdlog::get("Render");
 		auto loaded = voxel_bake::LoadVxa(m_foliage_vxa_path);
 		if (loaded && m_assets && m_foliage_asset.valid()) {
+			// Permute Y-up bake bytes → Z-up (see PermuteVxaToZUp comment).
+			// Mutates loaded->manifest.size to reflect the swapped dims.
+			PermuteVxaToZUp(loaded->framesData, loaded->manifest.size,
+			                loaded->manifest.frameCount);
+
 			m_foliage_size        = loaded->manifest.size;
 			m_foliage_frame_count = loaded->manifest.frameCount;
 			m_use_baked_foliage   = true;
@@ -950,26 +1057,20 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 
 		std::vector<GpuInstance> instances;
 		if (topZ >= seaLevelZ) {
-			// Baked .vxa files store voxels in glTF Y-up convention (the bake
-			// only rotates the rendered mesh via the SceneNode transform; the
-			// volume bytes are mesh-local). The foliage trace shader treats
-			// the volume as Z-up, so we apply the same Y-up→Z-up correction
-			// per-instance — the fragment shader already inverts vInstRot
-			// when DDA-ing the camera ray back into volume-local space, so
-			// this rotates the rendered asset in world without skewing the
-			// volume sampling. Procedural assets are already Z-up; identity.
-			const glm::quat baseRot = m_use_baked_foliage
-				? glm::angleAxis(glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f))
-				: glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-
+			// Identity rotation. Both procedural and baked foliage volumes
+			// are stored Z-up (baked bytes are permuted at load by
+			// PermuteVxaToZUp), so no per-instance Y-up→Z-up correction is
+			// needed. yawIdx=0 keeps the substrate-side inverseYawCell as
+			// a no-op too — instance and asset frames coincide.
 			GpuInstance gi{};
 			gi.position = glm::vec3(
 				static_cast<float>(cx + origin.x),
 				static_cast<float>(cy + origin.y),
 				static_cast<float>(topZ + 1 + origin.z - kPromotedSinkVoxels));
-			gi.scale     = std::max(0.05f, m_density);
-			gi.rotation  = glm::vec4(baseRot.x, baseRot.y, baseRot.z, baseRot.w);
-			gi.yawIdx    = 0;
+			// Scale always 1.0 — VISION.md §1.1 / §3.5 (asset voxels = world voxels).
+			gi.scale      = 1.0f;
+			gi.rotation   = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // identity quat
+			gi.yawIdx     = 0;
 			gi.animOffset = 0.0f;
 			instances.push_back(gi);
 		}
@@ -993,12 +1094,28 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 
 	// ---- Grid placement (default) ----
 	//
-	// Auto-fit the foliage grid to the island footprint. Pitch (in world
-	// voxels) = floor(island_x / grid_dim). Square footprint matches today's
-	// island bake (gridSize.x == gridSize.y).
+	// Two independent user knobs:
+	//   - Grid Size (m_foliage_grid_dim): per-axis instance count.
+	//   - Density  (m_density): tunes horizontal spacing. effective_pitch
+	//     = (island_size / grid_dim) / density. Density > 1 tightens the
+	//     cluster around the island center; density < 1 spreads it (some
+	//     edge instances may fall outside terrain and get rejected by the
+	//     surface-aware guards below).
+	//
+	// Per-instance scale is always 1.0 — VISION.md §1.1/§3.5 commit to one
+	// global voxel pitch, so asset voxels = world voxels everywhere.
 	const int gridDim = std::max(1, m_foliage_grid_dim);
-	const int pitch   = std::max(1, std::min(islandX, islandY) / gridDim);
+	const float density = std::max(0.05f, m_density);
+	const int naturalPitch = std::max(1, std::min(islandX, islandY) / gridDim);
+	const int pitch = std::max(1,
+		static_cast<int>(std::round(static_cast<float>(naturalPitch) / density)));
 	m_foliage_pitch_voxels = pitch;
+
+	// Cluster centered on the island. Cells are addressed in a (gx, gy) grid
+	// that's symmetric about (clusterCx, clusterCy); each cell's center is
+	// (gx - gridDim/2 + 0.5) * pitch in island-local voxels.
+	const float clusterCx = static_cast<float>(islandX) * 0.5f;
+	const float clusterCy = static_cast<float>(islandY) * 0.5f;
 
 	std::mt19937 rng(0xFEED1337u);
 	std::uniform_int_distribution<int> yawIdxDist(0, 3);
@@ -1021,12 +1138,20 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 
 	for (int gy = 0; gy < gridDim; ++gy)
 	for (int gx = 0; gx < gridDim; ++gx) {
-		// Cell-center placement plus a small jitter so the lattice doesn't
-		// look uniform. Jitter stays within ±pitch/4 to keep cells distinct.
-		int wantTx = (gx * islandX) / gridDim + (islandX / gridDim) / 2 + jitterDist(rng);
-		int wantTy = (gy * islandY) / gridDim + (islandY / gridDim) / 2 + jitterDist(rng);
-		wantTx = std::clamp(wantTx, 0, islandX - 1);
-		wantTy = std::clamp(wantTy, 0, islandY - 1);
+		// Cell center symmetric about the island center, spaced by `pitch`.
+		// (gx - gridDim/2 + 0.5) maps gx ∈ [0, gridDim) to a centered offset
+		// from the cluster axis. Plus a small jitter so the lattice doesn't
+		// read as a strict grid; jitter is ±pitch/4 to stay inside the cell.
+		const float relX = (static_cast<float>(gx) - 0.5f * static_cast<float>(gridDim) + 0.5f)
+		                 * static_cast<float>(pitch);
+		const float relY = (static_cast<float>(gy) - 0.5f * static_cast<float>(gridDim) + 0.5f)
+		                 * static_cast<float>(pitch);
+		int wantTx = static_cast<int>(std::round(clusterCx + relX)) + jitterDist(rng);
+		int wantTy = static_cast<int>(std::round(clusterCy + relY)) + jitterDist(rng);
+		// At density < 1 the cluster overflows the island; columns OOB are
+		// silently rejected by the surface guards below (FindTopSolidZ
+		// returns -1 for OOB → fails the inland threshold check).
+		if (wantTx < 0 || wantTx >= islandX || wantTy < 0 || wantTy >= islandY) continue;
 
 		const int topZ = FindTopSolidZ(m_terrain_brickmap, wantTx, wantTy);
 		// (1) Beach exclusion — column must be firmly above the beach band.
@@ -1047,13 +1172,13 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 		});
 		if (maxDelta > kMaxSlopeVoxels) continue;
 
-		// (3) Material check — the surface voxel must be grass. Cheap re-
-		// confirmation that we're on inland terrain (after the beach color-
-		// gradient lands in §6.2 this becomes load-bearing — the elevation
-		// threshold alone isn't a perfect proxy for "is grass band").
-		if (BrickmapVoxelMaterial(m_terrain_brickmap,
-		                          glm::ivec3(wantTx, wantTy, topZ))
-		    != TerrainMaterials::Grass) continue;
+		// (3) Material check — the surface voxel must be in the grass band.
+		// Load-bearing now that the bake assigns one of multiple grass-stop
+		// indices per voxel (lush/std/dry/alpine). The elevation threshold
+		// alone is not a perfect proxy for "is inland grass".
+		if (!TerrainMaterials::IsGrass(BrickmapVoxelMaterial(m_terrain_brickmap,
+		                                                     glm::ivec3(wantTx, wantTy, topZ))))
+			continue;
 
 		// World voxel coords. Cloud is at world origin so cloud-local voxel
 		// position = world voxel position.
@@ -1065,19 +1190,16 @@ void CombinedRenderer::RebuildFoliagePlacement() {
 		gi.position = glm::vec3(static_cast<float>(worldVx.x),
 		                        static_cast<float>(worldVx.y),
 		                        static_cast<float>(worldVx.z));
-		gi.scale    = std::max(0.05f, m_density);
+		// Scale always 1.0 — VISION.md §1.1/§3.5 require asset voxels =
+		// world voxels for substrate alignment. Density tunes lattice
+		// spacing instead (above).
+		gi.scale    = 1.0f;
 		const int yawIdx = yawIdxDist(rng);
 		const float yaw  = static_cast<float>(yawIdx) * 1.57079632679f;
-		// Compose: Y-up→Z-up base (only for baked foliage; procedural is
-		// already Z-up) followed by per-instance yaw around world Z.
-		// Order matters — yaw applied AFTER the up-axis correction operates
-		// in world coords, which is what we want for "rotate the upright
-		// tree around its vertical axis."
-		const glm::quat yawQ = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f));
-		const glm::quat baseRot = m_use_baked_foliage
-			? glm::angleAxis(glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f))
-			: glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-		const glm::quat q = yawQ * baseRot;
+		// Yaw-only rotation around world Z. Volume bytes are already Z-up
+		// for both procedural and baked foliage (the .vxa load permutes via
+		// PermuteVxaToZUp), so there's no Y-up→Z-up component to compose.
+		const glm::quat q = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f));
 		gi.rotation  = glm::vec4(q.x, q.y, q.z, q.w);
 		gi.yawIdx    = yawIdx;
 		gi.animOffset = phaseDist(rng);
@@ -1298,9 +1420,10 @@ std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 		};
 		m_parameters.push_back(std::move(gridDim));
 
-		// Density: per-instance render scale multiplier (gi.scale = m_density).
-		// Independent of grid size — tunes how visually filled the grid feels
-		// without changing the instance count.
+		// Density: tunes horizontal spacing between instances. effective_pitch
+		// = (island/grid_dim) / density. >1 tightens the cluster around the
+		// island center; <1 spreads it. Decoupled from instance count, and
+		// from per-instance render size (scale stays 1.0 — see VISION.md §1.1).
 		TechniqueParameter density;
 		density.label  = "Density";
 		density.type   = TechniqueParameter::Float;
@@ -1309,6 +1432,7 @@ std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 		density.max    = 4.0f;
 		density.format = "%.2f";
 		density.onChanged = [this]() {
+			RecomputeFoliageGrid();
 			m_pending_grid_rebuild = true;
 			if (m_eventSink) m_eventSink({AppEventType::ReloadTechnique});
 		};
@@ -1332,6 +1456,8 @@ std::vector<TechniqueParameter>& CombinedRenderer::GetParameters() {
 		m_parameters.push_back({ "Island Falloff", TechniqueParameter::Float, &m_terrain_cfg.islandFalloff, 0.01f, 0.6f });
 		m_parameters.push_back({ "Sea Level",    TechniqueParameter::Float, &m_terrain_cfg.seaLevel,      0.0f,  0.6f });
 		m_parameters.push_back({ "Beach Width",  TechniqueParameter::Float, &m_terrain_cfg.beachWidth,    0.0f,  0.2f });
+		m_parameters.push_back({ "Water Enabled",       TechniqueParameter::Bool,  &m_water_enabled });
+		m_parameters.push_back({ "Water Shallow Depth", TechniqueParameter::Float, &m_water_shallow_depth_voxels, 0.5f, 32.0f });
 		m_parameters.push_back({ "Seed",         TechniqueParameter::Int,   &m_terrain_seed,       0.0f,   1000000.0f });
 
 		TechniqueParameter bake;

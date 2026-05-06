@@ -10,14 +10,6 @@
 
 namespace {
 
-	// Local aliases for the shared terrain palette indices defined in
-	// PrimitiveFactory.h. Same values; the header surface lets foliage-
-	// placement code consult them without duplicating the constants.
-	constexpr uint8_t MAT_STONE = TerrainMaterials::Stone;
-	constexpr uint8_t MAT_DIRT  = TerrainMaterials::Dirt;
-	constexpr uint8_t MAT_GRASS = TerrainMaterials::Grass;
-	constexpr uint8_t MAT_SAND  = TerrainMaterials::Sand;
-
 	inline uint32_t RoundUpTo8(uint32_t v) {
 		return (v + 7u) & ~7u;
 	}
@@ -27,6 +19,19 @@ namespace {
 	inline float Hash2D(int32_t x, int32_t y, uint32_t seed) {
 		uint32_t h = static_cast<uint32_t>(x) * 374761393u
 		           + static_cast<uint32_t>(y) * 668265263u
+		           + seed * 2654435761u;
+		h ^= (h >> 13);
+		h *= 1274126177u;
+		h ^= (h >> 16);
+		return static_cast<float>(h) * (1.0f / 4294967296.0f);
+	}
+
+	// 3D integer hash — same family as Hash2D with one extra prime so the
+	// per-voxel color jitter doesn't repeat along Z slabs.
+	inline float Hash3D(int32_t x, int32_t y, int32_t z, uint32_t seed) {
+		uint32_t h = static_cast<uint32_t>(x) * 374761393u
+		           + static_cast<uint32_t>(y) * 668265263u
+		           + static_cast<uint32_t>(z) * 1610612741u
 		           + seed * 2654435761u;
 		h ^= (h >> 13);
 		h *= 1274126177u;
@@ -60,6 +65,47 @@ namespace {
 		return Mix(Mix(v00, v10, tx), Mix(v01, v11, tx), ty);
 	}
 
+	// 3D value noise — 8-corner trilinear interpolation with quintic smoothing.
+	// Sampled at integer voxel coords (no scaling) by the per-voxel color
+	// jitter, which makes adjacent voxels effectively decorrelated (since
+	// tx=ty=tz=0 at integer inputs and the result is just Hash3D of the
+	// nearest lattice point). At fractional inputs the smoothing kicks in.
+	float ValueNoise3D(float x, float y, float z, uint32_t seed) {
+		const float fx = std::floor(x);
+		const float fy = std::floor(y);
+		const float fz = std::floor(z);
+		const int32_t ix = static_cast<int32_t>(fx);
+		const int32_t iy = static_cast<int32_t>(fy);
+		const int32_t iz = static_cast<int32_t>(fz);
+		const float tx = Smoothstep5(x - fx);
+		const float ty = Smoothstep5(y - fy);
+		const float tz = Smoothstep5(z - fz);
+
+		const float v000 = Hash3D(ix    , iy    , iz    , seed);
+		const float v100 = Hash3D(ix + 1, iy    , iz    , seed);
+		const float v010 = Hash3D(ix    , iy + 1, iz    , seed);
+		const float v110 = Hash3D(ix + 1, iy + 1, iz    , seed);
+		const float v001 = Hash3D(ix    , iy    , iz + 1, seed);
+		const float v101 = Hash3D(ix + 1, iy    , iz + 1, seed);
+		const float v011 = Hash3D(ix    , iy + 1, iz + 1, seed);
+		const float v111 = Hash3D(ix + 1, iy + 1, iz + 1, seed);
+
+		const float a = Mix(Mix(v000, v100, tx), Mix(v010, v110, tx), ty);
+		const float b = Mix(Mix(v001, v101, tx), Mix(v011, v111, tx), ty);
+		return Mix(a, b, tz);
+	}
+
+	// Quantize t∈[0,1] into one of `count` band stops, return the palette
+	// index `base + bucket`. Used by the per-voxel material picker to step
+	// through a gradient (e.g. 4 grass stops from lush → alpine).
+	inline uint8_t SelectBandStop(uint8_t base, uint8_t count, float t01) {
+		const int n = static_cast<int>(count);
+		int bucket = static_cast<int>(t01 * static_cast<float>(n));
+		if (bucket < 0)        bucket = 0;
+		else if (bucket >= n)  bucket = n - 1;
+		return static_cast<uint8_t>(base + bucket);
+	}
+
 	// Fractional Brownian motion — N octaves of value noise summed with
 	// geometric amplitude/frequency progression. Result normalized to [0, 1].
 	float FBm2D(float x, float y, const IslandTerrainConfig& cfg) {
@@ -80,11 +126,11 @@ namespace {
 	}
 
 	// Build the palette at runtime — derived (not user-configurable yet).
-	// Starts from the engine default (BuildDefaultPalette) so indices the
-	// terrain doesn't claim (5 = sod orange, 64..95 = HSV green band)
-	// remain populated for the foliage shader's lookups. See
-	// docs/COMBINED-FOLIAGE-BLACK-BUG.md for the failure mode that comes
-	// from leaving those entries zeroed.
+	// Starts from the engine default so unclaimed indices retain reasonable
+	// defaults (the terrain bake never samples those slots, so the values
+	// are only ever observed if other code paths reuse this palette).
+	// Populates slots 10..25 with five gradient bands keyed by the
+	// TerrainMaterials::*Base/*Count constants.
 	std::array<uint8_t, 256 * 4> BuildIslandPalette() {
 		auto pal = BuildDefaultPalette();
 		auto put = [&](uint8_t idx, uint8_t r, uint8_t g, uint8_t b) {
@@ -93,14 +139,32 @@ namespace {
 			pal[idx * 4 + 2] = b;
 			pal[idx * 4 + 3] = 255;
 		};
-		// Override the default's shape colors at terrain material slots.
-		// Indices 5..9 keep their default values so foliage / other
-		// callers that overlay onto a fresh terrain palette don't lose
-		// the rest of the engine's color set.
-		put(MAT_STONE,  90,  90,  95);
-		put(MAT_DIRT,   92,  64,  40);
-		put(MAT_GRASS,  60, 130,  50);
-		put(MAT_SAND,  220, 200, 140);
+
+		// Grass band (10..13) — lush near beach → dry/alpine near peak.
+		put(TerrainMaterials::GrassBase + 0,  85, 150,  55);   // LUSH
+		put(TerrainMaterials::GrassBase + 1,  60, 130,  50);   // STD (matches legacy)
+		put(TerrainMaterials::GrassBase + 2, 110, 130,  60);   // DRY
+		put(TerrainMaterials::GrassBase + 3, 130, 140, 120);   // ALPINE
+
+		// Sand band (14..16) — wet at sea level → dry at beach top.
+		put(TerrainMaterials::SandBase  + 0, 170, 150, 105);   // WET
+		put(TerrainMaterials::SandBase  + 1, 220, 200, 140);   // BEACH (matches legacy)
+		put(TerrainMaterials::SandBase  + 2, 235, 220, 175);   // DRY
+
+		// Dirt band (17..19) — topsoil → loam → subsoil with depth.
+		put(TerrainMaterials::DirtBase  + 0, 110,  72,  44);   // TOPSOIL (warm)
+		put(TerrainMaterials::DirtBase  + 1,  92,  64,  40);   // LOAM (matches legacy)
+		put(TerrainMaterials::DirtBase  + 2,  72,  60,  48);   // SUBSOIL (cool)
+
+		// Stone band (20..22) — neutral → cool blue-gray + warm tan-gray.
+		put(TerrainMaterials::StoneBase + 0,  90,  90,  95);   // BASE (matches legacy)
+		put(TerrainMaterials::StoneBase + 1,  85,  95, 105);   // BLUE
+		put(TerrainMaterials::StoneBase + 2, 110, 100,  85);   // TAN
+
+		// Subaqueous band (23..25) — silty/algal near surface → dark deep.
+		put(TerrainMaterials::SubaqBase + 0, 120, 130,  90);   // SHORE silt + algae
+		put(TerrainMaterials::SubaqBase + 1,  70, 100, 110);   // MID muted blue-green
+		put(TerrainMaterials::SubaqBase + 2,  35,  55,  75);   // DEEP dark blue-gray
 		return pal;
 	}
 
@@ -182,7 +246,13 @@ BrickmapData PrimitiveFactory::BakeIslandTerrainBrickmap(const IslandTerrainConf
 			const float dist = std::sqrt(wdx * wdx + wdy * wdy);
 			const float mask = 1.0f - Smoothstep(cfg.islandRadius, cfg.islandRadius + cfg.islandFalloff, dist);
 
-			const float baseline = (cfg.seaLevel + 0.05f) + 0.55f * mask;
+			// Baseline lerps from a submerged offshore floor (mask=0) to a
+			// peak at mask=1. The "shoreline" is where baseline crosses
+			// seaLevel, which falls inside the falloff zone naturally
+			// instead of at the literal grid edge — gives the water plane
+			// real water to show off, and the beach band lands at the
+			// island's actual coast.
+			const float baseline = (cfg.seaLevel - 0.15f) + 0.70f * mask;
 			const float h01 = std::clamp(baseline + 0.35f * mask * (n - 0.5f), 0.0f, 1.0f);
 
 			const uint32_t h = static_cast<uint32_t>(h01 * static_cast<float>(sz - 1));
@@ -191,11 +261,17 @@ BrickmapData PrimitiveFactory::BakeIslandTerrainBrickmap(const IslandTerrainConf
 		}
 	}
 
+	// Underwater band — voxels in [underwaterFloorY, seaY] of underwater
+	// columns get rasterized with the subaqueous gradient so the water
+	// shader can reveal silt-bottom near shore. Computed once; used both
+	// for the reservation math and the per-brick / per-voxel skip guards.
+	const float underwaterFloorY = std::max(0.0f, seaY - cfg.underwaterMaxDepth);
+
 	// Reserve a rough upper bound for the pool so we avoid mid-bake reallocations.
-	// Surface band (seaY .. globalHmax) is everything that *might* contain
-	// bricks; assume worst case all those bricks are populated.
+	// Brick band (underwaterFloorY .. globalHmax) is everything that *might*
+	// contain bricks; assume worst case all those bricks are populated.
 	{
-		const uint32_t bzLo = static_cast<uint32_t>(std::max(0.0f, std::floor(seaY))) / kBrickSize;
+		const uint32_t bzLo = static_cast<uint32_t>(std::floor(underwaterFloorY)) / kBrickSize;
 		const uint32_t bzHi = std::min(gdz, (globalHmax / kBrickSize) + 1);
 		const uint64_t maxBricks = uint64_t(gdx) * gdy * (bzHi > bzLo ? (bzHi - bzLo) : 0);
 		out.data.reserve(out.data.size() + maxBricks * 128);
@@ -213,8 +289,10 @@ BrickmapData PrimitiveFactory::BakeIslandTerrainBrickmap(const IslandTerrainConf
 		const uint32_t z0 = bz * kBrickSize;
 		const uint32_t zMaxInBrick = z0 + kBrickSize - 1;
 
-		// Whole-z-slab below sea is uniformly empty regardless of XY.
-		const bool slabBelowSea = (static_cast<float>(zMaxInBrick) < seaY);
+		// Whole-z-slab below the underwater shallow band is uniformly empty
+		// regardless of XY (deep ocean floor is intentionally not voxelized;
+		// the water plane reads opaque past kUnderwaterMaxDepth).
+		const bool slabBelowSea = (static_cast<float>(zMaxInBrick) < underwaterFloorY);
 
 		for (uint32_t by = 0; by < gdy; ++by) {
 			const uint32_t y0 = by * kBrickSize;
@@ -261,23 +339,74 @@ BrickmapData PrimitiveFactory::BakeIslandTerrainBrickmap(const IslandTerrainConf
 					for (uint32_t lx = 0; lx < kBrickSize; ++lx) {
 						const uint32_t h = heightmap[uint64_t(y0 + ly) * sx + (x0 + lx)];
 						const uint32_t topZ = std::min<uint32_t>(h, sz - 1);
-						const bool isBeachColumn = (static_cast<float>(h) <= beachY);
+						const bool isUnderwaterColumn = (static_cast<float>(topZ) < seaY);
+						const bool isBeachColumn      = !isUnderwaterColumn
+						                                 && (static_cast<float>(h) <= beachY);
 
 						const uint32_t zStart = z0;
 						const uint32_t zEnd   = std::min<uint32_t>(z0 + kBrickSize - 1, topZ);
 						if (zEnd < zStart) continue;
 						for (uint32_t gz = zStart; gz <= zEnd; ++gz) {
-							if (static_cast<float>(gz) < seaY) continue;
+							if (isUnderwaterColumn) {
+								if (static_cast<float>(gz) < underwaterFloorY) continue;
+							} else if (static_cast<float>(gz) < seaY) {
+								continue;
+							}
+
+							// Per-voxel jitter — sampled at integer voxel coords for
+							// fully decorrelated per-voxel hashes (the trilinear
+							// blend collapses to Hash3D at integer inputs). Breaks
+							// up horizontal striping across the gradient bands.
+							const float jraw = ValueNoise3D(static_cast<float>(x0 + lx),
+							                                static_cast<float>(y0 + ly),
+							                                static_cast<float>(gz),
+							                                cfg.seed + 101u);
+							const float jitter = (jraw - 0.5f) * cfg.colorJitter;
 
 							uint8_t mat;
-							if (isBeachColumn) {
-								mat = MAT_SAND;
+							if (isUnderwaterColumn) {
+								// Subaqueous: 0 just below sea (silt) → 1 deep (dark).
+								const float depth = seaY - static_cast<float>(gz);
+								const float t = (cfg.underwaterMaxDepth > 0.0f)
+								                  ? depth / cfg.underwaterMaxDepth
+								                  : 0.0f;
+								mat = SelectBandStop(TerrainMaterials::SubaqBase,
+								                     TerrainMaterials::SubaqCount,
+								                     std::clamp(t + jitter, 0.0f, 1.0f));
+							} else if (isBeachColumn) {
+								// Sand: 0 wet at sea level → 1 dry at beach top.
+								const float denom = std::max(1.0f, beachY - seaY);
+								const float t = (static_cast<float>(gz) - seaY) / denom;
+								mat = SelectBandStop(TerrainMaterials::SandBase,
+								                     TerrainMaterials::SandCount,
+								                     std::clamp(t + jitter, 0.0f, 1.0f));
 							} else if (gz == topZ) {
-								mat = MAT_GRASS;
+								// Grass: lush near beach top → alpine near global peak.
+								// Shared globalHmax reference keeps the vertical scale
+								// consistent across all surface grass voxels.
+								const float denom = std::max(1.0f, static_cast<float>(globalHmax) - beachY);
+								const float t = (static_cast<float>(topZ) - beachY) / denom;
+								mat = SelectBandStop(TerrainMaterials::GrassBase,
+								                     TerrainMaterials::GrassCount,
+								                     std::clamp(t + jitter, 0.0f, 1.0f));
 							} else if (gz + 3u >= topZ) {
-								mat = MAT_DIRT;
+								// Dirt: 0 just below grass → 1 at the bottom of the
+								// 3-voxel topsoil/loam/subsoil band.
+								const float t = static_cast<float>(topZ - gz) / 3.0f;
+								mat = SelectBandStop(TerrainMaterials::DirtBase,
+								                     TerrainMaterials::DirtCount,
+								                     std::clamp(t + jitter, 0.0f, 1.0f));
 							} else {
-								mat = MAT_STONE;
+								// Stone: deeper subsurface. ~16-voxel band depth for
+								// the gradient parameter; cliff cuts beyond saturate
+								// at the deepest stop. Wider jitter range here would
+								// require a per-band knob; for now the shared
+								// colorJitter applies uniformly.
+								const float t = std::clamp(static_cast<float>(topZ - gz - 3u) / 16.0f,
+								                           0.0f, 1.0f);
+								mat = SelectBandStop(TerrainMaterials::StoneBase,
+								                     TerrainMaterials::StoneCount,
+								                     std::clamp(t + jitter, 0.0f, 1.0f));
 							}
 
 							const uint32_t lz = gz - z0;

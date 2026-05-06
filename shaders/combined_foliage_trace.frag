@@ -116,12 +116,52 @@ void main() {
 	g_voxel_local  = (pc.aabbMax - pc.aabbMin) / vec3(meta.size);
 	uMaxIterations = frame.maxIterations;
 
+	// Ray direction in instance-local AABB space. Magnitude doesn't matter
+	// for direction; transpose(scale) preserves it up to a uniform factor
+	// that normalize() removes.
 	mat3 cloudWorldInv = transpose(mat3(pc.cloudWorld));
 	vec3 worldDir = normalize(vWorldPos - frame.cameraPos);
 	vec3 cloudDir = cloudWorldInv * worldDir;
 	vec3 localDir = normalize(quatRotate(quatConjugate(vInstRot), cloudDir));
 
-	vec3 ddaOrigin = vLocalPos + localDir * 0.0001;
+	// Camera position in instance-local AABB space. cloudWorld is a uniform
+	// scale (kWorldVoxelSize) anchored at world origin, so its inverse on
+	// positions is 1 / cloudWorld[0][0]. Then subtract the per-instance
+	// translation, inverse-rotate by the instance quaternion, and divide by
+	// the per-instance scale (always 1.0 by VISION.md §1.1, but kept for
+	// shader parity with the vertex transform).
+	float invCloudScale = 1.0 / pc.cloudWorld[0][0];
+	vec3 cameraInCloud  = frame.cameraPos * invCloudScale;
+	vec3 cameraLocal    = quatRotate(quatConjugate(vInstRot),
+	                                 cameraInCloud - vInstPos) / vInstScale;
+
+	// Ray-AABB clip — same fix shape as voxel_preview.frag in commit
+	// 6a2f8e6 ("voxel preview invisible inside volume"). When the camera
+	// is INSIDE the cube the rasterized fragment's vLocalPos is the back
+	// face (the ray's exit), not the entry. Starting DDA there would walk
+	// the ray straight out of the volume on iteration 0, so we always
+	// start the DDA at the actual entry: tEntry for outside, the camera
+	// itself for inside (tEntry < 0 → tOrigin = 0).
+	vec3 invDir = 1.0 / localDir;
+	vec3 tNear  = (pc.aabbMin - cameraLocal) * invDir;
+	vec3 tFar   = (pc.aabbMax - cameraLocal) * invDir;
+	vec3 t1     = min(tNear, tFar);
+	vec3 t2     = max(tNear, tFar);
+	float tEntry = max(max(t1.x, t1.y), t1.z);
+	float tExit  = min(min(t2.x, t2.y), t2.z);
+
+	// With NoCullFill (so the cube still rasterizes when the camera is
+	// inside, where every face is back-facing), each pixel runs main()
+	// twice when the camera is OUTSIDE — once for the entry face, once
+	// for the exit face. Discard the past-midpoint duplicate so the DDA
+	// runs once per pixel. tEntry > 0 guard keeps the inside-camera
+	// fragment alive (its tHere ≈ tExit, which would otherwise discard).
+	float tHere = dot(vLocalPos - cameraLocal, localDir);
+	if (tEntry > 0.0 && tHere > 0.5 * (tEntry + tExit)) discard;
+
+	float tOrigin = max(tEntry, 0.0);
+	vec3 ddaOrigin = cameraLocal + localDir * (tOrigin + 0.0001);
+
 	DdaHit h = traceLocal(ddaOrigin, localDir);
 
 	if (!h.hit) {

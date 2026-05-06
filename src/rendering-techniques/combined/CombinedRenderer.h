@@ -109,15 +109,23 @@ private:
 
 	// Foliage placement model — two independent user knobs:
 	//   - m_foliage_grid_dim ("Grid Size", Int slider): per-axis instance
-	//     count. island_size / grid_dim = pitch in voxels. Promote-to-scene
-	//     drops this to 1 (single asset at island center); the user dials
-	//     it back up to populate.
-	//   - m_density ("Density", Float slider): per-instance render-scale
-	//     multiplier (gi.scale = m_density). 1.0 = native voxel size; >1
-	//     visually fills space (overlap); <1 leaves visible gaps.
-	// pitch + status text are derived for the inspector readout, updated by
-	// RecomputeFoliageGrid().
-	int   m_foliage_grid_dim = 64;
+	//     count. Total instances = grid_dim². Promote-to-scene drops this
+	//     to 1 (single asset at island center); user dials it back up to
+	//     populate.
+	//   - m_density ("Density", Float slider): tunes the horizontal lattice
+	//     pitch. effective_pitch = (island / grid_dim) / density. >1 packs
+	//     the cluster tighter (and may overlap assets visually); <1 spreads
+	//     it. Cluster is centered on the island.
+	// Per-instance render scale is always 1.0 — VISION.md §1.1 commits to
+	// one global voxel pitch, and §3.5 requires asset voxels = world voxels
+	// for the substrate's world-grid alignment.
+	// m_foliage_pitch_voxels + m_foliage_grid_status are derived; updated
+	// by RecomputeFoliageGrid() for the inspector readout.
+	// Default 1 → on-start the scene shows a single instance at the island
+	// center (the m_foliage_grid_dim==1 branch in RebuildFoliagePlacement).
+	// Promote-to-scene also forces this. Crank up via the inspector slider
+	// to populate the island.
+	int   m_foliage_grid_dim = 1;
 	float m_density          = 1.0f;
 	int   m_foliage_pitch_voxels = 0;
 	uint32_t m_asset_footprint_voxels = 32;
@@ -146,7 +154,16 @@ private:
 	std::vector<void*>                          m_meta_ubo_mapped;
 
 	// ---- Palette + samplers ----
+	// Two palettes — terrain materials and foliage colors live in independent
+	// 256-entry tables. Foliage assets (procedural grass + baked .vxa imports)
+	// own their own color spaces; sharing one palette with terrain forced the
+	// foliage's index range to dodge terrain materials, which broke for any
+	// .vxa whose PaletteQuantizer chose low-numbered indices. Two textures =
+	// no negotiation. Each shader binding stays a single COMBINED_IMAGE_SAMPLER;
+	// the terrain trace samples m_palette, the foliage trace samples
+	// m_foliage_palette.
 	std::unique_ptr<PaletteResource> m_palette;
+	std::unique_ptr<PaletteResource> m_foliage_palette;
 	std::shared_ptr<VWrap::Sampler>  m_volume_sampler;
 
 	// ---- Bindings ----
@@ -169,6 +186,18 @@ private:
 	int  m_terrain_octaves    = 5;
 	int  m_terrain_seed       = 1337;
 	bool m_pending_bake       = true;   // bake on first frame
+
+	// Water plane (Section D §6.3) — v1 placeholder rendered inline in the
+	// terrain trace shader. Lives outside IslandTerrainConfig so toggling
+	// either knob doesn't dirty m_pending_bake (these are render-state, not
+	// bake-state). Migrates out when the future WaterTechnique (VISION §2.3)
+	// becomes the dynamic pillar.
+	bool  m_water_enabled              = true;
+	// Default 2 voxels: opacity ramps to opaque almost immediately past
+	// the shoreline. The water reads as "see-through right at the beach,
+	// solid blue everywhere else" — silt is visible only in the very
+	// shallowest sliver, which sells the shore transition crisply.
+	float m_water_shallow_depth_voxels = 2.0f;
 
 	int  m_max_iterations  = 256;          // primary trace outer cap
 	int  m_max_shadow_brick_steps = 256;   // shadow trace outer cap (brick steps)

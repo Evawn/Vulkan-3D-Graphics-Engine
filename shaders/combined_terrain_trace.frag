@@ -19,9 +19,17 @@
 layout(location = 0) in vec3 texCoords;
 
 // Per-draw push constant — primary-trace geometry only. All shading state
-// lives in the FrameUbo.
+// lives in the FrameUbo. waterParams is the v1 water-plane state inline:
+//   x = seaLevelWorldZ      (world-space Z of the flat water surface)
+//   y = shallowDepthVoxels  (ray-distance, in voxels, for opacity ramp)
+//   z = enabled             (0.0 = disabled / see-through, > 0.5 = on)
+//   w = pad
+// Future dynamic-pillar WaterTechnique (VISION §2.3) will replace this block
+// with its own technique + descriptors; the inline placeholder keeps the
+// migration local to this shader and TerrainTracePC.
 layout(push_constant) uniform PushConstantBlock {
 	mat4  ndcToWorld;
+	vec4  waterParams;
 } pc;
 
 // --- Bindings ---
@@ -304,50 +312,106 @@ void main() {
 
 	Hit h = trace(rayOrigin, direction);
 
-	if (!h.hit) {
-		// Sky already drawn by the sky pre-pass — discard so it shows through.
-		discard;
+	// Lift terrain shading into a stash so the water-plane composite can
+	// optionally paint on top. Defaults represent "no terrain hit": +∞ ray
+	// distance and far-plane depth.
+	vec3  terrainColorRGB = vec3(0.0);
+	float terrainClipZ    = 1.0;
+	float terrainT        = 1e30;
+
+	if (h.hit) {
+		vec4 albedo = texelFetch(palette_sampler, ivec2(h.matIdx, 0), 0);
+		vec3 normal = -vec3(h.step_sign) * vec3(h.face);
+		vec3 hitPos = rayOrigin + direction * h.t;
+
+		float ao = 1.0;
+		if (frame.aoStrength > 0.0) {
+			ivec3 hitVoxel = h.brick_cell * int(g_brick_size) + h.local;
+			float raw = cornerAO(hitVoxel, h.face, h.step_sign, hitPos);
+			ao = mix(1.0, raw, frame.aoStrength);
+		}
+
+		float NdotL = max(0.0, dot(normal, frame.sunDirection));
+		float shadow = 1.0;
+		if (frame.shadowsEnabled != 0 && NdotL > 0.0) {
+			// Receiver's own world voxel — exempt from the shadow brickmap test
+			// so the hit face doesn't self-shadow. The integer-grid skip is the
+			// only self-occlusion guard needed; no bias on hitPos.
+			ivec3 hitWorldVoxel = ivec3(floor(hitPos / g_voxel_world_size));
+
+			const float kShadowMaxDist = 64.0;
+			shadow = traceShadowWorld(hitPos, frame.sunDirection,
+			                          kShadowMaxDist, frame.worldVoxelSize,
+			                          hitWorldVoxel);
+		}
+
+		// Inlined equivalent of lighting.glsl::shadeLit, using FrameUbo fields.
+		vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
+		vec3 direct  = frame.sunColor * frame.sunIntensity * NdotL * shadow;
+		vec3 lit = albedo.rgb * (ambient + direct);
+		if (frame.debugColor != 0) {
+			lit -= vec3(float(h.total_iters) / 250.0);
+		}
+		terrainColorRGB = lit;
+		terrainT = h.t;
+
+		// Vulkan + GLM_FORCE_DEPTH_ZERO_TO_ONE → clipPos.z/w already in [0, 1].
+		vec4 clipPos = frame.viewProj * vec4(hitPos, 1.0);
+		terrainClipZ = clipPos.z / clipPos.w;
 	}
 
-	vec4 albedo = texelFetch(palette_sampler, ivec2(h.matIdx, 0), 0);
-	vec3 normal = -vec3(h.step_sign) * vec3(h.face);
-	vec3 hitPos = rayOrigin + direction * h.t;
+	// Water plane composite (Section D §6.3). Single-bounce flat plane —
+	// future dynamic-pillar WaterTechnique replaces this block.
+	bool composited = false;
+	if (pc.waterParams.z > 0.5 && abs(direction.z) > 1e-6) {
+		float seaZ   = pc.waterParams.x;
+		float tWater = (seaZ - rayOrigin.z) / direction.z;
+		if (tWater > 0.0 && tWater < terrainT) {
+			float shallowDepthWorld  = pc.waterParams.y * frame.worldVoxelSize;
+			float waterDepthAlongRay = (terrainT - tWater) * abs(direction.z);
+			float opacity            = smoothstep(0.0, shallowDepthWorld, waterDepthAlongRay);
 
-	float ao = 1.0;
-	if (frame.aoStrength > 0.0) {
-		ivec3 hitVoxel = h.brick_cell * int(g_brick_size) + h.local;
-		float raw = cornerAO(hitVoxel, h.face, h.step_sign, hitPos);
-		ao = mix(1.0, raw, frame.aoStrength);
+			// Stylized (not physical) water shading. Soft sea-green near
+			// shore, painterly deep blue offshore. Schlick Fresnel + simple
+			// Blinn-Phong sun specular sell the surface plane.
+			const vec3  kShallowColor = vec3(0.45, 0.65, 0.65);
+			const vec3  kDeepColor    = vec3(0.05, 0.18, 0.32);
+			const float kF0Water      = 0.05;
+			const float kShininess    = 96.0;
+			const vec3  kPlaneNormal  = vec3(0.0, 0.0, 1.0);
+
+			vec3  viewDir = -direction;
+			float fresnel = kF0Water + (1.0 - kF0Water) *
+			                pow(1.0 - max(0.0, dot(viewDir, kPlaneNormal)), 5.0);
+			vec3  reflDir = reflect(direction, kPlaneNormal);
+			float spec    = pow(max(0.0, dot(reflDir, -frame.sunDirection)), kShininess);
+
+			vec3 waterColor = mix(kShallowColor, kDeepColor, opacity);
+			waterColor      = mix(waterColor, frame.skyColor, fresnel * 0.5);
+			waterColor     += spec * frame.sunColor * frame.sunIntensity;
+
+			// Compose against terrain (if any) or sky.
+			vec3 baseColor  = h.hit ? terrainColorRGB : frame.skyColor;
+			vec3 finalColor = mix(baseColor, waterColor, opacity);
+
+			// Depth at the water plane so foliage rendered after this pass
+			// z-tests against the surface, not the silt below.
+			vec3 waterHit  = rayOrigin + direction * tWater;
+			vec4 waterClip = frame.viewProj * vec4(waterHit, 1.0);
+			outColor       = vec4(finalColor, 1.0);
+			gl_FragDepth   = waterClip.z / waterClip.w;
+			composited     = true;
+		}
 	}
 
-	float NdotL = max(0.0, dot(normal, frame.sunDirection));
-	float shadow = 1.0;
-	if (frame.shadowsEnabled != 0 && NdotL > 0.0) {
-		// Receiver's own world voxel — exempt from the shadow brickmap test
-		// so the hit face doesn't self-shadow. The integer-grid skip is the
-		// only self-occlusion guard needed; no bias on hitPos.
-		ivec3 hitWorldVoxel = ivec3(floor(hitPos / g_voxel_world_size));
-
-		const float kShadowMaxDist = 64.0;
-		shadow = traceShadowWorld(hitPos, frame.sunDirection,
-		                          kShadowMaxDist, frame.worldVoxelSize,
-		                          hitWorldVoxel);
+	if (!composited) {
+		if (h.hit) {
+			outColor     = vec4(terrainColorRGB, 1.0);
+			// Foliage pass (LoadOp::Load on depth) z-tests against this.
+			gl_FragDepth = terrainClipZ;
+		} else {
+			// Sky already drawn by sky pre-pass — discard so it shows through.
+			discard;
+		}
 	}
-
-	// Inlined equivalent of lighting.glsl::shadeLit, using FrameUbo fields.
-	vec3 ambient = frame.skyColor * frame.ambientIntensity * ao;
-	vec3 direct  = frame.sunColor * frame.sunIntensity * NdotL * shadow;
-	vec4 color = vec4(albedo.rgb * (ambient + direct), 1.0);
-	if (frame.debugColor != 0) {
-		color -= vec4(vec3(float(h.total_iters) / 250.0), 0.0);
-	}
-	outColor = color;
-
-	// Write gl_FragDepth at the terrain voxel hit so the foliage pass (which
-	// runs after this one with LoadOp::Load on depth) z-tests correctly. The
-	// fullscreen quad's vertex output sits at NDC z = 0, so without an
-	// explicit FragDepth write everything would render IN FRONT of foliage.
-	// Vulkan + GLM_FORCE_DEPTH_ZERO_TO_ONE → clipPos.z/w already in [0, 1].
-	vec4 clipPos = frame.viewProj * vec4(hitPos, 1.0);
-	gl_FragDepth = clipPos.z / clipPos.w;
 }

@@ -20,16 +20,24 @@
 // Engine convention reminder: Z is up. gridSize is (X, Y) horizontal voxels;
 // maxHeight is the Z extent.
 
-// Terrain material palette indices. Reserved low-numbered slots; the rest of
-// the 256-entry palette is populated by BuildIslandPalette / BuildDefault
-// Palette so foliage indices (5+) remain available. Surface-aware foliage
-// placement consumes these to gate "is this column inland grass?" without
-// re-deriving the threshold from elevation alone.
+// Terrain material palette layout. Each surface band (grass / sand / dirt /
+// stone / subaqueous) occupies a contiguous run of palette slots so the bake
+// can pick a per-voxel "stop" along the band and downstream consumers can ask
+// "is this material in the grass band?" via the IsX predicates. Slots are
+// claimed in the 10..25 range, leaving 0..9 and 26..255 free for primitives
+// and foliage. Surface-aware foliage placement reads back surface material
+// indices and uses IsGrass(...) to gate "is this column inland grass?"
+// without re-deriving the threshold from elevation alone.
 namespace TerrainMaterials {
-	constexpr uint8_t Stone = 1;
-	constexpr uint8_t Dirt  = 2;
-	constexpr uint8_t Grass = 3;
-	constexpr uint8_t Sand  = 4;
+	constexpr uint8_t GrassBase = 10; constexpr uint8_t GrassCount = 4;
+	constexpr uint8_t SandBase  = 14; constexpr uint8_t SandCount  = 3;
+	constexpr uint8_t DirtBase  = 17; constexpr uint8_t DirtCount  = 3;
+	constexpr uint8_t StoneBase = 20; constexpr uint8_t StoneCount = 3;
+	constexpr uint8_t SubaqBase = 23; constexpr uint8_t SubaqCount = 3;
+
+	constexpr bool IsGrass(uint8_t m) { return m >= GrassBase && m < GrassBase + GrassCount; }
+	constexpr bool IsSand (uint8_t m) { return m >= SandBase  && m < SandBase  + SandCount;  }
+	constexpr bool IsSubaq(uint8_t m) { return m >= SubaqBase && m < SubaqBase + SubaqCount; }
 }
 
 struct IslandTerrainConfig {
@@ -61,7 +69,20 @@ struct IslandTerrainConfig {
 	// Sea level — Y voxels below seaLevel * maxHeight are empty (no water for v1).
 	// Beach width is the band above sea level rendered as sand instead of grass.
 	float      seaLevel       = 0.20f;
-	float      beachWidth     = 0.04f;
+	float      beachWidth     = 0.08f;
+
+	// Per-voxel color jitter — amplitude (in band-parameter units, [0,1]) of
+	// the noise nudge applied to each voxel's gradient-band lookup, so the
+	// chosen palette stop varies voxel-to-voxel inside each band. Set to 0
+	// for crisply banded surfaces; the default chunky look is around 0.15.
+	float      colorJitter    = 0.15f;
+
+	// Underwater band — voxels in the depth interval [seaLevel - underwater
+	// MaxDepth, seaLevel] of an underwater column are voxelized with the
+	// subaqueous gradient so the water shader can reveal silt-bottom near
+	// shore. Deeper voxels are skipped (saves brick budget; the water plane
+	// reads opaque past the shallow band anyway).
+	float      underwaterMaxDepth = 24.0f;
 
 	uint32_t   seed           = 1337;
 };
